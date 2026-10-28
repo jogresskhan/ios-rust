@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
   schedule:
     - cron: "0 6 * * 1" # weekly ledger re-check
 
@@ -17,5 +18,4 @@ jobs:
       - run: cargo check --all-targets
       - run: cargo test --all
       - name: Parity ledger gate (must not regress silently)
-        run: |
-          ./target/release/ios-rust parity || cargo run --quiet -- parity
+        run: cargo run --quiet -- parity

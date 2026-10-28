@@ -9,6 +9,17 @@
 //!    framebuffer exactly as the proven ios-sweet display path does,
 //!    driven by real IPSW assets
 //! 6. [`bootargs`] compose boot args + device tree for the machine
+
+//! Host restore stack (the X-gaps from the ios-sweet-rust parity matrix,
+//! closed here so the Rust engine can drive the full restore flow):
+//! * [`plist_lite`] — the wire codec every protocol below shares
+//! * [`usbmux`] — libusbmuxd-class daemon client: listen/connect tunnel
+//! * [`restored_proto`] — `restored` protocol v14 client (Hello,
+//!   QueryValue, StartRestore, Status/Error checkpoints)
+//! * [`asr`] — ASR validation + payload streaming (Initiate → packet
+//!   info → OOBData → Payload → raw image push)
+//! * [`tss`] — libauthinstall-class TSS request building + ApImg4Ticket
+//!   (IM4M) extraction/validation
 //!
 //! Honest gaps live in PARITY.md (APFS mount, AES-XTS keys, 'restored'
 //! RestoreOptions wall).
@@ -27,3 +38,5 @@ pub mod usbmux;
 pub mod restored_proto;
 
 pub mod asr;
+
+pub mod tss;

@@ -36,6 +36,21 @@ implemented · **60** done once/offline · **50** partial · **40** reader/struc
 | ANS2/NVMe queue skeleton | ans.c | 25 | Apple NVMe command format port |
 | Machine assembly (7 devices on bus) | t8030.c init flow | 50 | verify symbolic bases vs t8030.c, then wire IRQs |
 
+## Layer 2.5 — host restore stack (usbmux → restored → ASR → TSS)
+
+The X-gaps from the ios-sweet-rust parity matrix, closed in `crates/restore`
+(std-only, no new deps). Protocol fidelity ported from idevicerestore
+`asr.c`, libusbmuxd, libimobiledevice `restored.c`, cross-checked against our
+own `restored_external` 18A5351d decompilation (RE-FINDINGS.md).
+
+| item | counterpart | % | gate to flip |
+|---|---|---|---|
+| plist_lite XML codec (read+write, envelope, base64, entities) | libplist plist_to_xml/plist_from_xml | 90 | byte-capture diff vs real usbmuxd/restored traffic |
+| usbmux host client (Listen/Connect tunnel, plist + legacy events, port swap) | libusbmuxd | 90 | session capture against a real usbmuxd socket |
+| restored protocol client v14 (Hello, QueryValue, StartRestore, Status/Error/Progress, checkpoint decode) | libimobiledevice restored.c | 75 | replay a captured device Status stream end-to-end |
+| ASR host (Initiate → packet-info → OOBData → Payload → chunked image push) | idevicerestore asr.c | 90 | 7.38 GB rootfs push replay with chunk checksums |
+| TSS request + ApImg4Ticket extraction/IM4M structural gate | libauthinstall | 75 | signing-server capture replay |
+
 ## Layer 3 — CPU execution (the big one)
 
 | item | % | note |
@@ -52,7 +67,7 @@ implemented · **60** done once/offline · **50** partial · **40** reader/struc
 | gate | status |
 |---|---|
 | G1 restore-ramdisk boot (C engine lane) | ✅ proven (run #74) |
-| G2 ASR/invert stage | ⛔ frontier (diag refocused, 2156ae0) |
+| G2 ASR/invert stage | ⛔ frontier (diag refocused, 2156ae0) — host ASR stack now in-tree (`asr.rs`) to drive it from Rust |
 | G3 install → launchd on restored APFS | pending G2 |
 | G4 homescreen via ios-rust engine | pending G3 + CPU exec |
 

@@ -1,0 +1,7 @@
+[package]
+name = "asr"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license = "GPL-2.0-or-later"
+description = "ASR client (idevicerestore asr.c parity): Initiate/OOBData/Payload state machine, 128KiB chunks + SHA-1 checksum tails"

@@ -16,6 +16,12 @@ members = [
     "crates/restore",
     "crates/gui",
     "crates/ios-rust",
+    "crates/plist",
+    "crates/usbmux",
+    "crates/asr",
+    "crates/restored",
+    "crates/authinstall",
+    "crates/apfs",
 ]
 
 [workspace.package]

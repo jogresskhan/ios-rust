@@ -11,8 +11,8 @@ pub struct AdtNode {
     pub children: Vec<AdtNode>,
 }
 
-fn fourcc(buf: &[u8], off: usize) -> String {
-    let end = (off + 8).min(buf.len());
+fn dt_name(buf: &[u8], off: usize) -> String {
+    let end = (off + 32).min(buf.len());
     let raw = &buf[off..end];
     let s = std::str::from_utf8(raw).unwrap_or("");
     s.trim_end_matches('\0').trim().to_string()
@@ -36,7 +36,9 @@ impl AdtNode {
         }
         let _total_len = be32(buf, off + 4).ok_or("adt: no node len")?;
         let mut node = AdtNode::default();
-        let mut p = off + 8;
+        // name: 8-byte NUL-padded field right after the header
+        node.name = dt_name(buf, off + 8);
+        let mut p = off + 40;
         loop {
             if p + 4 > buf.len() {
                 return Err("adt: truncated node body".into());
@@ -52,8 +54,8 @@ impl AdtNode {
                 p = next;
             } else if magic == PROP_MAGIC {
                 let plen = be32(buf, p + 4).ok_or("adt: no prop len")?;
-                let name = fourcc(buf, p + 8);
-                let voff = p + 16;
+                let name = dt_name(buf, p + 8);
+                let voff = p + 40;
                 let vend = voff + plen as usize;
                 if vend > buf.len() {
                     return Err("adt: prop overruns buffer".into());
@@ -84,11 +86,16 @@ impl AdtNode {
         out.extend_from_slice(NODE_MAGIC);
         out.extend_from_slice(&0u32.to_be_bytes()); // patched below
         let len_mark = out.len() - 4;
+        let mut name = [0u8; 32];
+        for (i, b) in self.name.as_bytes().iter().take(32).enumerate() {
+            name[i] = *b;
+        }
+        out.extend_from_slice(&name);
         for prop in &self.props {
             out.extend_from_slice(PROP_MAGIC);
             out.extend_from_slice(&(prop.data.len() as u32).to_be_bytes());
-            let mut name = [0u8; 8];
-            for (i, b) in prop.name.as_bytes().iter().take(8).enumerate() {
+            let mut name = [0u8; 32];
+            for (i, b) in prop.name.as_bytes().iter().take(32).enumerate() {
                 name[i] = *b;
             }
             out.extend_from_slice(&name);
@@ -209,7 +216,7 @@ mod tests {
 
     fn sample_tree() -> Vec<u8> {
         let mut root = AdtNode::default();
-        root.name = "device-tree".into();
+        root.name = "devtree".into();
         root.set_prop_string("target-type", "T8030");
         let mut armio = AdtNode { name: "arm-io".into(), ..Default::default() };
         armio.set_prop_string("compatible", "arm-io,t8030\0arm-io\0");
@@ -228,7 +235,7 @@ mod tests {
     fn roundtrip_parse_find() {
         let buf = sample_tree();
         let root = AdtNode::parse(&buf).expect("parse");
-        assert_eq!(root.name, "device-tree");
+        assert_eq!(root.name, "devtree");
         let soc = root.find("arm-io").expect("arm-io");
         assert!(soc.compatible().iter().any(|c| c.contains("t8030")));
         let aic = soc.child("aic").expect("aic");

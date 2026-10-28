@@ -59,7 +59,7 @@ impl Aic {
         let idx = ((off - base_off) / 4) as usize;
         let w = (idx / 2) as usize;
         match w {
-            _ if idx % 2 == 0 && w < MAX_IRQ / 64 => match base_off {
+            _ if w < MAX_IRQ / 64 => match base_off {
                 REG_AIC_INTERRUPT_ENABLE => self.enabled[w],
                 REG_AIC_INTERRUPT_PEND => self.pending_hw[w] | self.pending_sw[w],
                 REG_AIC_SW_SET => self.pending_sw[w],
@@ -70,29 +70,35 @@ impl Aic {
     }
 
     fn write_bank(&mut self, base_off: u64, off: u64, val: u64) {
-        let idx = ((off - base_off) / 4) as usize;
-        let w = (idx / 2) as usize;
+        // SET bank = first 0x80 bytes, CLR bank = second 0x80 (real AIC layout)
+        let off = off - base_off; // make region-relative
+        let (set, word_idx) = if off < 0x80 {
+            (true, (off / 4) as usize)
+        } else {
+            (false, ((off - 0x80) / 4) as usize)
+        };
+        let w = word_idx;
         if w >= MAX_IRQ / 64 {
             return;
         }
         match base_off {
             REG_AIC_INTERRUPT_ENABLE => {
-                if idx % 2 == 0 {
+                if set {
                     self.enabled[w] |= val;
                 } else {
                     self.enabled[w] &= !val;
                 }
             }
             REG_AIC_SW_SET => {
-                if idx % 2 == 0 {
+                if set {
                     self.pending_sw[w] |= val;
                 } else {
                     self.pending_sw[w] &= !val;
                 }
             }
             REG_AIC_SW_CLR => {
-                if idx % 2 == 0 {
-                    self.pending_sw[w] &= !val;
+                if set {
+                    self.pending_sw[w] |= val;
                 }
             }
             _ => {}
@@ -123,7 +129,7 @@ impl Device for Aic {
     fn read(&mut self, off: u64, _size: u8) -> u64 {
         match off {
             REG_AIC_REV => 0x1, // aic,1
-            REG_AIC_CAP0 => self.num_irqs.min(640),
+            REG_AIC_CAP0 => self.num_irqs.min(640) as u64,
             REG_AIC_CAP1 => 0x0,
             REG_AIC_WHOAMI => 0x0, // CPU0
             REG_AIC_IACK => {
@@ -132,8 +138,11 @@ impl Device for Aic {
                     if pend != 0 {
                         let b = pend.trailing_zeros();
                         let irq = (w * 64) as u32 + b;
-                        // ack: clear SW, HW stays until device deasserts
+                        // ack: clear the pending latch; a level device
+                        // re-asserts by calling set_irq again (no live
+                        // line tracking in this census model).
                         self.pending_sw[w] &= !(1 << b);
+                        self.pending_hw[w] &= !(1 << b);
                         return irq as u64;
                     }
                 }
@@ -182,7 +191,7 @@ mod tests {
     fn enable_iack_order() {
         let mut a = Aic::new(640);
         a.set_irq(5, true);
-        a.write(REG_AIC_INTERRUPT_ENABLE + 4, 4, 1 << 5); // enable SET word for irq5
+        a.write(REG_AIC_INTERRUPT_ENABLE, 4, 1 << 5); // enable bit for irq5 (word 0)
         assert_eq!(a.read(REG_AIC_IACK, 4), 5);
         assert_eq!(a.read(REG_AIC_IACK, 4), 0xFFFF_FFFF); // acked
     }

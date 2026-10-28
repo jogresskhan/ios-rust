@@ -16,3 +16,6 @@ qemu-util = { path = "../qemu-util" }
 soc-t8030 = { path = "../soc-t8030" }
 vault = { path = "../vault" }
 virt = { path = "../virt" }
+vm-core = { path = "../vm-core" }
+a13-cpu = { path = "../a13-cpu" }
+apple-soc = { path = "../apple-soc" }

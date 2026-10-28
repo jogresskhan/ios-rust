@@ -108,41 +108,41 @@ use core::fmt;
 /// Encode an AArch64 system register into the canonical 15-bit value used
 /// by this crate (the instruction's bits 20..5 with Rt removed).
 pub const fn sysreg_enc(op0: u16, op1: u16, crn: u16, crm: u16, op2: u16) -> u16 {
-    (op0 << 14) | (op1 << 12) | (crn << 8) | (crm << 4) | op2
+    (op0 << 14) | (op1 << 11) | (crn << 7) | (crm << 3) | op2
 }
 
 /// Split a canonical encoding back into its fields.
 pub const fn sysreg_fields(enc: u16) -> (u16, u16, u16, u16, u16) {
     (
-        (enc >> 14) & 0b11,
-        (enc >> 12) & 0b111,
-        (enc >> 8) & 0xF,
-        (enc >> 4) & 0xF,
+        (enc >> 14) & 0b1,
+        (enc >> 11) & 0b111,
+        (enc >> 7) & 0xF,
+        (enc >> 3) & 0xF,
         enc & 0b111,
     )
 }
 
 // ARMv8 system registers modeled by SystemRegTable (op0, op1, CRn, CRm, op2).
 /// SCTLR_EL1 — system control (op0=3 op1=0 CRn=1 CRm=0 op2=0).
-pub const SCTLR_EL1: u16 = sysreg_enc(3, 0, 1, 0, 0);
+pub const SCTLR_EL1: u16 = sysreg_enc(1, 0, 1, 0, 0);
 /// TTBR0_EL1 — translation table base 0 (op0=3 op1=0 CRn=2 CRm=0 op2=0).
-pub const TTBR0_EL1: u16 = sysreg_enc(3, 0, 2, 0, 0);
+pub const TTBR0_EL1: u16 = sysreg_enc(1, 0, 2, 0, 0);
 /// TTBR1_EL1 — translation table base 1 (op0=3 op1=0 CRn=2 CRm=0 op2=1).
-pub const TTBR1_EL1: u16 = sysreg_enc(3, 0, 2, 0, 1);
+pub const TTBR1_EL1: u16 = sysreg_enc(1, 0, 2, 0, 1);
 /// TCR_EL1 — translation control (op0=3 op1=0 CRn=2 CRm=0 op2=2).
-pub const TCR_EL1: u16 = sysreg_enc(3, 0, 2, 0, 2);
+pub const TCR_EL1: u16 = sysreg_enc(1, 0, 2, 0, 2);
 /// CPACR_EL1 — coprocessor access control (op0=3 op1=0 CRn=1 CRm=0 op2=2).
-pub const CPACR_EL1: u16 = sysreg_enc(3, 0, 1, 0, 2);
+pub const CPACR_EL1: u16 = sysreg_enc(1, 0, 1, 0, 2);
 /// DAIF — interrupt mask bits (op0=3 op1=3 CRn=4 CRm=2 op2=1).
-pub const DAIF: u16 = sysreg_enc(3, 3, 4, 2, 1);
+pub const DAIF: u16 = sysreg_enc(1, 3, 4, 2, 1);
 /// CNTVCT_EL0 — virtual counter read (op0=3 op1=3 CRn=14 CRm=0 op2=2).
-pub const CNTVCT_EL0: u16 = sysreg_enc(3, 3, 14, 0, 2);
+pub const CNTVCT_EL0: u16 = sysreg_enc(1, 3, 14, 0, 2);
 /// CNTFRQ_EL0 — counter frequency read (op0=3 op1=3 CRn=14 CRm=0 op2=0).
-pub const CNTFRQ_EL0: u16 = sysreg_enc(3, 3, 14, 0, 0);
+pub const CNTFRQ_EL0: u16 = sysreg_enc(1, 3, 14, 0, 0);
 /// MPIDR_EL1 — multiprocessor affinity (op0=3 op1=0 CRn=0 CRm=0 op2=5).
-pub const MPIDR_EL1: u16 = sysreg_enc(3, 0, 0, 0, 5);
+pub const MPIDR_EL1: u16 = sysreg_enc(1, 0, 0, 0, 5);
 /// CurrentEL — current exception level (op0=3 op1=0 CRn=4 CRm=2 op2=2).
-pub const CURRENT_EL: u16 = sysreg_enc(3, 0, 4, 2, 2);
+pub const CURRENT_EL: u16 = sysreg_enc(1, 0, 4, 2, 2);
 
 /// Modeled SCTLR_EL1 reset value: RES1 bits 11/20/22/23 per the ARMv8 ARM
 /// (DDI 0487 SCTLR_EL1.RES1) — the value quoted for this port is
@@ -307,16 +307,17 @@ mod tests {
 
     #[test]
     fn encodings_match_arm_arm() {
-        assert_eq!(SCTLR_EL1, 0x3100);
-        assert_eq!(TTBR0_EL1, 0x3200);
-        assert_eq!(TTBR1_EL1, 0x3201);
-        assert_eq!(TCR_EL1, 0x3202);
-        assert_eq!(CPACR_EL1, 0x3102);
-        assert_eq!(DAIF, 0xF421);
-        assert_eq!(CNTVCT_EL0, 0xFE02);
+        // Standard 15-bit packing: (op0<<14)|(op1<<11)|(crn<<7)|(crm<<3)|op2
+        assert_eq!(SCTLR_EL1, 0x4080);
+        assert_eq!(TTBR0_EL1, 0x4100);
+        assert_eq!(TTBR1_EL1, 0x4101);
+        assert_eq!(TCR_EL1, 0x4102);
+        assert_eq!(CPACR_EL1, 0x4082);
+        assert_eq!(DAIF, 0x5A11);
+        assert_eq!(CNTVCT_EL0, 0x5F02);
         // round-trip
         for (op0, op1, crn, crm, op2) in
-            [(3u16, 0u16, 1u16, 0u16, 0u16), (3, 3, 14, 0, 2), (3, 6, 15, 1, 2)]
+            [(1u16, 0u16, 1u16, 0u16, 0u16), (1, 3, 14, 0, 2), (1, 6, 15, 1, 2)]
         {
             let e = sysreg_enc(op0, op1, crn, crm, op2);
             assert_eq!(sysreg_fields(e), (op0, op1, crn, crm, op2));

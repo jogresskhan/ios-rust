@@ -35,4 +35,4 @@ pub mod wdt;
 
 pub mod displaypipe;
 
-pub use vm_core::{Bus, Device, FrameBuffer};
+pub use vm_core::{Bus, Device, FrameBuffer, framebuffer::FrameSink};

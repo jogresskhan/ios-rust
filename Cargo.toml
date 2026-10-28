@@ -7,6 +7,14 @@ members = [
     "crates/virt",
     "crates/ipsw",
     "crates/vault",
+    "crates/vm-core",
+    "crates/a13-cpu",
+    "crates/adt",
+    "crates/img4",
+    "crates/macho",
+    "crates/apple-soc",
+    "crates/restore",
+    "crates/gui",
     "crates/ios-rust",
 ]
 

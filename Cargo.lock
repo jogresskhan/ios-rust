@@ -3,10 +3,30 @@
 version = 4
 
 [[package]]
+name = "a13-cpu"
+version = "0.1.0"
+dependencies = [
+ "vm-core",
+]
+
+[[package]]
+name = "adt"
+version = "0.1.0"
+
+[[package]]
 name = "anyhow"
 version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
+
+[[package]]
+name = "apple-soc"
+version = "0.1.0"
+dependencies = [
+ "a13-cpu",
+ "adt",
+ "vm-core",
+]
 
 [[package]]
 name = "atomic-waker"
@@ -256,6 +276,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "gui"
+version = "0.1.0"
+dependencies = [
+ "vm-core",
+]
+
+[[package]]
 name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -464,10 +491,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "img4"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "sha2",
+]
+
+[[package]]
 name = "ios-rust"
 version = "0.1.0"
 dependencies = [
+ "a13-cpu",
  "anyhow",
+ "apple-soc",
  "devices",
  "hex",
  "ipsw",
@@ -477,6 +514,7 @@ dependencies = [
  "tokio",
  "vault",
  "virt",
+ "vm-core",
 ]
 
 [[package]]
@@ -537,6 +575,10 @@ name = "lru-slab"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
+
+[[package]]
+name = "macho"
+version = "0.1.0"
 
 [[package]]
 name = "memchr"
@@ -734,6 +776,19 @@ dependencies = [
  "wasm-streams",
  "web-sys",
  "webpki-roots",
+]
+
+[[package]]
+name = "restore"
+version = "0.1.0"
+dependencies = [
+ "adt",
+ "cc",
+ "hex",
+ "img4",
+ "macho",
+ "sha2",
+ "vm-core",
 ]
 
 [[package]]
@@ -1193,6 +1248,10 @@ dependencies = [
  "qemu-util",
  "soc-t8030",
 ]
+
+[[package]]
+name = "vm-core"
+version = "0.1.0"
 
 [[package]]
 name = "want"

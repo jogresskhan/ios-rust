@@ -45,11 +45,10 @@ pub const fn bit(n: u32) -> u64 {
 }
 pub const fn genmask(high: u32, low: u32) -> u64 {
     assert!(high >= low && high < 64);
-    if high == 63 {
-        u64::MAX << low
-    } else {
-        ((1u64 << (high + 1)) - 1) << low
-    }
+    // inclusive [low..=high] mask — GENMASK semantics (0xF0 for (7,4))
+    let width = high - low + 1;
+    let ones = if width == 64 { u64::MAX } else { (1u64 << width) - 1 };
+    ones << low
 }
 
 /// Find first (least-significant) set bit, or None (ffs semantics).
@@ -68,8 +67,9 @@ pub const BITS_PER_LONG: u32 = 64;
 /// Inclusive `nbits`-wide mask starting at `start_bit` inside one u64 word
 /// (helper shared with the `bitmap` module; clamped to the word).
 pub const fn make_64bit_mask(start_bit: u32, nbits: u32) -> u64 {
-    let start = start_bit.min(64);
-    let len = nbits.min(64 - start);
+    // const-safe min (Ord::min is not const-callable on stable)
+    let start = if start_bit > 64 { 64 } else { start_bit };
+    let len = if nbits > 64 - start { 64 - start } else { nbits };
     if len == 0 {
         return 0;
     }

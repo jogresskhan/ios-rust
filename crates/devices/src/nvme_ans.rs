@@ -4,7 +4,7 @@
 //! full command path = ledger item.
 
 use crate::bus::{MMIODevice, W4};
-use qemu_util::iov::{iov_from_buf, iov_make, IoVec};
+use qemu_util::iov::{iov_from_buf, iov_make, IoVector};
 
 #[derive(Debug, Default)]
 pub struct AnsNvme {
@@ -20,10 +20,10 @@ impl AnsNvme {
         self.submitted += 1;
     }
 
-    /// Scatter the response into the DART-translated PRP list (structural).
-    pub fn complete_into(&self, prp_regions: &mut [u8], data: &[u8]) -> usize {
-        let iovs: Vec<IoVec> = iov_make(prp_regions.len(), 4096);
-        iov_from_buf(&iovs, prp_regions, 0, data)
+    /// Scatter the response into the PRP segment vector (structural; the
+    /// owned-segment IoVector maps offsets to device addresses for DMA).
+    pub fn complete_into(&self, prp_regions: &mut IoVector, data: &[u8]) -> usize {
+        iov_from_buf(&mut prp_regions.iovs, 0, data)
     }
 }
 
@@ -66,9 +66,9 @@ mod tests {
     #[test]
     fn scatter_completion() {
         let ans = AnsNvme::default();
-        let mut regions = [0u8; 10];
+        let mut regions = IoVector { iovs: iov_make(10, 4096) };
         let n = ans.complete_into(&mut regions, &[0xAA; 4]);
         assert_eq!(n, 4);
-        assert_eq!(&regions[..4], &[0xAA; 4]);
+        assert_eq!(regions.iovs[0].data[..4], [0xAA; 4]);
     }
 }

@@ -384,7 +384,7 @@ impl<S: Read + Write> MuxClient<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::duplex;
+    use std::os::unix::net::UnixStream;
     use std::thread;
 
     /// Minimal fake usbmuxd: Listen→Result ok, one Attached event,
@@ -425,7 +425,7 @@ mod tests {
 
     #[test]
     fn listen_connect_tunnel_roundtrip() {
-        let (a, b) = duplex(8192);
+        let (a, b) = UnixStream::pair().expect("pair");
         fake_muxd(b);
         let mut c = MuxClient::new(a);
         c.listen().expect("listen");

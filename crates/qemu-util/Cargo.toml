@@ -1,0 +1,9 @@
+[package]
+name = "qemu-util"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Rust port of libqemuutil (bitops, fifo8, iov, queue, error)"
+
+[dependencies]
+thiserror.workspace = true

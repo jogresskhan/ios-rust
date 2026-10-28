@@ -1,0 +1,9 @@
+[package]
+name = "macho"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license = "GPL-2.0-or-later"
+description = "Mach-O + kernelcache fileset loader (Inferno boot.c parity)"
+
+[dependencies]

@@ -1,0 +1,8 @@
+[package]
+name = "soc-t8030"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Apple T8030 (A13) SoC definition: CPU features, instruction set, memory-map landmarks"
+
+[dependencies]

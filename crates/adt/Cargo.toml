@@ -1,0 +1,9 @@
+[package]
+name = "adt"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license = "GPL-2.0-or-later"
+description = "Apple DeviceTree (ADT) parse + build (xnu/Inferno parity) — drives T8030 device placement"
+
+[dependencies]

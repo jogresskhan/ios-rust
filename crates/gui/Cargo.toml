@@ -1,0 +1,10 @@
+[package]
+name = "gui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license = "GPL-2.0-or-later"
+description = "T8030 display frontends: headless BMP/PNG dump + optional windowed GUI"
+
+[dependencies]
+vm-core = { path = "../vm-core" }

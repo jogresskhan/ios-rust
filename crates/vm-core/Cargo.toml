@@ -1,0 +1,9 @@
+[package]
+name = "vm-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license = "GPL-2.0-or-later"
+description = "Core virtual-machine plumbing: Device trait, Bus, IRQ, RAM, framebuffer"
+
+[dependencies]

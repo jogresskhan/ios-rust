@@ -1,0 +1,10 @@
+[package]
+name = "devices"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Rust device models: AIC v2, DART, ADP v4, MIPI-DSI, ANS2/NVMe, UART, WDT"
+
+[dependencies]
+qemu-util = { path = "../qemu-util" }
+thiserror.workspace = true

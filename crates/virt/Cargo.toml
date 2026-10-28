@@ -1,0 +1,11 @@
+[package]
+name = "virt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "T8030 virtualization machine: bus assembly, QEMU-flag-compatible CLI, exec-loop contract"
+
+[dependencies]
+devices = { path = "../devices" }
+qemu-util = { path = "../qemu-util" }
+soc-t8030 = { path = "../soc-t8030" }

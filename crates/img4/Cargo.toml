@@ -1,0 +1,11 @@
+[package]
+name = "img4"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license = "GPL-2.0-or-later"
+description = "IMG4/IM4P/IM4M container parse+build (Inferno boot.c parity)"
+
+[dependencies]
+sha2.workspace = true
+hex.workspace = true

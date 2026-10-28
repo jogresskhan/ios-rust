@@ -1,0 +1,1 @@
+//! Headless framebuffer snapshots.

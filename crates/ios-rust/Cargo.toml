@@ -1,0 +1,18 @@
+[package]
+name = "ios-rust"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The single binary: T8030 emulator (QEMU-replacement CLI) + IPSW restore pipeline + research vault"
+
+[dependencies]
+anyhow.workspace = true
+tokio.workspace = true
+sha2.workspace = true
+hex.workspace = true
+devices = { path = "../devices" }
+ipsw = { path = "../ipsw" }
+qemu-util = { path = "../qemu-util" }
+soc-t8030 = { path = "../soc-t8030" }
+vault = { path = "../vault" }
+virt = { path = "../virt" }

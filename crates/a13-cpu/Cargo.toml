@@ -1,0 +1,10 @@
+[package]
+name = "a13-cpu"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license = "GPL-2.0-or-later"
+description = "Apple A13 (T8030) CPU: Vortex/Tempest ARMv8.4-A + GXF — interpreter + accel backends"
+
+[dependencies]
+vm-core = { path = "../vm-core" }

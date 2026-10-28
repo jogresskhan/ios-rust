@@ -1,0 +1,12 @@
+[package]
+name = "apple-soc"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license = "AGPL-3.0-or-later"
+description = "Apple T8030 (A13) SoC device models ported from ChefKiss Inferno's QEMU apple-silicon"
+
+[dependencies]
+vm-core = { path = "../vm-core" }
+a13-cpu = { path = "../a13-cpu" }
+adt = { path = "../adt" }

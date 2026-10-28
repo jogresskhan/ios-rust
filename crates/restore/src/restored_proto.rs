@@ -127,7 +127,7 @@ pub fn checkpoint_name(operation: u32) -> String {
 }
 
 /// Typed view of the device→host stream.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum RestoredMessage {
     /// `{"Status": 0|1, "State": n, "Operation": checkpoint, "Progress": 0-100}`.
     Status {
@@ -226,7 +226,8 @@ impl<S: Read + Write> RestoredClient<S> {
             Plist::UInt(RESTORED_PROTOCOL_VERSION.parse().unwrap_or(14)),
         );
         m.insert("RestoreOptions".into(), Plist::Dict(options));
-        send_frame(&mut self.stream, &Plist::Dict(m))
+        send_frame(&mut self.stream, &Plist::Dict(m))?;
+        Ok(())
     }
 
     /// Next device→host message, classified.
@@ -259,7 +260,7 @@ impl<S: Read + Write> RestoredClient<S> {
 mod tests {
     use super::*;
     use crate::plist_lite::from_xml;
-    use std::io::duplex;
+    use std::os::unix::net::UnixStream;
     use std::thread;
 
     fn write_frame(s: &mut impl Write, xml: &str) {
@@ -279,7 +280,7 @@ mod tests {
 
     #[test]
     fn handshake_query_startrestore_status() {
-        let (a, b) = duplex(8192);
+        let (a, b) = UnixStream::pair().expect("pair");
         thread::spawn(move || {
             let mut s = b;
             // device hello
@@ -348,7 +349,7 @@ mod tests {
 
     #[test]
     fn error_dict_surfaces_device_error() {
-        let (a, b) = duplex(8192);
+        let (a, b) = UnixStream::pair().expect("pair");
         thread::spawn(move || {
             let mut s = b;
             write_frame(
@@ -383,7 +384,7 @@ mod tests {
 
     #[test]
     fn frame_bounds_reject_huge_lengths() {
-        let (mut a, _b) = duplex(4096);
+        let (mut a, _b) = UnixStream::pair().expect("pair");
         a.write_all(&[0xFF, 0xFF, 0xFF, 0xFF]).unwrap();
         assert!(read_frame(&mut a).is_err());
     }

@@ -1,0 +1,7 @@
+[package]
+name = "apfs"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license = "GPL-2.0-or-later"
+description = "APFS reader+writer subset: fletcher64 (sum-to-zero), nx/volume superblocks, omap+fsroot B-trees, COW file create/replace"

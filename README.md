@@ -38,6 +38,12 @@ unknown flags are accepted-and-ignored so existing lane scripts keep working).
 | `virt` | the machine + QEMU-flag-compatible CLI + exec-loop contract (`CpuBackend`) | CLI/bus real; TCG stub honest |
 | `ipsw` | IM4P containers, BuildManifest.plist reader, **the 8-variant ramdisk bisection as library code** (incl. run #74 verdicts), ranged HTTP fetch | working + tested |
 | `vault` | client for the research S3 vault (`research-vault-rs` service): list/get(sha256-verified)/put/usage | working |
+| `plist` | libplist XML subset — the transport encoding for mux/restored/ASR | ported + tested |
+| `usbmux` | **libusbmuxd** (usbmuxhost: framing, listen, connect tunnel) | ported + tested |
+| `restored` | libimobiledevice restored client (port 0xF27E, decomp-cross-checked) | ported + tested |
+| `asr` | idevicerestore `asr.c` (validation + 128 KiB push + SHA-1 tails) | ported + tested |
+| `authinstall` | libauthinstall subset (TSS request/ticket, IM4M validation) | subset + tested |
+| `apfs` | APFS on-disk reader + **writer** subset (fletcher64, B-trees, COW) | subset + tested |
 | `ios-rust` | **the one binary** wiring all of the above | built |
 
 ## CPU instruction parity (named, as required)

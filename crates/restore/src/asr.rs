@@ -37,19 +37,21 @@ fn read_asr_plist_inner(read: &mut dyn FnMut(&mut [u8]) -> io::Result<usize>) ->
     let mut chunk = [0u8; 4096];
     loop {
         // Try to close out a complete plist each round: the XML envelope is
-        // the framing, and libplist's output ends with `</plist>\n` — so
-        // trailing whitespace after the closing tag must be tolerated.
+        // the framing, but ramdisk asr also emits bare top-level elements
+        // (`<dict>…</dict>`) and libplist's output ends with `</plist>\n` —
+        // so attempt the parse on the trailing-whitespace-trimmed buffer and
+        // keep reading while it is still incomplete.
         let end = buf
             .iter()
             .rposition(|b| !b.is_ascii_whitespace())
             .map(|i| i + 1)
             .unwrap_or(0);
-        if buf[..end].ends_with(b"</plist>") {
-            let xml = std::str::from_utf8(&buf[..end]).map_err(|e| {
-                io::Error::new(io::ErrorKind::InvalidData, format!("asr: utf8: {e}"))
-            })?;
-            return plist_lite::from_xml(xml)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("asr: {e}")));
+        if end > 0 && buf[0] == b'<' {
+            if let Ok(xml) = std::str::from_utf8(&buf[..end]) {
+                if let Ok(p) = plist_lite::from_xml(xml) {
+                    return Ok(p);
+                }
+            }
         }
         let n = read(&mut chunk)?;
         if n == 0 {

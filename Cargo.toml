@@ -15,6 +15,13 @@ members = [
     "crates/apple-soc",
     "crates/restore",
     "crates/gui",
+    "crates/dsc",
+    "crates/kernelcache",
+    "crates/devices-db",
+    "crates/vuln-db",
+    "crates/devicecheck",
+    "crates/xnu",
+    "crates/host-linux",
     "crates/ios-rust",
     "crates/plist",
     "crates/usbmux",
@@ -41,6 +48,9 @@ thiserror = "1"
 sha2 = "0.10"
 hex = "0.4"
 tracing = "0.1"
+p256 = { version = "0.13", features = ["ecdh"] }
+hkdf = "0.12"
+aes-gcm = "0.10"
 
 [profile.release]
 strip = true

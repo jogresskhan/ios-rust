@@ -1,0 +1,8 @@
+[package]
+name = "xnu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "XNU kernel ABI knowledge base: ARM64 Darwin syscall/Mach-trap tables, errno, boot_args, SVC ABI, early-boot call order (distilled from xnu-7195.141.2 + darwin-abi.h)"
+
+[dependencies]

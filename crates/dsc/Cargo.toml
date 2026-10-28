@@ -1,0 +1,8 @@
+[package]
+name = "dsc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "dyld shared cache reader (port of blacktop/ipsw pkg/dyld core: header/mappings/images/subcaches/slide-info/local-symbols)"
+
+[dependencies]

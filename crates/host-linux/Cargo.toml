@@ -1,0 +1,8 @@
+[package]
+name = "host-linux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Linux host integration for the iOS emulator: dependency manifest, KVM/APFS capability checks, reference QEMU command builder (distilled from ios-emulator-linux + darwin-vm scripts)"
+
+[dependencies]

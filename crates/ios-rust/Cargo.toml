@@ -26,3 +26,10 @@ restored = { path = "../restored" }
 asr = { path = "../asr" }
 authinstall = { path = "../authinstall" }
 apfs = { path = "../apfs" }
+dsc = { path = "../dsc" }
+kernelcache = { path = "../kernelcache" }
+devices-db = { path = "../devices-db" }
+vuln-db = { path = "../vuln-db" }
+devicecheck = { path = "../devicecheck" }
+xnu = { path = "../xnu" }
+host-linux = { path = "../host-linux" }

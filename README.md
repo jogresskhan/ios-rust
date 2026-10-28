@@ -22,6 +22,14 @@ ios-rust boot <ipsw>         # fetch → restore → install → homescreen ladd
 ios-rust parity              # live parity ledger (% per component)
 ios-rust vault list|get|put|usage   # research-S3 integration
 ios-rust selftest            # release invariants
+# research & format tooling (reference-repo sweep):
+ios-rust dsc info|images|rebase|symbols|a2o|o2a <dyld_cache>
+ios-rust kc info|version|kexts <kernelcache>     # LZSS/LZFSE decode
+ios-rust devices list|t8030|lookup|board|cpuid|ipsw-me
+ios-rust vulns list|show|search|mitigations|frida|tools|json
+ios-rust dc demo|constants|entitlements          # DeviceCheck token pipeline
+ios-rust xnu syscalls|traps|errno|boot|boot-order|abi
+ios-rust host check|deps|qemu                    # Linux host integration
 ```
 
 `run` accepts the qemu-system-a64 flag subset the restore lanes actually use
@@ -45,6 +53,14 @@ unknown flags are accepted-and-ignored so existing lane scripts keep working).
 | `authinstall` | libauthinstall subset (TSS request/ticket, IM4M validation) | subset + tested |
 | `apfs` | APFS on-disk reader + **writer** subset (fletcher64, B-trees, COW) | subset + tested |
 | `ios-rust` | **the one binary** wiring all of the above | built |
+| `dsc` | **dyld shared cache reader** (blacktop/ipsw pkg/dyld core): header v-gates, mappings, images, subcaches, slide-info rebase walks v2–v5, local symbols | working (synthetic-verified) |
+| `kernelcache` | **kernelcache decode + metadata** (ipsw pkg/kernelcache core): `complzss` LZSS (xnu mkext port), LZFSE via vendored Apple C, version strings, `__PRELINK_INFO` KEXT inventory | working (synthetic-verified) |
+| `restore` + | TSS **RestoreRequestRules engine** (EPRO/ESEC) + ~130-entry component 4CC map (libauthinstall/ipsw parity) | added |
+| `devices-db` | **Apple device database** (ipsw_db format, 41 products/46 boards, A13 rows live-verified) + ipsw.me catalog client | working |
+| `vuln-db` | **iOS vulnerability research KB**: 18 CVE/technique entries, XNU zone-allocator mitigation timeline, FRIDA catalog, 34 tool refs | data-complete |
+| `devicecheck` | **DeviceCheck token internals** (andrd3v/dcdev RE): token buffer layout, ECDH-P256 → HKDF-SHA256 → AES-256-GCM, MESU/humbug endpoints, entitlements fixture | working |
+| `xnu` | **XNU ARM64 ABI KB**: 423 BSD syscalls, 63 Mach traps, errno, `boot_args`, early-boot call order, SVC/VM/port constants (xnu-7195.141.2 + darwin-abi.h) | data-complete |
+| `host-linux` | **Linux host integration** (ios-emulator-linux + darwin-vm): capability check (KVM/RAM/APFS/tools), dep manifest, reference QEMU command builder | working |
 
 ## CPU instruction parity (named, as required)
 

@@ -1,0 +1,13 @@
+[package]
+name = "devices-db"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Apple device database (ProductType → boards → CPID/BDID/platform/chip) + ipsw.me catalog client (port of blacktop/ipsw pkg/info + ipsw_me)"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+tokio.workspace = true

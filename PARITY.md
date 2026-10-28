@@ -71,7 +71,37 @@ own `restored_external` 18A5351d decompilation (RE-FINDINGS.md).
 | G3 install → launchd on restored APFS | pending G2 |
 | G4 homescreen via ios-rust engine | pending G3 + CPU exec |
 
-**Workspace model parity (average of ledger rows, honest): 60.6%** — up from 0
+
+## Layer 2.7 — research & format tooling (from the reference-repo sweep, Oct 2026)
+
+Ports distilled from blacktop/ipsw (pkg/dyld + pkg/kernelcache + pkg/info +
+pkg/tss), andrd3v/dcdev (devicecheckd RE), arlinux-xnu (darwin-abi.h +
+xnu-7195.141.2), IdanBanani/iOS-Vulnerability-Research +
+ansjdnakjdnajkd/iOS (research corpus), Legasitech/ios-emulator-linux
+(host integration).
+
+| item | counterpart (C engine) | % | gate to flip |
+|---|---|---|---|
+| dsc: `dyld_cache_header` exact offsets + version gates | ipsw pkg/dyld types.go | **100** (layout-verified) | parse a real A13 cache dump |
+| dsc: mappings (plain + with-slide, flag→segment names) | ipsw file.go:440-497 | **90** | byte-capture diff vs `ipsw dyld info` |
+| dsc: images (old + dyld4) + subcache v1/v2 naming + `.symbols` member | ipsw file.go:236-515 | **85** | same |
+| dsc: slide-info rebase walkers v2/v3/**v4**/v5 (v3 = A13 iOS 13/14) | ipsw parseSlideInfo + dyld_cache_format.h | **85** (synthetic-cache verified; v1 walk honest-skip) | replay a real iOS 14 A13 cache and diff rebase lists |
+| dsc: local symbols (nlist_64 + per-dylib entries) | ipsw CacheLocalSymbolsInfo | **85** | same |
+| dsc: PrebuiltLoaderSet / launch closures / patch-info walkers | ipsw prebuilt*.go + closure.go | **0** | port after a real iOS 15+ cache is in hand |
+| kernelcache: LZSS `complzss` decode (0x180 header, xnu mkext decoder) | xnu libkern/mkext.c + blacktop/lzss | **90** (synthetic roundtrip verified) | decode a real iOS 12-14 kernelcache |
+| kernelcache: LZFSE via vendored Apple C FFI (`restore::lzfse`) | lzfse (Apple, BSD-3) | **75** | decode a real iOS 13+ kernelcache |
+| kernelcache: version strings + fileset support | ipsw GetVersion | **75** | real-cache diff |
+| kernelcache: `__PRELINK_INFO.__info` KEXT inventory | ipsw kext.go | **60** | real-cache diff (needs plist real-sample check) |
+| kernelcache: KEXT extraction w/ chained fixups | ipsw openKext | 0 | needs MH_FILESET chained-fixups exporter |
+| TSS: RestoreRequestRules engine (EPRO/ESEC) + component 4CC map (~130) | libauthinstall + ipsw pkg/tss + pkg/img4 | **75** | replay a captured TSS round with rule outcomes |
+| device DB: ProductType→boards/CPID/BDID/platform (41 products) + ipsw.me client | ipsw pkg/info + ipsw_me.go | **80** (rows verified vs live api.ipsw.me) | full-upstream-DB import (machine-generate) |
+| DeviceCheck: token buffer layout + ECDH-P256→HKDF→AES-GCM + MESU/humbug constants + entitlements fixture | andrd3v/dcdev README (devicecheckd RE) | **60** (README-literal layout, overlaps documented) | verify token bytes against a real device capture |
+| XNU ABI KB: 423 BSD syscalls, 63 Mach traps, errno, boot_args(736 B), boot call order, SVC/VM/port constants | darwin-abi.h + xnu-7195.141.2 syscalls.master + pexpert | **100** as knowledge base | encode into the a13-cpu syscall shim when guests run |
+| vuln-db research KB: 18 CVE/technique entries, zone-allocator mitigation timeline, FRIDA catalog, 34 tool refs | IdanBanani/iOS-Vulnerability-Research + ansjdnakjdnajkd/iOS | **100** as KB | grows with research, not gated |
+| host-linux: capability check (KVM/RAM/disk/APFS/tools), dep manifest, reference darwin-vm QEMU command | ios-emulator-linux scripts + jprx/darwin-vm run.sh | **70** (sandbox cannot run real boots) | real boot on aarch64 hardware |
+
+**Workspace model parity (average of ledger rows, honest): 60.6% before the
+Layer 2.7 sweep, re-computed live by `ios-rust parity`** — up from 0
 at workspace creation; every row above carries its gate so "100%" is a checklist,
 not a slogan. Update this file with every verdict (same discipline as the
 ios-sweet-rust ledger).

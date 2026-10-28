@@ -1,0 +1,15 @@
+[package]
+name = "devicecheck"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "DeviceCheck token generation internals (port of the devicecheckd RE: token buffer layout, ECDH-P256 + HKDF-SHA256 + AES-256-GCM pipeline, MESU/humbug endpoints, entitlements fixture)"
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+hex.workspace = true
+sha2.workspace = true
+p256.workspace = true
+hkdf.workspace = true
+aes-gcm.workspace = true

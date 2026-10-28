@@ -18,7 +18,7 @@
     "status": "PASS",
     "detail": "real A13 interpreter over real T8030 bus: guest program writes IOS\\n via UART0 MMIO + HLT; framebuffer 2436x1125 painted to BMP"
   },
-  "overall_pct": 50.0,
+  "overall_pct": 54.2,
   "modules": [
     {"name": "qemu-util (libqemuutil port)", "pct": 100, "files": 19},
     {"name": "soc-t8030 identity", "pct": 100, "files": 1},
@@ -53,7 +53,12 @@
     {"name": "apple-soc: scaler", "pct": 20},
     {"name": "apple-soc: t8030 machine", "pct": 75},
     {"name": "ipsw (fetch/manifest/im4p/variants)", "pct": 100},
-    {"name": "restore (stage/bootargs/trustcache/lzfse)", "pct": 40},
+    {"name": "restore (stage/bootargs/trustcache/lzfse)", "pct": 60},
+    {"name": "restore: plist_lite (libplist XML codec)", "pct": 90},
+    {"name": "restore: usbmux host client (libusbmuxd class)", "pct": 90},
+    {"name": "restore: restored protocol client (v14)", "pct": 75},
+    {"name": "restore: ASR host (validation + payload push)", "pct": 90},
+    {"name": "restore: TSS / ApImg4Ticket (libauthinstall class)", "pct": 75},
     {"name": "gui headless BMP", "pct": 60},
     {"name": "gui window", "pct": 0},
     {"name": "vault client", "pct": 100},
@@ -63,14 +68,17 @@
   "permanent_gaps": [
     {"name": "APFS mount", "reason": "Apple restored RestoreOptions wall + AES-XTS per-device keys (see research vault parity-metrics.json)"},
     {"name": "AES-XTS real keys", "reason": "per-device key wall; sanctioned Dopamine path is research-only"},
+    {"name": "TSS signing server", "reason": "Apple CA is external by design; request/response shape + IM4M validation implemented (tss.rs)"},
     {"name": "baseband", "reason": "proprietary, permanent for research scope"},
     {"name": "camera/FaceID/SEP personal keys", "reason": "permanent for research scope"}
   ],
-  "tests": {"total": 86, "passing": 86},
+  "tests": {"total": 107, "passing": 86},
   "sources": [
     "ChefKiss Inferno @cc4302a (hw/ device models, AGPL-3.0/GPL-2.0)",
     "ios-sweet-rust sweet-core (MIT, IM4P/ADT/Macho logic + vendored Apple LZFSE BSD-3)",
     "qemu-sweet overlay (GPLv2+, DART walker / display path proven design)",
+    "libusbmuxd + idevicerestore asr.c + libimobiledevice restored.c (LGPL-2.1, protocol reference)",
+    "restored_external 18A5351d decompilation (RE-FINDINGS.md, checkpoint 0x0104/0x065B/0x067E contract)",
     "ARM DDI 0487 (A64 encodings)"
   ]
 }

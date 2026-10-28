@@ -89,6 +89,14 @@ pub fn decode_header(buf: &[u8]) -> Result<(usize, u32, u32, u32), io::Error> {
     let le = |o: usize| -> u32 {
         u32::from_le_bytes([buf[o], buf[o + 1], buf[o + 2], buf[o + 3]])
     };
+    // bounds: total length covers at least the header itself (rejects the
+    // all-zero header and any truncated-length garbage)
+    if le(0) < HEADER_LEN as u32 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("usbmux: header length {} below minimum", le(0)),
+        ));
+    }
     Ok((le(0) as usize, le(4), le(8), le(12)))
 }
 

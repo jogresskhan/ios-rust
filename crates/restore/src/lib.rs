@@ -23,3 +23,5 @@ pub mod ipsw;
 pub mod plist_lite;
 
 pub mod usbmux;
+
+pub mod restored_proto;

@@ -19,3 +19,10 @@ virt = { path = "../virt" }
 vm-core = { path = "../vm-core" }
 a13-cpu = { path = "../a13-cpu" }
 apple-soc = { path = "../apple-soc" }
+restore = { path = "../restore" }
+plist = { path = "../plist" }
+usbmux = { path = "../usbmux" }
+restored = { path = "../restored" }
+asr = { path = "../asr" }
+authinstall = { path = "../authinstall" }
+apfs = { path = "../apfs" }

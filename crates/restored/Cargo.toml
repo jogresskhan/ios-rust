@@ -5,3 +5,6 @@ edition.workspace = true
 authors.workspace = true
 license = "GPL-2.0-or-later"
 description = "restored protocol client (libimobiledevice restore.c parity): QueryType/QueryValue/StartRestore/notifications on port 0xF27E"
+
+[dependencies]
+plist = { path = "../plist" }

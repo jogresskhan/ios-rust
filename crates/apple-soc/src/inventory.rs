@@ -10,8 +10,8 @@
 //! This is the single source of truth for "have we found all apple-soc?"
 //! — the test below fails if a crate module is missing from the table, and
 //! PARITY.md / parity.json / the `ios-rust parity` CLI mirror these rows.
-//! 39 rows: 35 ported, 4 honest zeros (apfs key wall, SEP real-fw core,
-//! kernel patcher chain, A9/s8000 machine).
+//! 39 rows: 35 ported + kernel patcher (75), 3 honest zeros (apfs key wall,
+//! SEP real-fw core, A9/s8000 machine).
 
 /// One apple-soc device row.
 pub struct DeviceRow {
@@ -136,10 +136,10 @@ pub const DEVICES: &[DeviceRow] = &[
     // ---- misc --------------------------------------------------------------
     DeviceRow { device: "nvram", upstream: "— (nvram nodes in ADT)", rust_module: "nvram",
         pct: 55, note: "store; gate: real NVRAM blob replay" },
-    // ---- not ported (honest zeros) ----------------------------------------
+    // ---- ported late wave -------------------------------------------------
     DeviceRow { device: "kernel patcher", upstream: "hw/arm/apple-silicon/{kernel_patches,patcher,mem}.c",
-        rust_module: "—", pct: 0,
-        note: "boot-time XNU patch chain (1128 L) — C-engine-only today" },
+        rust_module: "kernelcache::patcher", pct: 75,
+        note: "port done: engine + full T8030 table (8 groups/15 patches/23 finds, 1529 LOC); gate: real-KC run" },
     DeviceRow { device: "a9/s8000 machine", upstream: "hw/arm/apple-silicon/{a9,s8000}.c",
         rust_module: "—", pct: 0,
         note: "A9 (T8010-class) machine — out of T8030 scope; listed for completeness" },
@@ -204,9 +204,9 @@ mod tests {
                 assert!(d.rust_module == "—", "{} claims 0 but has a module", d.device);
             }
         }
-        // the two honest zeros of this wave
+        // the honest zeros of the inventory
         assert!(DEVICES.iter().any(|d| d.device == "sep (real fw)" && d.pct == 0));
-        assert!(DEVICES.iter().any(|d| d.device == "kernel patcher" && d.pct == 0));
+        assert!(DEVICES.iter().any(|d| d.device == "kernel patcher" && d.pct == 75));
     }
 
     #[test]

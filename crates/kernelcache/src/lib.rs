@@ -8,6 +8,8 @@
 //! * [`version`] — the `Darwin Kernel Version …` + `Apple LLVM …` string
 //!   scan over `__TEXT.__const` (fileset-aware);
 //! * [`prelink`] — the `__PRELINK_INFO.__info` KEXT inventory;
+//! * [`patcher`] — the T8030 boot-time XNU patcher chain (port of ChefKiss
+//!   Inferno `kernel_patches.c`/`patcher.c`/`mem.c`; upstream AGPL-3);
 //! * [`sections`] — a small named-section walker (the `macho` crate tracks
 //!   segments without names).
 //!
@@ -23,11 +25,13 @@
 pub mod compress;
 pub mod lzss;
 pub mod prelink;
+pub mod patcher;
 pub mod sections;
 pub mod version;
 
 pub use compress::{decompress, detect, Compression};
 pub use lzss::LzssHeader;
+pub use patcher::{apply_t8030_patches, PatchReport};
 pub use prelink::Kext;
 pub use version::KernelVersion;
 

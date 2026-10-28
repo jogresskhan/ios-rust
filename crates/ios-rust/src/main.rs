@@ -321,7 +321,7 @@ fn cmd_parity() -> i32 {
         ("Baseband XMM7660 (PCIe)", 75),
         ("apple-soc: Inferno stub 1:1 rows (tempsensor/chestnut/fan53740/lm_backlight)", 60),
         ("apple-soc: full device inventory (39 rows, test-enforced)", 100),
-        ("Kernel patcher chain (C-engine-only)", 0),
+        ("Kernel patcher chain (engine + full T8030 table)", 75),
         ("IPSW: IM4P/manifest/variants", 100),
         ("Restore stage painter", 40),
         ("plist (libplist XML subset)", 90),

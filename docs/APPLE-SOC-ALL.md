@@ -18,7 +18,7 @@ implemented · **60** done-once/stub-1:1 · **50** partial · **40** reg-map ·
 | a13_gxf.c/h | 640 | GXF execution state | `a13-cpu::gxf` | 40 |
 | a9.c + s8000.c + s8000-config | 277+1717+43 | A9 (T8010-class) machine | — (out of T8030 scope) | 0 |
 | boot.c | 1892 | fw load / patch / entry | `ios-rust boot-full` pipeline | 80 |
-| kernel_patches.c + patcher.c + mem.c | 813+184+131 | XNU boot patch chain | — | **0 (next wave)** |
+| kernel_patches.c + patcher.c + mem.c | 813+184+131 | XNU boot patch chain | `kernelcache::patcher` | **75** (engine + full table ported; gate: real-KC run) |
 | dart.c + dart-stub.c | 980+27 | IOMMU | `apple-soc::dart` | 55 |
 | sart.c | 280 | SEP DMA trust zones | `apple-soc::sart` | 50 |
 | sep.c | **5673** | real SEP (SePOS executor) | — | **0 (next wave)** |
@@ -65,11 +65,12 @@ implemented · **60** done-once/stub-1:1 · **50** partial · **40** reg-map ·
 
 ## 2. Scoreboard
 
-- **39 device rows** in `inventory::DEVICES` — **35 ported**, 4 honest zeros:
+- **39 device rows** in `inventory::DEVICES` — **36 ported**, 3 honest zeros:
   - `apfs wall` — per-device AES-XTS keys (real-image mount),
   - `sep (real fw)` — sep.c SePOS executor (the C engine's superpower),
-  - `kernel patcher` — boot-time XNU patch chain (C-engine-only),
   - `a9/s8000 machine` — different SoC generation; listed for completeness.
+  - (`kernel patcher` ported this wave at **75** — engine + complete
+    T8030 table, 1,529 LOC, 8 tests; gate to 90: one real kernelcache run.)
 - Device-table average: **59.2%** (honest, includes the zeros and stub-1:1s).
 - Crate tests: **89 passed** (register roundtrips, FIPS-197 vectors, FIFO
   ladders, RTC/alarm ticks, CRC16 vectors, keystore IPC byte-diffs).
@@ -78,8 +79,10 @@ implemented · **60** done-once/stub-1:1 · **50** partial · **40** reg-map ·
 
 1. **sep.c port** (5673 L) — the biggest single gap; bootstrap with the
    sep-sim wire format already in Rust (90%).
-2. **kernel_patches.c port** (813 L) — feeds `boot-full`; patch table is
-   data, the applier is small.
+2. **Real-KC patcher gate** — run one real T8030 kernelcache through
+   `kernelcache::patcher::apply_t8030_patches`, assert AMFI/APFS/SEP/img4
+   attempts land on real bytes, then wire it into `ios-rust boot_full`
+   (flips kernel patcher 75 → 90).
 3. **DART walker gate** — replay captured PTE walks (dart-walker-gate).
 4. **AIC golden IPI routing** — flips aic 55 → 90.
 5. **ADP v4 real guest trace** (M3a probe) — flips displaypipe 50 → 90.

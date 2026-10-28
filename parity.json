@@ -332,6 +332,10 @@
     {
       "name": "apple-soc: full Inferno device inventory (inventory.rs)",
       "pct": 100
+    },
+    {
+      "name": "kernelcache: boot patcher (engine + T8030 table)",
+      "pct": 75
     }
   ],
   "permanent_gaps": [

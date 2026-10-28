@@ -133,12 +133,16 @@ ansjdnakjdnajkd/iOS (research corpus), Legasitech/ios-emulator-linux
 
 The full ChefKiss Inferno apple device tree was enumerated and every model
 ported or accounted. **`crates/apple-soc/src/inventory.rs` is the single
-source of truth** (39 device rows — 35 ported, 4 honest zeros — test-enforced
+source of truth** (39 device rows — 36 ported, 3 honest zeros — test-enforced
 against the crate module list; `avg_pct()` ≈ 59.2 honest device average).
 The honest zeros: the per-device AES-XTS key wall on real-image APFS mount,
-SEP real-firmware core (sep.c, 5673 L), the boot kernel-patcher
-chain (kernel_patches.c/patcher.c/mem.c, 1128 L), and the A9/s8000 machine
-(out of T8030 scope, listed for completeness).
+SEP real-firmware core (sep.c, 5673 L), and the A9/s8000 machine
+(out of T8030 scope, listed for completeness). The fourth former zero — the
+**boot kernel-patcher chain** (kernel_patches.c + patcher.c + mem.c, 1128 L
+of C) — was ported in the same wave to `kernelcache::patcher` (1,529 LOC,
+8 groups / 15 patches / 23 find attempts, nothing skipped, 8 tests) at an
+honest **75**: engine + full table verified on synthetic collections; the
+gate to 90 is one real T8030 kernelcache through `apply_t8030_patches`.
 
 New ports this wave (13 devices, all with register-behavior tests):
 

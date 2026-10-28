@@ -24,6 +24,8 @@ pub mod simd;
 
 #[cfg(test)]
 mod goldens;
+#[cfg(test)]
+mod goldens_ext;
 
 /// CPU backend contract (QEMU: CPUClass + CPUArchState).
 pub trait CpuBackend: Send {

@@ -1,0 +1,166 @@
+== add: 7
+   q=0 u=0 size=0 b21=1 op6=0x21  0E228420 add v0.8b, v1.8b, v2.8b
+   q=0 u=0 size=1 b21=1 op6=0x21  0E628420 add v0.4h, v1.4h, v2.4h
+   q=0 u=0 size=2 b21=1 op6=0x21  0EA28420 add v0.2s, v1.2s, v2.2s
+   q=1 u=0 size=0 b21=1 op6=0x21  4E228420 add v0.16b, v1.16b, v2.16b
+   q=1 u=0 size=1 b21=1 op6=0x21  4E628420 add v0.8h, v1.8h, v2.8h
+   q=1 u=0 size=2 b21=1 op6=0x21  4EA28420 add v0.4s, v1.4s, v2.4s
+   q=1 u=0 size=3 b21=1 op6=0x21  4EE28420 add v0.2d, v1.2d, v2.2d
+== cmeq: 7
+   q=0 u=1 size=0 b21=1 op6=0x23  2E228C20 cmeq v0.8b, v1.8b, v2.8b
+   q=0 u=1 size=1 b21=1 op6=0x23  2E628C20 cmeq v0.4h, v1.4h, v2.4h
+   q=0 u=1 size=2 b21=1 op6=0x23  2EA28C20 cmeq v0.2s, v1.2s, v2.2s
+   q=1 u=1 size=0 b21=1 op6=0x23  6E228C20 cmeq v0.16b, v1.16b, v2.16b
+   q=1 u=1 size=1 b21=1 op6=0x23  6E628C20 cmeq v0.8h, v1.8h, v2.8h
+   q=1 u=1 size=2 b21=1 op6=0x23  6EA28C20 cmeq v0.4s, v1.4s, v2.4s
+   q=1 u=1 size=3 b21=1 op6=0x23  6EE28C20 cmeq v0.2d, v1.2d, v2.2d
+== fabd: 5
+   q=0 u=1 size=2 b21=1 op6=0x35  2EA2D420 fabd v0.2s, v1.2s, v2.2s
+   q=0 u=1 size=3 b21=0 op6=0x05  2EC21420 fabd v0.4h, v1.4h, v2.4h
+   q=1 u=1 size=2 b21=1 op6=0x35  6EA2D420 fabd v0.4s, v1.4s, v2.4s
+   q=1 u=1 size=3 b21=0 op6=0x05  6EC21420 fabd v0.8h, v1.8h, v2.8h
+   q=1 u=1 size=3 b21=1 op6=0x35  6EE2D420 fabd v0.2d, v1.2d, v2.2d
+== fadd: 5
+   q=0 u=0 size=0 b21=1 op6=0x35  0E22D420 fadd v0.2s, v1.2s, v2.2s
+   q=0 u=0 size=1 b21=0 op6=0x05  0E421420 fadd v0.4h, v1.4h, v2.4h
+   q=1 u=0 size=0 b21=1 op6=0x35  4E22D420 fadd v0.4s, v1.4s, v2.4s
+   q=1 u=0 size=1 b21=0 op6=0x05  4E421420 fadd v0.8h, v1.8h, v2.8h
+   q=1 u=0 size=1 b21=1 op6=0x35  4E62D420 fadd v0.2d, v1.2d, v2.2d
+== fcadd: 10
+   q=0 u=1 size=1 b21=0 op6=0x39  2E42E420 fcadd v0.4h, v1.4h, v2.4h, #0x5a
+   q=0 u=1 size=1 b21=0 op6=0x3d  2E42F420 fcadd v0.4h, v1.4h, v2.4h, #0x10e
+   q=0 u=1 size=2 b21=0 op6=0x39  2E82E420 fcadd v0.2s, v1.2s, v2.2s, #0x5a
+   q=0 u=1 size=2 b21=0 op6=0x3d  2E82F420 fcadd v0.2s, v1.2s, v2.2s, #0x10e
+   q=1 u=1 size=1 b21=0 op6=0x39  6E42E420 fcadd v0.8h, v1.8h, v2.8h, #0x5a
+   q=1 u=1 size=1 b21=0 op6=0x3d  6E42F420 fcadd v0.8h, v1.8h, v2.8h, #0x10e
+   q=1 u=1 size=2 b21=0 op6=0x39  6E82E420 fcadd v0.4s, v1.4s, v2.4s, #0x5a
+   q=1 u=1 size=2 b21=0 op6=0x3d  6E82F420 fcadd v0.4s, v1.4s, v2.4s, #0x10e
+   q=1 u=1 size=3 b21=0 op6=0x39  6EC2E420 fcadd v0.2d, v1.2d, v2.2d, #0x5a
+   q=1 u=1 size=3 b21=0 op6=0x3d  6EC2F420 fcadd v0.2d, v1.2d, v2.2d, #0x10e
+== fcmla: 20
+   q=0 u=1 size=1 b21=0 op6=0x31  2E42C420 fcmla v0.4h, v1.4h, v2.4h, #0
+   q=0 u=1 size=1 b21=0 op6=0x33  2E42CC20 fcmla v0.4h, v1.4h, v2.4h, #0x5a
+   q=0 u=1 size=1 b21=0 op6=0x35  2E42D420 fcmla v0.4h, v1.4h, v2.4h, #0xb4
+   q=0 u=1 size=1 b21=0 op6=0x37  2E42DC20 fcmla v0.4h, v1.4h, v2.4h, #0x10e
+   q=0 u=1 size=2 b21=0 op6=0x31  2E82C420 fcmla v0.2s, v1.2s, v2.2s, #0
+   q=0 u=1 size=2 b21=0 op6=0x33  2E82CC20 fcmla v0.2s, v1.2s, v2.2s, #0x5a
+   q=0 u=1 size=2 b21=0 op6=0x35  2E82D420 fcmla v0.2s, v1.2s, v2.2s, #0xb4
+   q=0 u=1 size=2 b21=0 op6=0x37  2E82DC20 fcmla v0.2s, v1.2s, v2.2s, #0x10e
+   q=1 u=1 size=1 b21=0 op6=0x31  6E42C420 fcmla v0.8h, v1.8h, v2.8h, #0
+   q=1 u=1 size=1 b21=0 op6=0x33  6E42CC20 fcmla v0.8h, v1.8h, v2.8h, #0x5a
+   q=1 u=1 size=1 b21=0 op6=0x35  6E42D420 fcmla v0.8h, v1.8h, v2.8h, #0xb4
+   q=1 u=1 size=1 b21=0 op6=0x37  6E42DC20 fcmla v0.8h, v1.8h, v2.8h, #0x10e
+   q=1 u=1 size=2 b21=0 op6=0x31  6E82C420 fcmla v0.4s, v1.4s, v2.4s, #0
+   q=1 u=1 size=2 b21=0 op6=0x33  6E82CC20 fcmla v0.4s, v1.4s, v2.4s, #0x5a
+   q=1 u=1 size=2 b21=0 op6=0x35  6E82D420 fcmla v0.4s, v1.4s, v2.4s, #0xb4
+   q=1 u=1 size=2 b21=0 op6=0x37  6E82DC20 fcmla v0.4s, v1.4s, v2.4s, #0x10e
+   q=1 u=1 size=3 b21=0 op6=0x31  6EC2C420 fcmla v0.2d, v1.2d, v2.2d, #0
+   q=1 u=1 size=3 b21=0 op6=0x33  6EC2CC20 fcmla v0.2d, v1.2d, v2.2d, #0x5a
+   q=1 u=1 size=3 b21=0 op6=0x35  6EC2D420 fcmla v0.2d, v1.2d, v2.2d, #0xb4
+   q=1 u=1 size=3 b21=0 op6=0x37  6EC2DC20 fcmla v0.2d, v1.2d, v2.2d, #0x10e
+== fdiv: 5
+   q=0 u=1 size=0 b21=1 op6=0x3f  2E22FC20 fdiv v0.2s, v1.2s, v2.2s
+   q=0 u=1 size=1 b21=0 op6=0x0f  2E423C20 fdiv v0.4h, v1.4h, v2.4h
+   q=1 u=1 size=0 b21=1 op6=0x3f  6E22FC20 fdiv v0.4s, v1.4s, v2.4s
+   q=1 u=1 size=1 b21=0 op6=0x0f  6E423C20 fdiv v0.8h, v1.8h, v2.8h
+   q=1 u=1 size=1 b21=1 op6=0x3f  6E62FC20 fdiv v0.2d, v1.2d, v2.2d
+== fmax: 5
+   q=0 u=0 size=0 b21=1 op6=0x3d  0E22F420 fmax v0.2s, v1.2s, v2.2s
+   q=0 u=0 size=1 b21=0 op6=0x0d  0E423420 fmax v0.4h, v1.4h, v2.4h
+   q=1 u=0 size=0 b21=1 op6=0x3d  4E22F420 fmax v0.4s, v1.4s, v2.4s
+   q=1 u=0 size=1 b21=0 op6=0x0d  4E423420 fmax v0.8h, v1.8h, v2.8h
+   q=1 u=0 size=1 b21=1 op6=0x3d  4E62F420 fmax v0.2d, v1.2d, v2.2d
+== fmin: 5
+   q=0 u=0 size=2 b21=1 op6=0x3d  0EA2F420 fmin v0.2s, v1.2s, v2.2s
+   q=0 u=0 size=3 b21=0 op6=0x0d  0EC23420 fmin v0.4h, v1.4h, v2.4h
+   q=1 u=0 size=2 b21=1 op6=0x3d  4EA2F420 fmin v0.4s, v1.4s, v2.4s
+   q=1 u=0 size=3 b21=0 op6=0x0d  4EC23420 fmin v0.8h, v1.8h, v2.8h
+   q=1 u=0 size=3 b21=1 op6=0x3d  4EE2F420 fmin v0.2d, v1.2d, v2.2d
+== fmla: 5
+   q=0 u=0 size=0 b21=1 op6=0x33  0E22CC20 fmla v0.2s, v1.2s, v2.2s
+   q=0 u=0 size=1 b21=0 op6=0x03  0E420C20 fmla v0.4h, v1.4h, v2.4h
+   q=1 u=0 size=0 b21=1 op6=0x33  4E22CC20 fmla v0.4s, v1.4s, v2.4s
+   q=1 u=0 size=1 b21=0 op6=0x03  4E420C20 fmla v0.8h, v1.8h, v2.8h
+   q=1 u=0 size=1 b21=1 op6=0x33  4E62CC20 fmla v0.2d, v1.2d, v2.2d
+== fmls: 5
+   q=0 u=0 size=2 b21=1 op6=0x33  0EA2CC20 fmls v0.2s, v1.2s, v2.2s
+   q=0 u=0 size=3 b21=0 op6=0x03  0EC20C20 fmls v0.4h, v1.4h, v2.4h
+   q=1 u=0 size=2 b21=1 op6=0x33  4EA2CC20 fmls v0.4s, v1.4s, v2.4s
+   q=1 u=0 size=3 b21=0 op6=0x03  4EC20C20 fmls v0.8h, v1.8h, v2.8h
+   q=1 u=0 size=3 b21=1 op6=0x33  4EE2CC20 fmls v0.2d, v1.2d, v2.2d
+== fmul: 5
+   q=0 u=1 size=0 b21=1 op6=0x37  2E22DC20 fmul v0.2s, v1.2s, v2.2s
+   q=0 u=1 size=1 b21=0 op6=0x07  2E421C20 fmul v0.4h, v1.4h, v2.4h
+   q=1 u=1 size=0 b21=1 op6=0x37  6E22DC20 fmul v0.4s, v1.4s, v2.4s
+   q=1 u=1 size=1 b21=0 op6=0x07  6E421C20 fmul v0.8h, v1.8h, v2.8h
+   q=1 u=1 size=1 b21=1 op6=0x37  6E62DC20 fmul v0.2d, v1.2d, v2.2d
+== frecps: 5
+   q=0 u=0 size=0 b21=1 op6=0x3f  0E22FC20 frecps v0.2s, v1.2s, v2.2s
+   q=0 u=0 size=1 b21=0 op6=0x0f  0E423C20 frecps v0.4h, v1.4h, v2.4h
+   q=1 u=0 size=0 b21=1 op6=0x3f  4E22FC20 frecps v0.4s, v1.4s, v2.4s
+   q=1 u=0 size=1 b21=0 op6=0x0f  4E423C20 frecps v0.8h, v1.8h, v2.8h
+   q=1 u=0 size=1 b21=1 op6=0x3f  4E62FC20 frecps v0.2d, v1.2d, v2.2d
+== frsqrts: 5
+   q=0 u=0 size=2 b21=1 op6=0x3f  0EA2FC20 frsqrts v0.2s, v1.2s, v2.2s
+   q=0 u=0 size=3 b21=0 op6=0x0f  0EC23C20 frsqrts v0.4h, v1.4h, v2.4h
+   q=1 u=0 size=2 b21=1 op6=0x3f  4EA2FC20 frsqrts v0.4s, v1.4s, v2.4s
+   q=1 u=0 size=3 b21=0 op6=0x0f  4EC23C20 frsqrts v0.8h, v1.8h, v2.8h
+   q=1 u=0 size=3 b21=1 op6=0x3f  4EE2FC20 frsqrts v0.2d, v1.2d, v2.2d
+== fsub: 5
+   q=0 u=0 size=2 b21=1 op6=0x35  0EA2D420 fsub v0.2s, v1.2s, v2.2s
+   q=0 u=0 size=3 b21=0 op6=0x05  0EC21420 fsub v0.4h, v1.4h, v2.4h
+   q=1 u=0 size=2 b21=1 op6=0x35  4EA2D420 fsub v0.4s, v1.4s, v2.4s
+   q=1 u=0 size=3 b21=0 op6=0x05  4EC21420 fsub v0.8h, v1.8h, v2.8h
+   q=1 u=0 size=3 b21=1 op6=0x35  4EE2D420 fsub v0.2d, v1.2d, v2.2d
+== mul: 6
+   q=0 u=0 size=0 b21=1 op6=0x27  0E229C20 mul v0.8b, v1.8b, v2.8b
+   q=0 u=0 size=1 b21=1 op6=0x27  0E629C20 mul v0.4h, v1.4h, v2.4h
+   q=0 u=0 size=2 b21=1 op6=0x27  0EA29C20 mul v0.2s, v1.2s, v2.2s
+   q=1 u=0 size=0 b21=1 op6=0x27  4E229C20 mul v0.16b, v1.16b, v2.16b
+   q=1 u=0 size=1 b21=1 op6=0x27  4E629C20 mul v0.8h, v1.8h, v2.8h
+   q=1 u=0 size=2 b21=1 op6=0x27  4EA29C20 mul v0.4s, v1.4s, v2.4s
+== sdot: 2
+   q=0 u=0 size=2 b21=0 op6=0x25  0E829420 sdot v0.2s, v1.8b, v2.8b
+   q=1 u=0 size=2 b21=0 op6=0x25  4E829420 sdot v0.4s, v1.16b, v2.16b
+== sqdmulh: 4
+   q=0 u=0 size=1 b21=1 op6=0x2d  0E62B420 sqdmulh v0.4h, v1.4h, v2.4h
+   q=0 u=0 size=2 b21=1 op6=0x2d  0EA2B420 sqdmulh v0.2s, v1.2s, v2.2s
+   q=1 u=0 size=1 b21=1 op6=0x2d  4E62B420 sqdmulh v0.8h, v1.8h, v2.8h
+   q=1 u=0 size=2 b21=1 op6=0x2d  4EA2B420 sqdmulh v0.4s, v1.4s, v2.4s
+== sqrdmlah: 4
+   q=0 u=1 size=1 b21=0 op6=0x21  2E428420 sqrdmlah v0.4h, v1.4h, v2.4h
+   q=0 u=1 size=2 b21=0 op6=0x21  2E828420 sqrdmlah v0.2s, v1.2s, v2.2s
+   q=1 u=1 size=1 b21=0 op6=0x21  6E428420 sqrdmlah v0.8h, v1.8h, v2.8h
+   q=1 u=1 size=2 b21=0 op6=0x21  6E828420 sqrdmlah v0.4s, v1.4s, v2.4s
+== sqrdmlsh: 4
+   q=0 u=1 size=1 b21=0 op6=0x23  2E428C20 sqrdmlsh v0.4h, v1.4h, v2.4h
+   q=0 u=1 size=2 b21=0 op6=0x23  2E828C20 sqrdmlsh v0.2s, v1.2s, v2.2s
+   q=1 u=1 size=1 b21=0 op6=0x23  6E428C20 sqrdmlsh v0.8h, v1.8h, v2.8h
+   q=1 u=1 size=2 b21=0 op6=0x23  6E828C20 sqrdmlsh v0.4s, v1.4s, v2.4s
+== sqrdmulh: 4
+   q=0 u=1 size=1 b21=1 op6=0x2d  2E62B420 sqrdmulh v0.4h, v1.4h, v2.4h
+   q=0 u=1 size=2 b21=1 op6=0x2d  2EA2B420 sqrdmulh v0.2s, v1.2s, v2.2s
+   q=1 u=1 size=1 b21=1 op6=0x2d  6E62B420 sqrdmulh v0.8h, v1.8h, v2.8h
+   q=1 u=1 size=2 b21=1 op6=0x2d  6EA2B420 sqrdmulh v0.4s, v1.4s, v2.4s
+== sub: 7
+   q=0 u=1 size=0 b21=1 op6=0x21  2E228420 sub v0.8b, v1.8b, v2.8b
+   q=0 u=1 size=1 b21=1 op6=0x21  2E628420 sub v0.4h, v1.4h, v2.4h
+   q=0 u=1 size=2 b21=1 op6=0x21  2EA28420 sub v0.2s, v1.2s, v2.2s
+   q=1 u=1 size=0 b21=1 op6=0x21  6E228420 sub v0.16b, v1.16b, v2.16b
+   q=1 u=1 size=1 b21=1 op6=0x21  6E628420 sub v0.8h, v1.8h, v2.8h
+   q=1 u=1 size=2 b21=1 op6=0x21  6EA28420 sub v0.4s, v1.4s, v2.4s
+   q=1 u=1 size=3 b21=1 op6=0x21  6EE28420 sub v0.2d, v1.2d, v2.2d
+== udot: 2
+   q=0 u=1 size=2 b21=0 op6=0x25  2E829420 udot v0.2s, v1.8b, v2.8b
+   q=1 u=1 size=2 b21=0 op6=0x25  6E829420 udot v0.4s, v1.16b, v2.16b
+== usdot: 2
+   q=0 u=0 size=2 b21=0 op6=0x27  0E829C20 usdot v0.2s, v1.8b, v2.8b
+   q=1 u=0 size=2 b21=0 op6=0x27  4E829C20 usdot v0.4s, v1.16b, v2.16b
+== uzp1: 7
+   q=0 u=0 size=0 b21=0 op6=0x06  0E021820 uzp1 v0.8b, v1.8b, v2.8b
+   q=0 u=0 size=1 b21=0 op6=0x06  0E421820 uzp1 v0.4h, v1.4h, v2.4h
+   q=0 u=0 size=2 b21=0 op6=0x06  0E821820 uzp1 v0.2s, v1.2s, v2.2s
+   q=1 u=0 size=0 b21=0 op6=0x06  4E021820 uzp1 v0.16b, v1.16b, v2.16b
+   q=1 u=0 size=1 b21=0 op6=0x06  4E421820 uzp1 v0.8h, v1.8h, v2.8h
+   q=1 u=0 size=2 b21=0 op6=0x06  4E821820 uzp1 v0.4s, v1.4s, v2.4s
+   q=1 u=0 size=3 b21=0 op6=0x06  4EC21820 uzp1 v0.2d, v1.2d, v2.2d

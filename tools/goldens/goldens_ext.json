@@ -1,0 +1,1136 @@
+[
+ {
+  "word": 950599745,
+  "mnemonic": "ldaddab",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 946405441,
+  "mnemonic": "ldaddlb",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 954794049,
+  "mnemonic": "ldaddalb",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 2015952961,
+  "mnemonic": "ldaddh",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 2024341569,
+  "mnemonic": "ldaddah",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 2020147265,
+  "mnemonic": "ldaddlh",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3089694785,
+  "mnemonic": "ldadd",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3102277697,
+  "mnemonic": "ldaddal",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 4171825217,
+  "mnemonic": "ldadda",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 4167630913,
+  "mnemonic": "ldaddl",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 4176019521,
+  "mnemonic": "ldaddal",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 950603842,
+  "mnemonic": "ldclrab",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 946409538,
+  "mnemonic": "ldclrlb",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 954798146,
+  "mnemonic": "ldclralb",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 2015957058,
+  "mnemonic": "ldclrh",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 2024345666,
+  "mnemonic": "ldclrah",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 2020151362,
+  "mnemonic": "ldclrlh",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3089698882,
+  "mnemonic": "ldclr",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3102281794,
+  "mnemonic": "ldclral",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 4171829314,
+  "mnemonic": "ldclra",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 4167635010,
+  "mnemonic": "ldclrl",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 4176023618,
+  "mnemonic": "ldclral",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 950607939,
+  "mnemonic": "ldeorab",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 946413635,
+  "mnemonic": "ldeorlb",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 954802243,
+  "mnemonic": "ldeoralb",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 2015961155,
+  "mnemonic": "ldeorh",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 2024349763,
+  "mnemonic": "ldeorah",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 2020155459,
+  "mnemonic": "ldeorlh",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3089702979,
+  "mnemonic": "ldeor",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3102285891,
+  "mnemonic": "ldeoral",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 4171833411,
+  "mnemonic": "ldeora",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 4167639107,
+  "mnemonic": "ldeorl",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 4176027715,
+  "mnemonic": "ldeoral",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 950612036,
+  "mnemonic": "ldsetab",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 946417732,
+  "mnemonic": "ldsetlb",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 954806340,
+  "mnemonic": "ldsetalb",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 2015965252,
+  "mnemonic": "ldseth",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 2024353860,
+  "mnemonic": "ldsetah",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 2020159556,
+  "mnemonic": "ldsetlh",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3089707076,
+  "mnemonic": "ldset",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3102289988,
+  "mnemonic": "ldsetal",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 4171837508,
+  "mnemonic": "ldseta",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 4167643204,
+  "mnemonic": "ldsetl",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 4176031812,
+  "mnemonic": "ldsetal",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 950616133,
+  "mnemonic": "ldsmaxab",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 946421829,
+  "mnemonic": "ldsmaxlb",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 954810437,
+  "mnemonic": "ldsmaxalb",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 2015969349,
+  "mnemonic": "ldsmaxh",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 2024357957,
+  "mnemonic": "ldsmaxah",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 2020163653,
+  "mnemonic": "ldsmaxlh",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3089711173,
+  "mnemonic": "ldsmax",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3102294085,
+  "mnemonic": "ldsmaxal",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 4171841605,
+  "mnemonic": "ldsmaxa",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 4167647301,
+  "mnemonic": "ldsmaxl",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 4176035909,
+  "mnemonic": "ldsmaxal",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 950620230,
+  "mnemonic": "ldsminab",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 946425926,
+  "mnemonic": "ldsminlb",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 954814534,
+  "mnemonic": "ldsminalb",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 2015973446,
+  "mnemonic": "ldsminh",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 2024362054,
+  "mnemonic": "ldsminah",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 2020167750,
+  "mnemonic": "ldsminlh",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3089715270,
+  "mnemonic": "ldsmin",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3102298182,
+  "mnemonic": "ldsminal",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 4171845702,
+  "mnemonic": "ldsmina",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 4167651398,
+  "mnemonic": "ldsminl",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 4176040006,
+  "mnemonic": "ldsminal",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 950624327,
+  "mnemonic": "ldumaxab",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 946430023,
+  "mnemonic": "ldumaxlb",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 954818631,
+  "mnemonic": "ldumaxalb",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 2015977543,
+  "mnemonic": "ldumaxh",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 2024366151,
+  "mnemonic": "ldumaxah",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 2020171847,
+  "mnemonic": "ldumaxlh",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3089719367,
+  "mnemonic": "ldumax",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3102302279,
+  "mnemonic": "ldumaxal",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 4171849799,
+  "mnemonic": "ldumaxa",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 4167655495,
+  "mnemonic": "ldumaxl",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 4176044103,
+  "mnemonic": "ldumaxal",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 950628424,
+  "mnemonic": "lduminab",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 946434120,
+  "mnemonic": "lduminlb",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 954822728,
+  "mnemonic": "lduminalb",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 2015981640,
+  "mnemonic": "lduminh",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 2024370248,
+  "mnemonic": "lduminah",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 2020175944,
+  "mnemonic": "lduminlh",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3089723464,
+  "mnemonic": "ldumin",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3102306376,
+  "mnemonic": "lduminal",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 4171853896,
+  "mnemonic": "ldumina",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 4167659592,
+  "mnemonic": "lduminl",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 4176048200,
+  "mnemonic": "lduminal",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 942243913,
+  "mnemonic": "swpb",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 950632521,
+  "mnemonic": "swpab",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 946438217,
+  "mnemonic": "swplb",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 954826825,
+  "mnemonic": "swpalb",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 2015985737,
+  "mnemonic": "swph",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 2024374345,
+  "mnemonic": "swpah",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 2020180041,
+  "mnemonic": "swplh",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 2028568649,
+  "mnemonic": "swpalh",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3089727561,
+  "mnemonic": "swp",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3098116169,
+  "mnemonic": "swpa",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3093921865,
+  "mnemonic": "swpl",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3102310473,
+  "mnemonic": "swpal",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 4163469385,
+  "mnemonic": "swp",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 4171857993,
+  "mnemonic": "swpa",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 4167663689,
+  "mnemonic": "swpl",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 4176052297,
+  "mnemonic": "swpal",
+  "group": "LSE",
+  "oracle": "capstone"
+ },
+ {
+  "word": 448938016,
+  "mnemonic": "crc32b",
+  "group": "CRC32",
+  "oracle": "capstone"
+ },
+ {
+  "word": 448939040,
+  "mnemonic": "crc32h",
+  "group": "CRC32",
+  "oracle": "capstone"
+ },
+ {
+  "word": 448940064,
+  "mnemonic": "crc32w",
+  "group": "CRC32",
+  "oracle": "capstone"
+ },
+ {
+  "word": 2596424736,
+  "mnemonic": "crc32x",
+  "group": "CRC32",
+  "oracle": "keystone"
+ },
+ {
+  "word": 448942112,
+  "mnemonic": "crc32cb",
+  "group": "CRC32",
+  "oracle": "capstone"
+ },
+ {
+  "word": 448943136,
+  "mnemonic": "crc32ch",
+  "group": "CRC32",
+  "oracle": "capstone"
+ },
+ {
+  "word": 448944160,
+  "mnemonic": "crc32cw",
+  "group": "CRC32",
+  "oracle": "capstone"
+ },
+ {
+  "word": 2596428832,
+  "mnemonic": "crc32cx",
+  "group": "CRC32",
+  "oracle": "keystone"
+ },
+ {
+  "word": 1311262752,
+  "mnemonic": "aese",
+  "group": "AES/PMULL",
+  "oracle": "capstone"
+ },
+ {
+  "word": 1311266848,
+  "mnemonic": "aesd",
+  "group": "AES/PMULL",
+  "oracle": "capstone"
+ },
+ {
+  "word": 1311270944,
+  "mnemonic": "aesmc",
+  "group": "AES/PMULL",
+  "oracle": "capstone"
+ },
+ {
+  "word": 1311275040,
+  "mnemonic": "aesimc",
+  "group": "AES/PMULL",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3468722208,
+  "mnemonic": "sha512su0",
+  "group": "SHA512",
+  "oracle": "capstone"
+ },
+ {
+  "word": 237035552,
+  "mnemonic": "pmull",
+  "group": "AES/PMULL",
+  "oracle": "capstone"
+ },
+ {
+  "word": 1310777376,
+  "mnemonic": "pmull2",
+  "group": "AES/PMULL",
+  "oracle": "capstone"
+ },
+ {
+  "word": 241229856,
+  "mnemonic": "pmull",
+  "group": "AES/PMULL",
+  "oracle": "ddi0487"
+ },
+ {
+  "word": 1314971680,
+  "mnemonic": "pmull2",
+  "group": "AES/PMULL",
+  "oracle": "ddi0487"
+ },
+ {
+  "word": 3462561824,
+  "mnemonic": "sha512h",
+  "group": "SHA512",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3462562848,
+  "mnemonic": "sha512h2",
+  "group": "SHA512",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3462563872,
+  "mnemonic": "sha512su1",
+  "group": "SHA512",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3456237600,
+  "mnemonic": "eor3",
+  "group": "SHA3",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3458334752,
+  "mnemonic": "bcax",
+  "group": "SHA3",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3462564896,
+  "mnemonic": "rax1",
+  "group": "SHA3",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3464626208,
+  "mnemonic": "xar",
+  "group": "SHA3",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3460431904,
+  "mnemonic": "sm3ss1",
+  "group": "SM3/SM4",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3462578208,
+  "mnemonic": "sm3partw1",
+  "group": "SM3/SM4",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3462579232,
+  "mnemonic": "sm3partw2",
+  "group": "SM3/SM4",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3460464672,
+  "mnemonic": "sm3tt1a",
+  "group": "SM3/SM4",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3460465696,
+  "mnemonic": "sm3tt1b",
+  "group": "SM3/SM4",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3460466720,
+  "mnemonic": "sm3tt2a",
+  "group": "SM3/SM4",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3460467744,
+  "mnemonic": "sm3tt2b",
+  "group": "SM3/SM4",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3462580256,
+  "mnemonic": "sm4ekey",
+  "group": "SM3/SM4",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3468723232,
+  "mnemonic": "sm4e",
+  "group": "SM3/SM4",
+  "oracle": "capstone"
+ },
+ {
+  "word": 1317180448,
+  "mnemonic": "sdot",
+  "group": "DOTPROD",
+  "oracle": "capstone"
+ },
+ {
+  "word": 1854051360,
+  "mnemonic": "udot",
+  "group": "DOTPROD",
+  "oracle": "capstone"
+ },
+ {
+  "word": 776111136,
+  "mnemonic": "sqrdmlah",
+  "group": "ASIMDRDM",
+  "oracle": "capstone"
+ },
+ {
+  "word": 1849852960,
+  "mnemonic": "sqrdmlah",
+  "group": "ASIMDRDM",
+  "oracle": "capstone"
+ },
+ {
+  "word": 776113184,
+  "mnemonic": "sqrdmlsh",
+  "group": "ASIMDRDM",
+  "oracle": "capstone"
+ },
+ {
+  "word": 1849855008,
+  "mnemonic": "sqrdmlsh",
+  "group": "ASIMDRDM",
+  "oracle": "capstone"
+ },
+ {
+  "word": 1866645536,
+  "mnemonic": "sqrdmlah",
+  "group": "ASIMDRDM",
+  "oracle": "ddi0487"
+ },
+ {
+  "word": 1866649632,
+  "mnemonic": "sqrdmlsh",
+  "group": "ASIMDRDM",
+  "oracle": "ddi0487"
+ },
+ {
+  "word": 2135086112,
+  "mnemonic": "sqrdmlah",
+  "group": "RDM",
+  "oracle": "ddi0487"
+ },
+ {
+  "word": 2135088160,
+  "mnemonic": "sqrdmlsh",
+  "group": "RDM",
+  "oracle": "ddi0487"
+ },
+ {
+  "word": 776127520,
+  "mnemonic": "fcmla",
+  "group": "FCMA",
+  "oracle": "capstone"
+ },
+ {
+  "word": 1849869344,
+  "mnemonic": "fcmla",
+  "group": "FCMA",
+  "oracle": "capstone"
+ },
+ {
+  "word": 1849873440,
+  "mnemonic": "fcmla",
+  "group": "FCMA",
+  "oracle": "capstone"
+ },
+ {
+  "word": 1849877536,
+  "mnemonic": "fcadd",
+  "group": "FCMA",
+  "oracle": "capstone"
+ },
+ {
+  "word": 1849881632,
+  "mnemonic": "fcadd",
+  "group": "FCMA",
+  "oracle": "capstone"
+ },
+ {
+  "word": 1870798880,
+  "mnemonic": "fcmla",
+  "group": "FCMA",
+  "oracle": "capstone-pending"
+ },
+ {
+  "word": 776135712,
+  "mnemonic": "fcadd",
+  "group": "FCADD",
+  "oracle": "capstone"
+ },
+ {
+  "word": 1849877536,
+  "mnemonic": "fcadd",
+  "group": "FCADD",
+  "oracle": "capstone"
+ },
+ {
+  "word": 1849881632,
+  "mnemonic": "fcadd",
+  "group": "FCADD",
+  "oracle": "capstone"
+ },
+ {
+  "word": 511574051,
+  "mnemonic": "fjcvtzs",
+  "group": "JSCVT",
+  "oracle": "capstone"
+ },
+ {
+  "word": 509853728,
+  "mnemonic": "fcvt",
+  "group": "FP16",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3670081568,
+  "mnemonic": "pacia",
+  "group": "PAC",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3670082592,
+  "mnemonic": "pacib",
+  "group": "PAC",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3670083616,
+  "mnemonic": "pacda",
+  "group": "PAC",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3670084640,
+  "mnemonic": "pacdb",
+  "group": "PAC",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3670085664,
+  "mnemonic": "autia",
+  "group": "PAC",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3670086688,
+  "mnemonic": "autib",
+  "group": "PAC",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3670087712,
+  "mnemonic": "autda",
+  "group": "PAC",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3670088736,
+  "mnemonic": "autdb",
+  "group": "PAC",
+  "oracle": "capstone"
+ },
+ {
+  "word": 2596417568,
+  "mnemonic": "pacga",
+  "group": "PAC",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3670090721,
+  "mnemonic": "paciza",
+  "group": "PAC",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3670091745,
+  "mnemonic": "pacizb",
+  "group": "PAC",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3670094817,
+  "mnemonic": "autiza",
+  "group": "PAC",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3670095841,
+  "mnemonic": "autizb",
+  "group": "PAC",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3670098913,
+  "mnemonic": "xpaci",
+  "group": "PAC",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3670099937,
+  "mnemonic": "xpacd",
+  "group": "PAC",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3573752927,
+  "mnemonic": "bti",
+  "group": "BTI",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3573752991,
+  "mnemonic": "bti",
+  "group": "BTI",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3573753055,
+  "mnemonic": "bti",
+  "group": "BTI",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3573752031,
+  "mnemonic": "dgh",
+  "group": "DGH/DOT",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3573752351,
+  "mnemonic": "esb",
+  "group": "DGH/DOT",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3573752383,
+  "mnemonic": "psb",
+  "group": "DGH/DOT",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3573752415,
+  "mnemonic": "tsb",
+  "group": "DGH/DOT",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3573752479,
+  "mnemonic": "csdb",
+  "group": "DGH/DOT",
+  "oracle": "capstone"
+ },
+ {
+  "word": 3574104625,
+  "mnemonic": "",
+  "group": "TLBI Ranges",
+  "oracle": "ddi0487"
+ },
+ {
+  "word": 3574105393,
+  "mnemonic": "",
+  "group": "TLBI Ranges",
+  "oracle": "ddi0487"
+ },
+ {
+  "word": 3574105649,
+  "mnemonic": "",
+  "group": "TLBI Ranges",
+  "oracle": "ddi0487"
+ },
+ {
+  "word": 3574104817,
+  "mnemonic": "",
+  "group": "TLBI Ranges",
+  "oracle": "ddi0487"
+ },
+ {
+  "word": 3577451072,
+  "mnemonic": "",
+  "group": "AMUv1",
+  "oracle": "ddi0487"
+ },
+ {
+  "word": 3577451200,
+  "mnemonic": "",
+  "group": "AMUv1",
+  "oracle": "ddi0487"
+ },
+ {
+  "word": 3577254976,
+  "mnemonic": "",
+  "group": "MPAM",
+  "oracle": "ddi0487"
+ },
+ {
+  "word": 3577220416,
+  "mnemonic": "",
+  "group": "CSV2/CSV3",
+  "oracle": "ddi0487"
+ }
+]

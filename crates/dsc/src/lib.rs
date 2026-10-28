@@ -32,6 +32,8 @@ pub mod localsyms;
 pub mod mapping;
 pub mod slide;
 pub mod subcache;
+pub mod prebuilt;
+pub mod closure;
 
 pub use file::{Dsc, CacheMember};
 pub use header::{CacheHeader, CacheType, FormatVersion};

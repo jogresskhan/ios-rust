@@ -872,8 +872,10 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
         let castagnoli = (w >> 12) & 1 == 1;
         let sz = ((w >> 10) & 3) as u8;
         let sf = w >> 31 == 1;
+        // DDI 0487 + keystone-verified: CRC32X/CRC32CX (sz=11) have sf=1;
+        // the W-forms (sz<11) have sf=0.
         if sz == 3 && !sf {
-            return None; // CRC32X needs sf=1
+            return None;
         }
         if sz != 3 && sf {
             return None;
@@ -909,6 +911,22 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
         };
         if insn.is_some() {
             return insn;
+        }
+    }
+
+    // --- scalar RDM (v8.1, real DDI 0487 layout): 0111 1111 size Rm
+    //     1101 01/11 Rn Rd — bits 31..21 = 0x3FA, bits 15..10 = 0x35
+    //     (SQRDMLAH) / 0x37 (SQRDMLSH); keystone-verified 0x7F42C820 ---
+    if (w & 0xFFE0_0000) == 0x7F40_0000 && (w >> 10) & 0x3F != 0 {
+        let op = (w >> 10) & 0x3F;
+        if op == 0x35 || op == 0x37 {
+            return Some(Insn::Sqrdmlah {
+                rd: reg(w, 0),
+                rn: reg(w, 5),
+                rm: reg(w, 16),
+                is64: ((w >> 22) & 3) == 2,
+                subtract: op == 0x37,
+            });
         }
     }
 
@@ -1287,8 +1305,9 @@ fn decode_simd(w: u32) -> Option<Insn> {
     // --- crypto-3 (big, bit21=1): SHA512H/H2/SU1, RAX1, SM3PART, SM4EKEY,
     //     BCAX (opcode 0x03 with bit21=1) ---
     if big && (w >> 21) & 1 == 1 {
-        if opcode == 0x03 {
-            return Some(Insn::Vsha3 { vd, vn, vm, ra: reg(w, 10), op: Sha3Op::Bcax });
+        if (opcode & 0x30) == 0 {
+            // BCAX: bits 15..14 = 00, Ra = bits 13..10
+            return Some(Insn::Vsha3 { vd, vn, vm, ra: reg(w, 10) & 0xF, op: Sha3Op::Bcax });
         }
         return match opcode {
             0x20 => Some(Insn::Vsha512h { vd, vn, vm, h2: false }),
@@ -1321,11 +1340,13 @@ fn decode_simd(w: u32) -> Option<Insn> {
     }
     // --- bit21 == 0: SHA3 (EOR3/SM3SS1), XAR, 2-reg crypto, 3-same ---
     if (w >> 21) & 1 == 0 {
-        if big && opcode == 0x03 {
+        if big && (opcode & 0x30) == 0 && ((w >> 21) & 5) == 0 {
+            // EOR3 / SM3SS1: bits 23..21 = 000 and bits 15..14 = 00,
+            // Ra = bits 13..10 (XAR has bits 23..21 = 100)
             if (w >> 22) & 1 == 1 {
-                return Some(Insn::Vsm3ss1 { vd, vn, vm, ra: reg(w, 10) });
+                return Some(Insn::Vsm3ss1 { vd, vn, vm, ra: reg(w, 10) & 0xF });
             }
-            return Some(Insn::Vsha3 { vd, vn, vm, ra: reg(w, 10), op: Sha3Op::Eor3 });
+            return Some(Insn::Vsha3 { vd, vn, vm, ra: reg(w, 10) & 0xF, op: Sha3Op::Eor3 });
         }
         if big && ((w >> 21) & 7) == 4 && group24 == 0x0E {
             return Some(Insn::Vxar { vd, vn, vm, imm6: (w >> 10) & 0x3F });
@@ -1356,8 +1377,10 @@ fn decode_simd(w: u32) -> Option<Insn> {
         // standard 3-same
         return match opcode {
             0x25 => Some(Insn::Vdot { vd, vn, vm, unsigned: u, q, two_s: !q }),
-            0x21 => Some(Insn::Vsqrdmlah { vd, vn, vm, subtract: false, size_log2: if size == 2 { 2 } else { 1 }, q }),
-            0x23 => Some(Insn::Vsqrdmlah { vd, vn, vm, subtract: true, size_log2: if size == 2 { 2 } else { 1 }, q }),
+            // SQRDMLAH/SH (v8.1) vs CMGE/CMEQ (v8.0) share the opcode bits —
+            // bit 21 distinguishes them (RDM forms have bit21 = 0)
+            0x21 if (w >> 21) & 1 == 0 => Some(Insn::Vsqrdmlah { vd, vn, vm, subtract: false, size_log2: if size == 2 { 2 } else { 1 }, q }),
+            0x23 if (w >> 21) & 1 == 0 => Some(Insn::Vsqrdmlah { vd, vn, vm, subtract: true, size_log2: if size == 2 { 2 } else { 1 }, q }),
             0x31 | 0x33 | 0x35 | 0x37 => {
                 Some(Insn::Vfcmla { vd, vn, vm, rot: ((opcode >> 1) & 3) as u8, size_log2: if size == 2 { 2 } else { 1 }, q })
             }

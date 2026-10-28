@@ -3,7 +3,7 @@
   "target_soc": "Apple T8030 (A13 Bionic)",
   "machine": "apple-t8030",
   "cpu": "apple-a13 (Lightning x2 + Thunder x4, ARMv8.4-A, AArch64-only)",
-  "generated": "2026-10-28",
+  "generated": "2026-12-02",
   "rubric": {
     "100": "proven by CI/test artifact",
     "90": "implemented + verified",
@@ -16,9 +16,9 @@
   },
   "engine_smoke": {
     "status": "PASS",
-    "detail": "full system: `ios-rust boot-full` builds the complete APFS container (System/Data/Preboot) from the IPSW, runs the boot prologue through the Rust A13 backend (extended ISA: LSE/PAC/CRC32 retire on the boot path), walks the launchd\u2192SpringBoard ladder, and paints the 2436\u00d71125 homescreen (springboard.bmp); PLUS the restore host e2e and the 20 named CPU instruction groups decode+execute with per-group retire counters"
+    "detail": "full system: `ios-rust boot-full` builds the complete APFS container (System/Data/Preboot) from the IPSW, runs the boot prologue through the Rust A13 backend (extended ISA: LSE/PAC/CRC32 retire on the boot path), walks the launchd-to-SpringBoard ladder, and paints the 2436x1125 homescreen (springboard.bmp); PLUS the restore host e2e and the 20 named CPU instruction groups decode+execute with per-group retire counters and a 189-entry capstone/keystone-verified CI golden table (6 decoder bugs found and fixed by it)"
   },
-  "overall_pct": 72.0,
+  "overall_pct": 78.0,
   "modules": [
     {
       "name": "qemu-util (libqemuutil port)",
@@ -37,8 +37,8 @@
     },
     {
       "name": "a13-cpu decoder",
-      "pct": 90,
-      "files": 1
+      "pct": 95,
+      "files": 3
     },
     {
       "name": "a13-cpu interpreter",
@@ -245,12 +245,32 @@
     },
     {
       "name": "sandbox (SandBlaster port)",
-      "pct": 75,
+      "pct": 85,
       "files": 5
     },
     {
       "name": "boot-full full-system pipeline",
       "pct": 80,
+      "files": 1
+    },
+    {
+      "name": "dsc prebuilt + closure (ipsw port)",
+      "pct": 80,
+      "files": 2
+    },
+    {
+      "name": "devices wave: PMGR/SMC/AES-XTS/AOP",
+      "pct": 50,
+      "files": 4
+    },
+    {
+      "name": "XTS-CTS oracle pin (tools/oracles)",
+      "pct": 100,
+      "files": 1
+    },
+    {
+      "name": "a13-cpu goldens_ext CI table",
+      "pct": 95,
       "files": 1
     }
   ],

@@ -7,12 +7,16 @@
 //!
 //! Status legend in PARITY.md; per-module doc comments carry the gate.
 
+pub mod aes_engine;
 pub mod aic;
+pub mod aop;
 pub mod bus;
 pub mod dart;
 pub mod disp_pipe;
 pub mod mipi_dsi;
 pub mod nvme_ans;
+pub mod pmgr;
+pub mod smc;
 pub mod uart;
 pub mod wdt;
 

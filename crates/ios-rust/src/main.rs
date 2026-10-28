@@ -27,6 +27,8 @@ use soc_t8030;
 use vault::VaultClient;
 use virt::{machine_boot, Machine, MachineConfig, QemuCli, QEMU_COMPAT_VERSION};
 
+mod host_restore;
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = match args.first().map(|s| s.as_str()) {
@@ -107,6 +109,7 @@ fn cmd_restore(args: &[String]) -> i32 {
             }
         }
     }
+    println!("host restore stack: {} (e2e mock-proven; see parity ledger)", host_restore::STACK_ID);
     for v in RamdiskVariant::diag_order() {
         let i = v.info();
         println!("  {:10} {} → run#74: {}", i.id, i.description, i.verdict74);
@@ -259,9 +262,16 @@ fn cmd_parity() -> i32 {
         ("Scaler (map only)", 20),
         ("IPSW: IM4P/manifest/variants", 100),
         ("Restore stage painter", 40),
+        ("plist (libplist XML subset)", 90),
+        ("usbmuxhost (usbmuxd client)", 90),
+        ("restored protocol client (0xF27E)", 75),
+        ("ASR client (asr.c parity + SHA-1)", 75),
+        ("authinstall (TSS/IM4M subset)", 60),
+        ("APFS reader+writer subset", 60),
+        ("host restore pipeline (usbmux→restored→ASR)", 75),
         ("Vault integration (research-S3)", 100),
         ("LZFSE decode (vendored C)", 75),
-        ("APFS mount", 0),
+        ("APFS mount (real images; AES-XTS wall)", 0),
         ("AES-XTS real keys", 0),
         ("GUI window (feature gui)", 0),
     ];
@@ -376,7 +386,8 @@ fn cmd_selftest() -> i32 {
         d.write(devices::wdt::REG_WDT_CTRL, 0b100, devices::bus::W4);
         d.reset_requested
     };
-    let all = bitops_ok && fifo_ok && im4p_ok && bus_probe;
-    println!("selftest: bitops={} fifo={} im4p={} wdt={} → {}", bitops_ok, fifo_ok, im4p_ok, bus_probe, if all { "PASS" } else { "FAIL" });
+    let host_ok = host_restore::smoke();
+    let all = bitops_ok && fifo_ok && im4p_ok && bus_probe && host_ok;
+    println!("selftest: bitops={} fifo={} im4p={} wdt={} hoststack={} → {}", bitops_ok, fifo_ok, im4p_ok, bus_probe, host_ok, if all { "PASS" } else { "FAIL" });
     if all { 0 } else { 1 }
 }

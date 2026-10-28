@@ -41,7 +41,7 @@ jobs:
           else
             cargo build --release --target ${{ matrix.target }}
           fi
-      - name: Package (single binary: ios-rust)
+      - name: "Package single binary: ios-rust"
         run: |
           DIR=ios-rust-${{ matrix.target }}
           mkdir -p "$DIR"

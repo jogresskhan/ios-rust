@@ -16,9 +16,9 @@
   },
   "engine_smoke": {
     "status": "PASS",
-    "detail": "full system: `ios-rust boot-full` builds the complete APFS container (System/Data/Preboot) from the IPSW, runs the boot prologue through the Rust A13 backend (extended ISA: LSE/PAC/CRC32 retire on the boot path), walks the launchd-to-SpringBoard ladder, and paints the 2436x1125 homescreen (springboard.bmp); PLUS the restore host e2e, the 20 named CPU instruction groups decode+execute with per-group retire counters and the 189-entry capstone/keystone-verified CI golden table (6 decoder bugs found and fixed by it); PLUS the complete apple-soc inventory (38 devices, 35 ported) with 89 crate tests"
+    "detail": "full system: `ios-rust boot-full` builds the complete APFS container (System/Data/Preboot), runs the boot prologue through the Rust A13 backend, walks the launchd-to-SpringBoard ladder, paints the 2436x1125 homescreen; PLUS the 20 CPU groups with the 189-entry golden table; PLUS REAL-ARTIFACT gates now proven: the T8030 iOS 13.7 17H35 kernelcache from Apple's CDN decompresses (39 MB LZFSE), yields Darwin 19.6.0 + 232 kexts, and takes 6 T8030 patches on real bytes; the real DeviceTree.n104ap ADT parses (105 peripherals, arm-io,t8030); a live TSS response from gs.apple.com parses and the ApImg4Ticket IM4M validates structurally; 6 real-data bugs found and fixed by the fixtures"
   },
-  "overall_pct": 71.7,
+  "overall_pct": 73.4,
   "modules": [
     {
       "name": "qemu-util (libqemuutil port)",
@@ -57,7 +57,7 @@
     },
     {
       "name": "adt",
-      "pct": 90,
+      "pct": 100,
       "files": 3
     },
     {
@@ -67,7 +67,7 @@
     },
     {
       "name": "img4/im4p/der",
-      "pct": 75,
+      "pct": 90,
       "files": 3
     },
     {
@@ -168,7 +168,7 @@
     },
     {
       "name": "restore: plist_lite (libplist XML codec)",
-      "pct": 90
+      "pct": 95
     },
     {
       "name": "restore: usbmux host client (libusbmuxd class)",
@@ -224,7 +224,7 @@
     },
     {
       "name": "authinstall (TSS/IM4M standalone crate)",
-      "pct": 60
+      "pct": 75
     },
     {
       "name": "apfs (reader+writer standalone crate)",
@@ -335,7 +335,23 @@
     },
     {
       "name": "kernelcache: boot patcher (engine + T8030 table)",
+      "pct": 90
+    },
+    {
+      "name": "kernelcache: LZSS decode (xnu mkext port)",
       "pct": 75
+    },
+    {
+      "name": "kernelcache: LZFSE (real Apple bytes)",
+      "pct": 90
+    },
+    {
+      "name": "kernelcache: version + prelink KEXT list",
+      "pct": 90
+    },
+    {
+      "name": "real-fixture CI gate (Apple CDN bytes + live TSS)",
+      "pct": 100
     }
   ],
   "permanent_gaps": [

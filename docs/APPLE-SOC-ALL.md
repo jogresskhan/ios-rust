@@ -79,10 +79,12 @@ implemented · **60** done-once/stub-1:1 · **50** partial · **40** reg-map ·
 
 1. **sep.c port** (5673 L) — the biggest single gap; bootstrap with the
    sep-sim wire format already in Rust (90%).
-2. **Real-KC patcher gate** — run one real T8030 kernelcache through
-   `kernelcache::patcher::apply_t8030_patches`, assert AMFI/APFS/SEP/img4
-   attempts land on real bytes, then wire it into `ios-rust boot_full`
-   (flips kernel patcher 75 → 90).
+2. ~~Real-KC patcher gate~~ **DONE (90)** — the real T8030 iOS 13.7
+   kernelcache from Apple's CDN takes **6 patches on real bytes**
+   (signature-bypass, trustcache, APFS snapshots, rootfs remount,
+   hactivation, pmap_cs_enforce); fixture-tested via
+   `.github/workflows/fixtures.yml`. Remaining: wire `apply_t8030_patches`
+   into `ios-rust boot_full` and chase the 14 missed finds.
 3. **DART walker gate** — replay captured PTE walks (dart-walker-gate).
 4. **AIC golden IPI routing** — flips aic 55 → 90.
 5. **ADP v4 real guest trace** (M3a probe) — flips displaypipe 50 → 90.

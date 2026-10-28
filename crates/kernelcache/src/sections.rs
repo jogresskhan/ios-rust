@@ -80,8 +80,11 @@ pub fn sections(img: &[u8]) -> Vec<Section> {
                     segment: seg.clone(),
                     name: name16(img, so),
                     addr: u64le(img, so + 32).unwrap_or(0),
-                    offset: u64le(img, so + 40).unwrap_or(0),
-                    size: u64le(img, so + 48).unwrap_or(0),
+                    // section_64 layout: size (u64) at +40, file offset
+                    // (u32) at +48 — found by real-fixture testing on the
+                    // T8030 iOS 13.7 kernelcache (the two were swapped).
+                    size: u64le(img, so + 40).unwrap_or(0),
+                    offset: u32le(img, so + 48).unwrap_or(0) as u64,
                 });
             }
         }

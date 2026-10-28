@@ -173,6 +173,23 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// skip_ws plus inline `<!-- … -->` comments (real Apple plists
+    /// interleave comments anywhere between elements).
+    fn skip_ws_comments(&mut self) {
+        loop {
+            self.skip_ws();
+            let Some(rest) = self.s.get(self.pos..) else { return };
+            if rest.starts_with("<!--") {
+                match rest.find("-->") {
+                    Some(i) => self.pos += i + 3,
+                    None => self.pos = self.s.len(),
+                }
+            } else {
+                return;
+            }
+        }
+    }
+
     /// Consume `<?xml …?>`, `<!DOCTYPE …>`, and `<!-- … -->` preambles.
     fn skip_preamble(&mut self) {
         loop {
@@ -202,9 +219,26 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Consume the next opening tag name (after the `<`).
-    fn next_tag(&mut self) -> Result<&'a str, String> {
-        self.skip_ws();
+    /// Consume the next opening tag name (after the `<`). Returns
+    /// `(name, self_closing)` — real Apple plists use empty containers
+    /// like `<array/>` / `<dict/>` (found on the T8030 iOS 13.7
+    /// __PRELINK_INFO.__info).
+    fn next_tag(&mut self) -> Result<(&'a str, bool), String> {
+        self.skip_ws_comments();
+        // Real Apple plists (e.g. the T8030 iOS 13.7 __PRELINK_INFO.__info)
+        // interleave `<!-- … -->` comments between elements, not just in
+        // the preamble — skip them inline.
+        while let Some(rest) = self.s.get(self.pos..) {
+            if rest.starts_with("<!--") {
+                match rest.find("-->") {
+                    Some(i) => self.pos += i + 3,
+                    None => return Err("plist: unterminated comment".into()),
+                }
+                self.skip_ws();
+            } else {
+                break;
+            }
+        }
         let rest = self
             .s
             .get(self.pos..)
@@ -218,11 +252,13 @@ impl<'a> Parser<'a> {
             .unwrap_or(rest.len());
         let name = &rest[..end];
         // Skip past the rest of the opening tag ("attrs>" or ">" or "/>").
+        let self_closing = rest.starts_with("/")
+            || rest[..rest.find('>').unwrap_or(rest.len())].ends_with('/');
         match rest.find('>') {
             Some(gt) => self.pos += gt + 1,
             None => return Err("plist: unterminated tag".into()),
         }
-        Ok(name)
+        Ok((name, self_closing))
     }
 
     fn parse_value(&mut self) -> Result<Plist, String> {
@@ -243,24 +279,66 @@ impl<'a> Parser<'a> {
             self.pos += 8;
             return Ok(Plist::Bool(false));
         }
-        let name = self.next_tag()?.to_string();
+        let (name, self_closing) = self.next_tag()?;
+        let name = name.to_string();
         match name.as_str() {
-            "dict" => self.parse_dict(),
-            "array" => self.parse_array(),
+            "true" | "false" => {
+                // Both void (<true/>) and paired (<true></true>) forms
+                // appear in real Apple plists (T8030 iOS 13.7 __info).
+                if !self_closing {
+                    self.raw_until(&name)?;
+                }
+                Ok(Plist::Bool(name == "true"))
+            }
+            "dict" => {
+                if self_closing {
+                    return Ok(Plist::Dict(Default::default()));
+                }
+                self.parse_dict()
+            }
+            "array" => {
+                if self_closing {
+                    return Ok(Plist::Array(Vec::new()));
+                }
+                self.parse_array()
+            }
             "key" | "string" => {
-                let text = self.raw_until(&name)?;
+                let text = if self_closing {
+                    String::new()
+                } else {
+                    self.raw_until(&name)?
+                };
                 Ok(Plist::Str(unescape(&text)))
             }
             "integer" => {
+                if self_closing {
+                    return Ok(Plist::UInt(0));
+                }
                 let text = self.raw_until("integer")?;
                 let t = text.trim();
-                let n: u64 = t
-                    .trim_start_matches('+')
-                    .parse()
-                    .map_err(|_| format!("plist: bad integer {t:?}"))?;
+                // Real Apple plists (e.g. the T8030 iOS 13.7
+                // __PRELINK_INFO.__info) emit hex integers: 0x1, 0x1000 …
+                let unsigned = t.trim_start_matches('+');
+                let parsed: Result<u64, String> = if let Some(hex) = unsigned
+                    .strip_prefix("0x")
+                    .or_else(|| unsigned.strip_prefix("0X"))
+                {
+                    u64::from_str_radix(hex, 16).map_err(|e| e.to_string())
+                } else if let Some(neg) = t.strip_prefix('-') {
+                    neg.trim_start_matches('+')
+                        .parse::<u64>()
+                        .map(|v| v.wrapping_neg())
+                        .map_err(|e| e.to_string())
+                } else {
+                    unsigned.parse::<u64>().map_err(|e| e.to_string())
+                };
+                let n = parsed.map_err(|_| format!("plist: bad integer {t:?}"))?;
                 Ok(Plist::UInt(n))
             }
             "data" => {
+                if self_closing {
+                    return Ok(Plist::Data(Vec::new()));
+                }
                 let text = self.raw_until("data")?;
                 base64_decode(text.trim()).map(Plist::Data)
             }
@@ -285,7 +363,7 @@ impl<'a> Parser<'a> {
     fn parse_dict(&mut self) -> Result<Plist, String> {
         let mut map = BTreeMap::new();
         loop {
-            self.skip_ws();
+            self.skip_ws_comments();
             let rest = self
                 .s
                 .get(self.pos..)
@@ -297,7 +375,7 @@ impl<'a> Parser<'a> {
             if !rest.starts_with('<') {
                 return Err(format!("plist: expected <key> at byte {}", self.pos));
             }
-            let name = self.next_tag()?.to_string();
+            let name = self.next_tag()?.0.to_string();
             if name != "key" {
                 return Err(format!("plist: expected <key>, got <{name}>"));
             }
@@ -310,7 +388,7 @@ impl<'a> Parser<'a> {
     fn parse_array(&mut self) -> Result<Plist, String> {
         let mut items = Vec::new();
         loop {
-            self.skip_ws();
+            self.skip_ws_comments();
             let rest = self
                 .s
                 .get(self.pos..)

@@ -10,3 +10,6 @@ anyhow.workspace = true
 img4 = { path = "../img4" }
 macho = { path = "../macho" }
 restore = { path = "../restore" }
+
+[dev-dependencies]
+adt = { path = "../adt" }

@@ -73,7 +73,75 @@ impl AdtNode {
     }
 
     pub fn parse(buf: &[u8]) -> Result<AdtNode, String> {
-        Self::parse_at(buf, 0).map(|(n, _)| n)
+        // Format sniffing: the iBoot-era container starts with the "NODE"
+        // magic; the Apple flat DeviceTree shipped in real IPSWs
+        // (DeviceTree.<board>.im4p, iOS 13-era) starts with a
+        // { u32 nprops, u32 nchildren } header followed by a 32-byte
+        // property name — detect it and use the flat parser (found by
+        // real-fixture testing on DeviceTree.n104ap.im4p from the T8030
+        // iOS 13.7 IPSW).
+        if buf.len() >= 8 && &buf[0..4] == NODE_MAGIC {
+            return Self::parse_at(buf, 0).map(|(n, _)| n);
+        }
+        Self::parse_flat(buf, 0).map(|(n, _)| n)
+    }
+
+    /// Parse the Apple flat DeviceTree (Inferno `hw/arm/apple-silicon/dt.c`
+    /// format): node = { u32 nprops; u32 nchildren; } (little-endian) then
+    /// `nprops` properties ({ char name[32]; u32 len; data[len rounded up
+    /// to 4] }) then `nchildren` child nodes pre-order. `len` bit 31 is the
+    /// APPLE_DT_PROP_PLACEHOLDER flag (the real length is `len & !(1<<31)`;
+    /// the bytes are still stored in the blob). Node names come from the
+    /// `name` property.
+    fn parse_flat(buf: &[u8], off: usize) -> Result<(AdtNode, usize), String> {
+        const PLACEHOLDER: u32 = 1 << 31; // APPLE_DT_PROP_PLACEHOLDER
+        let rd32 = |o: usize| -> Result<u32, String> {
+            if o + 4 > buf.len() {
+                return Err("adt-flat: truncated header".into());
+            }
+            Ok(u32::from_le_bytes(buf[o..o + 4].try_into().unwrap()))
+        };
+        let nprops = rd32(off)? as usize;
+        let nchildren = rd32(off + 4)? as usize;
+        let mut node = AdtNode::default();
+        node.name = "device-tree".into(); // roots carry no name field
+        let mut p = off + 8;
+        for i in 0..nprops {
+            if p + 36 > buf.len() {
+                return Err(format!("adt-flat: truncated prop {i}"));
+            }
+            let name = {
+                let end = buf[p..p + 32].iter().position(|&b| b == 0).unwrap_or(32);
+                String::from_utf8_lossy(&buf[p..p + end]).into_owned()
+            };
+            let mut len = rd32(p + 32)?;
+            let placeholder = len & PLACEHOLDER != 0;
+            len &= !PLACEHOLDER;
+            let len = len as usize;
+            let vstart = p + 36;
+            let vend = vstart.checked_add(len).ok_or("adt-flat: prop len overflow")?;
+            if vend > buf.len() {
+                return Err(format!("adt-flat: prop {name:?} overruns buffer"));
+            }
+            if !name.is_empty() {
+                node.props.push(AdtProp { name, data: buf[vstart..vend].to_vec() });
+            }
+            let _ = placeholder;
+            p = (vend + 3) & !3;
+        }
+        // Node names live in the `name` property (the root is
+        // "device-tree", children carry e.g. "arm-io").
+        if let Some(np) = node.props.iter().find(|pr| pr.name == "name") {
+            node.name = String::from_utf8_lossy(&np.data)
+                .trim_end_matches('\0')
+                .to_string();
+        }
+        for _ in 0..nchildren {
+            let (child, next) = Self::parse_flat(buf, p)?;
+            node.children.push(child);
+            p = next;
+        }
+        Ok((node, p))
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {

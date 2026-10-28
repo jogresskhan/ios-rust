@@ -178,6 +178,38 @@ Verification: `cargo test --workspace` → **327 passed, 0 failed**
 **189-entry** `GOLDENS_EXT` capstone/keystone table were re-counted and
 re-run green this session.
 
+## Layer 2.10 — REAL-ARTIFACT gates ("use the GitHub action to make download cache", Dec 2026)
+
+Real Apple artifacts are now first-class CI fixtures (`.github/workflows/
+fixtures.yml` → `tools/fetch_fixtures.py`, range-request partial IPSW
+download + a live TSS capture; cached via upload-artifact). Every claim
+below is proven against **actual Apple CDN bytes / a live gs.apple.com
+response**, not synthetic fixtures:
+
+| gate | evidence | flip |
+|---|---|---|
+| T8030 kernelcache decode | `kernelcache.release.iphone12b` (iOS 13.7 17H35): 39,204,080 B LZFSE → MH_MAGIC_64, Darwin 19.6.0 / xnu-6153.142.1~8 / **T8030** | LZFSE **75→90** |
+| prelink KEXT inventory | real `__PRELINK_INFO.__info` (982 KB XML) → **232 kexts** (IOStorageFamily, AppleSMC …) | version+prelink **60→90** |
+| **kernel patcher on real bytes** | `apply_t8030_patches` on the real cache: **6 applied** (bypass code signature checks, all binaries in trustcache, disable APFS snapshots, allow rootfs remount/union, enable hactivation, bypass pmap_cs_enforce), 14 honestly missed | patcher **75→90** |
+| real ADT parse | `DeviceTree.n104ap.im4p` → flat-DT format support added (Inferno dt.c semantics incl. the `1<<31` placeholder flag): root "device-tree", **105 peripherals under /arm-io**, compatible "arm-io,t8030" | adt **90→100** |
+| real BuildManifest | 17H35 manifest parses (BoardConfig/BuildIdentities/digests); T8030 identity carries KC/SEP/DT digests | ipsw manifest upgraded onto the fixed codec |
+| real TSS response | live `ipsw download tss` (gs.apple.com): @ServerVersion 2.1.0 + ApImg4Ticket (10,619 B IM4M DER) validates: cert chain + Ticket body extracted | authinstall **60→75**, img4 **75→90** |
+
+**6 real-data bugs found and fixed by the fixtures** (the exact reason this
+layer exists):
+1. `sections.rs`: `section_64.size`/`offset` fields **swapped** (real KC
+   exposed it; `__info` was garbage),
+2. `plist_lite`: hex `<integer>0x…</integer>` rejected,
+3. `plist_lite`: inline `<!-- -->` comments between elements,
+4. `plist_lite`: paired `<true></true>` forms + self-closing
+   `<dict/>`/`<array/>`,
+5. `authinstall/im4m.rs`: real IM4M is DER
+   (SEQUENCE → OCTET STRING "IM4M" → INTEGER 2 → cert SET → Ticket body);
+   the old validator only matched the synthetic fixture,
+6. `adt`: real devicetrees use the Apple **flat-DT** format
+   ({nprops,nchildren} LE, name[32] props, placeholder len bit 31) — not
+   the iBoot NODE/PROP/END container; format sniffing added for both.
+
 **Workspace model parity (average of ledger rows, honest): 60.6% before the
 Layer 2.7 sweep, re-computed live by `ios-rust parity`** — up from 0
 at workspace creation; every row above carries its gate so "100%" is a checklist,

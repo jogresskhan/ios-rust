@@ -9,3 +9,6 @@ description = "libauthinstall subset: TSS request build, APTicket (ApImg4Ticket)
 [dependencies]
 plist = { path = "../plist" }
 img4 = { path = "../img4" }
+
+[dev-dependencies]
+restore = { path = "../restore" }

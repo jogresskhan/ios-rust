@@ -86,6 +86,7 @@ version = "0.1.0"
 dependencies = [
  "img4",
  "plist",
+ "restore",
 ]
 
 [[package]]
@@ -787,6 +788,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "reqwest",
+ "restore",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -814,6 +816,7 @@ dependencies = [
 name = "kernelcache"
 version = "0.1.0"
 dependencies = [
+ "adt",
  "anyhow",
  "img4",
  "macho",

@@ -5,3 +5,6 @@ edition.workspace = true
 authors.workspace = true
 license = "GPL-2.0-or-later"
 description = "usbmuxhost: pure-Rust usbmuxd client (libusbmuxd parity: binary framing, Listen/DeviceList/Connect, unix+TCP transports)"
+
+[dependencies]
+plist = { path = "../plist" }

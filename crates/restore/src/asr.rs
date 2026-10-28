@@ -36,9 +36,16 @@ fn read_asr_plist_inner(read: &mut dyn FnMut(&mut [u8]) -> io::Result<usize>) ->
     let mut buf: Vec<u8> = Vec::with_capacity(4096);
     let mut chunk = [0u8; 4096];
     loop {
-        // Try to close out a complete plist each round.
-        if buf.ends_with(b"</plist>") {
-            let xml = std::str::from_utf8(&buf).map_err(|e| {
+        // Try to close out a complete plist each round: the XML envelope is
+        // the framing, and libplist's output ends with `</plist>\n` — so
+        // trailing whitespace after the closing tag must be tolerated.
+        let end = buf
+            .iter()
+            .rposition(|b| !b.is_ascii_whitespace())
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        if buf[..end].ends_with(b"</plist>") {
+            let xml = std::str::from_utf8(&buf[..end]).map_err(|e| {
                 io::Error::new(io::ErrorKind::InvalidData, format!("asr: utf8: {e}"))
             })?;
             return plist_lite::from_xml(xml)
@@ -299,7 +306,12 @@ mod tests {
         loop {
             let n = s.read(&mut chunk).unwrap();
             buf.extend_from_slice(&chunk[..n]);
-            if buf.ends_with(b"</plist>") {
+            let end = buf
+                .iter()
+                .rposition(|b| !b.is_ascii_whitespace())
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            if buf[..end].ends_with(b"</plist>") {
                 break;
             }
         }
@@ -426,6 +438,15 @@ mod tests {
         // ensure read loop hits EOF instead of hanging
         drop(b);
         assert!(AsrConn::open(a).is_err());
+    }
+
+    #[test]
+    fn read_asr_plist_tolerates_trailing_newline() {
+        let mut data = std::io::Cursor::new(
+            b"<dict><key>Command</key><string>Payload</string></dict>\n".to_vec(),
+        );
+        let p = read_asr_plist(&mut data).expect("parse");
+        assert_eq!(command_of(&p).as_deref(), Some("Payload"));
     }
 
     #[test]

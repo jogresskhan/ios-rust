@@ -21,3 +21,5 @@ pub mod trustcache;
 pub mod ipsw;
 
 pub mod plist_lite;
+
+pub mod usbmux;

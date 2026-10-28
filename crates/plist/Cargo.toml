@@ -1,0 +1,7 @@
+[package]
+name = "plist"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license = "GPL-2.0-or-later"
+description = "libplist subset: Apple XML property lists (parse + serialize, order-preserving dicts, base64 data, parse_prefix for TCP-coalesced streams)"

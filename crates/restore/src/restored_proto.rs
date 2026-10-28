@@ -384,8 +384,11 @@ mod tests {
 
     #[test]
     fn frame_bounds_reject_huge_lengths() {
-        let (mut a, _b) = UnixStream::pair().expect("pair");
+        // write into `a`, read from the peer `b` — reading from the same end
+        // would block forever on a socket that never receives (the test used
+        // to hang here before CI ever saw it)
+        let (mut a, mut b) = UnixStream::pair().expect("pair");
         a.write_all(&[0xFF, 0xFF, 0xFF, 0xFF]).unwrap();
-        assert!(read_frame(&mut a).is_err());
+        assert!(read_frame(&mut b).is_err());
     }
 }

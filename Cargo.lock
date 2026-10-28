@@ -55,6 +55,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "apfs"
+version = "0.1.0"
+
+[[package]]
 name = "apple-soc"
 version = "0.1.0"
 dependencies = [
@@ -64,10 +68,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "asr"
+version = "0.1.0"
+dependencies = [
+ "plist",
+]
+
+[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
+
+[[package]]
+name = "authinstall"
+version = "0.1.0"
+dependencies = [
+ "img4",
+ "plist",
+]
 
 [[package]]
 name = "base16ct"
@@ -728,7 +747,10 @@ version = "0.1.0"
 dependencies = [
  "a13-cpu",
  "anyhow",
+ "apfs",
  "apple-soc",
+ "asr",
+ "authinstall",
  "devicecheck",
  "devices",
  "devices-db",
@@ -737,11 +759,15 @@ dependencies = [
  "host-linux",
  "ipsw",
  "kernelcache",
+ "plist",
  "qemu-util",
  "restore",
+ "restored",
+ "sandbox",
  "sha2",
  "soc-t8030",
  "tokio",
+ "usbmux",
  "vault",
  "virt",
  "vm-core",
@@ -893,6 +919,10 @@ dependencies = [
  "der",
  "spki",
 ]
+
+[[package]]
+name = "plist"
+version = "0.1.0"
 
 [[package]]
 name = "polyval"
@@ -1101,6 +1131,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "restored"
+version = "0.1.0"
+dependencies = [
+ "plist",
+]
+
+[[package]]
 name = "rfc6979"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1176,6 +1213,14 @@ name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
+name = "sandbox"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "thiserror 1.0.69",
+]
 
 [[package]]
 name = "sec1"
@@ -1576,6 +1621,13 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
+]
+
+[[package]]
+name = "usbmux"
+version = "0.1.0"
+dependencies = [
+ "plist",
 ]
 
 [[package]]

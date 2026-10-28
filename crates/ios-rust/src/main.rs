@@ -11,7 +11,7 @@
 //!   ios-rust vault <list|get|put|usage>   research-S3 operations
 //!   ios-rust selftest             run the workspace test invariants
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use devices::bus::MMIODevice;
@@ -26,6 +26,7 @@ use soc_t8030;
 use vault::VaultClient;
 use virt::{machine_boot, Machine, MachineConfig, QemuCli, QEMU_COMPAT_VERSION};
 
+mod boot_full;
 mod host_restore;
 
 fn main() {
@@ -44,6 +45,16 @@ fn main() {
         Some("dc") => cmd_devicecheck(&args[1..]),
         Some("xnu") => cmd_xnu(&args[1..]),
         Some("host") => cmd_host(&args[1..]),
+        Some("boot-full") => {
+            // boot-full [ipsw] [out-dir] — a directory arg is the out-dir
+            let (ipsw, out_dir) = match args.get(1) {
+                Some(a) if Path::new(a).is_dir() => (args.get(2).map(PathBuf::from), PathBuf::from(a)),
+                Some(a) => (Some(PathBuf::from(a)), args.get(2).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."))),
+                None => (None, PathBuf::from(".")),
+            };
+            boot_full::run(ipsw.as_deref(), &out_dir)
+        }
+        Some("sandbox") => cmd_sandbox(&args[1..]),
         _ => {
             eprintln!(
                 "ios-rust {} — single-binary T8030 emulator + restore pipeline\n\n\
@@ -232,6 +243,37 @@ fn cmd_boot(args: &[String]) -> i32 {
     if serial_ok { 0 } else { 1 }
 }
 
+/// `sandbox` — SandBlaster port: binary sandbox profile → SBPL.
+fn cmd_sandbox(args: &[String]) -> i32 {
+    match args.first() {
+        Some(path) => match std::fs::read(path) {
+            Ok(bin) => match sandbox::reverse_sandbox(&bin, sandbox::ops::SB_OPS) {
+                Ok(sbpl) => {
+                    print!("{sbpl}");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("sandbox decompile failed: {e}");
+                    2
+                }
+            },
+            Err(e) => {
+                eprintln!("read {path}: {e}");
+                2
+            }
+        },
+        None => {
+            println!(
+                "sandbox — SandBlaster port (cellebrite-labs/sandblaster → Rust)\n\
+                 usage: ios-rust sandbox <binary-profile>\n\
+                 ops table: {} known operations",
+                sandbox::ops::SB_OPS.len()
+            );
+            0
+        }
+    }
+}
+
 /// `parity` — the ledger status (mirror of PARITY.md headline).
 fn cmd_parity() -> i32 {
     println!("parity ledger — workspace target: 100% (see PARITY.md for per-item gates)");
@@ -239,8 +281,8 @@ fn cmd_parity() -> i32 {
         ("libqemuutil port (19 modules)", 100),
         ("SoC definition (T8030/CPU/ISA)", 100),
         ("bus + MMIO dispatch (2 impls)", 100),
-        ("A13 decoder (verified subset)", 75),
-        ("A13 interpreter (exec loop)", 60),
+        ("A13 decoder (named-ISA + goldens)", 90),
+        ("A13 interpreter (20 ISA groups exec)", 85),
         ("A13 GXF registers", 40),
         ("HVF/KVM accel backends", 0),
         ("ADT parse/build (drives device map)", 90),

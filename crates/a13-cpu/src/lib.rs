@@ -15,10 +15,15 @@
 //!   performance path).
 
 pub mod accel;
+pub mod crypto;
 pub mod decode;
 pub mod gxf;
 pub mod interp;
 pub mod isa;
+pub mod simd;
+
+#[cfg(test)]
+mod goldens;
 
 /// CPU backend contract (QEMU: CPUClass + CPUArchState).
 pub trait CpuBackend: Send {
@@ -75,3 +80,7 @@ pub trait MemAccess: Send {
     fn store(&mut self, addr: u64, size: u8, val: u64);
     fn fetch32(&mut self, addr: u64) -> u32;
 }
+
+
+
+

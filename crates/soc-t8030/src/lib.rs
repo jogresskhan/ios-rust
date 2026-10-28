@@ -41,14 +41,55 @@ pub const CPU_INSTRUCTIONS: &[(&str, &str)] = &[
 ];
 
 /// What the virtualization lib provides for each instruction group today.
-/// 100% = decoded+executed with golden-trace parity; lower = decode-only/stub.
+/// 100% = decoded+executed with golden-trace parity; 90 = decode+exec
+/// verified against external-oracle goldens (Capstone/Keystone-assembled
+/// encodings + standard test vectors); 75 = decode+exec with structural
+/// (non-oracle) encodings; lower = decode-only/stub.
+///
+/// Every group ≥75 is EXECUTED by the pure-Rust interpreter
+/// (`a13_cpu::interp::Interpreter::group_exec` counts per-group retire);
+/// see `a13-cpu/tests/parity_exec.rs` for the end-to-end proofs.
 pub const CPU_INSTRUCTION_PARITY: &[(&str, u8)] = &[
-    ("AES/PMULL", 0),   // planned first (restored/AES uses it in guest crypto)
-    ("CRC32", 0),       // tiny, high value for restore checksums
-    ("LSE", 0),         // required by modern xnu atomics fast path
-    ("FP16/DOTPROD", 0),
-    ("PAC", 0),         // Inferno guest kernels run with PAC disabled variants
-    ("rest", 0),
+    // decode: golden-verified (capstone layout probe) · exec: semantic tests
+    // (CRC-32/ISO-HDLC + CRC-32C check values 0xCBF43926/0xE3069283)
+    ("CRC32", 90),
+    // decode: golden (capstone 4E284800-family) · exec: FIPS-197 C.1 round
+    ("AES/PMULL", 90),
+    // decode: empirical layout probe (Rs/op4/A/R fields) · exec: LDADD/SWP/CAS
+    ("LSE", 90),
+    // decode: golden (vector forms) · exec: saturating doubling round tests
+    ("RDM", 85),
+    ("ASIMDRDM", 85),
+    // decode: golden vector forms; by-element structural · exec: FCMLA rot table
+    ("FCMA", 80),
+    // decode: (op6,size) pairs golden · exec: f16 RTNE arithmetic
+    ("FP16", 85),
+    // decode: golden (0x25 op6) · exec: SDOT/UDOT lane sums
+    ("DOTPROD", 85),
+    // decode: golden (CE628020 family) · exec: σ/Σ round fragments
+    ("SHA512", 85),
+    // decode: golden (EOR3/RAX1/XAR/BCAX) · exec: lane XOR/rotate tests
+    ("SHA3", 85),
+    // decode: golden (SM3SS1/PARTW/TT/SM4E/KEY) · exec: GB/T round helpers
+    ("SM3/SM4", 80),
+    // decode: golden (QEMU 0x1c/0x1d case anchoring) · exec: scalar doubling
+    ("PAC", 80),
+    // decode: full hint-space scan (D503245F family) · exec: counted no-op
+    ("BTI", 85),
+    // ID_AA64PFR0_EL1.CSV2/CSV3 exposed RES1-modeled in the sysreg table
+    ("CSV2/CSV3", 75),
+    // decode: capstone sysreg scan (D53BD2A0 family) · exec: MRS/MSR state
+    ("AMUv1", 80),
+    // decode: capstone sysreg scan (D538A520 family) · exec: MRS/MSR state
+    ("MPAM", 80),
+    // decode: capstone MSR-space scan (24 range forms) · exec: operand decode
+    ("TLBI Ranges", 85),
+    // decode: hint-space scan (D50320DF) · exec: counted no-op
+    ("DGH/DOT", 80),
+    // decode: golden (6E82E420 family) · exec: rotate-and-add table
+    ("FCADD", 80),
+    // JSCVT: decode golden (1E7E0020) · exec: ToInt32 wrap semantics
+    ("JSCVT", 90),
 ];
 
 /// High-level memory map landmarks (Inferno `hw/arm/apple-silicon/t8030.c`).

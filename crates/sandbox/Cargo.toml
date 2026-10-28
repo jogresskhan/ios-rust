@@ -1,0 +1,13 @@
+[package]
+name = "sandbox"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license = "GPL-2.0-or-later"
+description = "SandBlaster port: Apple binary sandbox profile reader → operation-node graph → SBPL decompiler (cellebrite-labs/sandblaster subset, Rust)"
+
+[dependencies]
+thiserror = { workspace = true }
+
+[dev-dependencies]
+hex = { workspace = true }

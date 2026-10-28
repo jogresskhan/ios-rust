@@ -14,6 +14,7 @@ members = [
     "crates/macho",
     "crates/apple-soc",
     "crates/restore",
+    "crates/sandbox",
     "crates/gui",
     "crates/dsc",
     "crates/kernelcache",

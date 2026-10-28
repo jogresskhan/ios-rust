@@ -1,0 +1,81 @@
+//! ops — the sandbox operation-name knowledge base. SandBlaster takes the
+//! sb-op table from the kernel's sandbox extension (`sb_ops`); this slice
+//! carries the common Apple sandbox operations that appear in iOS 13–18
+//! profiles. Decompile resolves offsets against this list first and falls
+//! back to `op<N>` naming.
+
+/// The common iOS sandbox operations (subset — the full table ships with
+/// the kernelcache's sandbox.kext strings; see the kernelcache crate).
+pub const SB_OPS: &[&str] = &[
+    "default",
+    "process-info*",
+    "process-exec*",
+    "process-fork",
+    "signal",
+    "system-socket",
+    "file-read*",
+    "file-read-data",
+    "file-read-metadata",
+    "file-read-xattr",
+    "file-write*",
+    "file-write-data",
+    "file-write-create",
+    "file-write-flags",
+    "file-write-mode",
+    "file-write-owner",
+    "file-write-setutimes",
+    "file-write-unlink",
+    "file-ioctl",
+    "file-write-xattr",
+    "file-issue-extension",
+    "file-map-debug",
+    "mach-lookup",
+    "mach-register",
+    "mach-bootargs",
+    "mach-host-register",
+    "mach-task-name",
+    "ipc-posix-shm",
+    "ipc-posix-shm-read*",
+    "ipc-posix-shm-read-data",
+    "ipc-posix-shm-read-metadata",
+    "ipc-posix-shm-write*",
+    "ipc-posix-shm-write-create",
+    "ipc-posix-shm-write-unlink",
+    "ipc-posix-sem",
+    "network*",
+    "network-outbound",
+    "network-inbound",
+    "network-bind",
+    "network-remote",
+    "socket-ioctl",
+    "lsblk*",
+    "sysctl*",
+    "sysctl-read",
+    "sysctl-write",
+    "iokit-open",
+    "iokit-get-properties",
+    "iokit-get-property",
+    "iokit-set-properties",
+    "iokit-set-property",
+    "smb*",
+    "job-creation",
+    "scheduled-file-read",
+    "scheduled-file-write",
+    "lsopen",
+    "vnode*",
+    "system-fs-stat",
+    "system-fs-read*",
+    "system-fs-write*",
+    "distributed-notification-post",
+    "appleevent-send",
+    "shared-memory-register",
+    "task_for_pid*",
+    "debugging*",
+    "user-preference-read",
+    "user-preference-write",
+];
+
+/// Resolve an sb-op index to its name (falls back to `op<N>`).
+pub fn op_name(idx: usize) -> String {
+    SB_OPS.get(idx).map(|s| (*s).to_string()).unwrap_or_else(|| format!("op{idx}"))
+}

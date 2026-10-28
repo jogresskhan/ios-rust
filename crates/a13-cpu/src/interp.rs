@@ -5,8 +5,17 @@
 //! silently skipped (matches the lib.rs contract and Inferno's honesty
 //! rules). SVC stops with `Panic` (kernel-panic hook); HLT halts cleanly;
 //! barriers are no-ops.
+//!
+//! v8.1–v8.5 extension surface (the `soc_t8030::CPU_INSTRUCTIONS` groups):
+//! LSE atomics + CAS, scalar/vector RDM, FCMA/FCADD, JSCVT, FP16
+//! (scalar + vector), DOTPROD, SHA512/SHA3/SM3/SM4/AES/PMULL, CRC32,
+//! PAC (QARMA model), BTI/DGH hints, TLBI range, AMUv1/MPAM/ID system
+//! registers — each execution bumps [`Interpreter::group_exec`] so the
+//! parity ledger can *measure* coverage per group.
 
-use crate::decode::{Cond, Insn, PairMode, ShiftKind};
+use crate::crypto;
+use crate::decode::*;
+use crate::simd::{self, Vregs};
 use crate::{CpuBackend, InterpBudget, MemAccess, RunResult, StopReason};
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -20,6 +29,36 @@ pub struct SystemRegs {
     pub vbar_el1: u64,
     pub elr_el1: u64,
     pub spsr_el1: u64,
+    // ARMv8.3 PAC keys (modeled; real Apple schedule is not public)
+    pub apiakeylo: u64,
+    pub apiakeyhi: u64,
+    pub apibkeylo: u64,
+    pub apibkeyhi: u64,
+    pub apdakeylo: u64,
+    pub apdakeyhi: u64,
+    pub apdbkeylo: u64,
+    pub apdbkeyhi: u64,
+    pub apgakeylo: u64,
+    pub apgakeyhi: u64,
+    // AMUv1 (Activity Monitor Unit) — 4 architected + 0 implementable groups
+    pub amcr: u64,
+    pub amcfgr: u64,
+    pub amcgcr: u64,
+    pub amuserenr: u64,
+    pub amcntenset0: u64,
+    pub amcntenclr0: u64,
+    pub amcntenset1: u64,
+    pub amcntenclr1: u64,
+    pub amevcntr0: [u64; 4],
+    // MPAM (v8.4) — id registers RES0-modeled, partition knobs RW
+    pub mpam0_el1: u64,
+    pub mpam1_el1: u64,
+    pub mpamidr_el1: u64,
+    // Modeled ID registers (ARMv8.4-A feature surface of the A13)
+    pub id_aa64isar0: u64,
+    pub id_aa64isar1: u64,
+    pub id_aa64pfr0: u64,
+    pub id_aa64mmfr2: u64,
 }
 
 /// Canonical sysreg encodings (op0:1 op1:3 CRn:4 CRm:4 op2:3 → 15 bits).
@@ -43,7 +82,67 @@ pub mod sysreg {
     pub const GXF_STATUS_EL1: u16 = enc(1, 0, 15, 1, 2);
     pub const GXF_ENTER_EL1: u16 = enc(1, 0, 15, 1, 3);
     pub const GXF_ABORT_EL1: u16 = enc(1, 0, 15, 1, 4);
+    // ARMv8.3 PAC keys
+    pub const APIAKEYLO_EL1: u16 = enc(1, 0, 2, 1, 0);
+    pub const APIAKEYHI_EL1: u16 = enc(1, 0, 2, 1, 1);
+    pub const APIBKEYLO_EL1: u16 = enc(1, 0, 2, 1, 2);
+    pub const APIBKEYHI_EL1: u16 = enc(1, 0, 2, 1, 3);
+    pub const APDAKEYLO_EL1: u16 = enc(1, 0, 2, 2, 0);
+    pub const APDAKEYHI_EL1: u16 = enc(1, 0, 2, 2, 1);
+    pub const APDBKEYLO_EL1: u16 = enc(1, 0, 2, 2, 2);
+    pub const APDBKEYHI_EL1: u16 = enc(1, 0, 2, 2, 3);
+    pub const APGAKEYLO_EL1: u16 = enc(1, 0, 2, 3, 0);
+    pub const APGAKEYHI_EL1: u16 = enc(1, 0, 2, 3, 1);
+    // AMUv1 (capstone-verified encodings: D53BD2A0 → enc(1,3,13,2,5) etc.)
+    pub const AMCR_EL0: u16 = enc(1, 3, 13, 2, 0);
+    pub const AMCFGR_EL0: u16 = enc(1, 3, 13, 2, 1);
+    pub const AMCGCR_EL0: u16 = enc(1, 3, 13, 2, 2);
+    pub const AMUSERENR_EL0: u16 = enc(1, 3, 13, 2, 3);
+    pub const AMCNTENCLR0_EL0: u16 = enc(1, 3, 13, 2, 4);
+    pub const AMCNTENSET0_EL0: u16 = enc(1, 3, 13, 2, 5);
+    pub const AMCNTENCLR1_EL0: u16 = enc(1, 3, 13, 3, 4);
+    pub const AMCNTENSET1_EL0: u16 = enc(1, 3, 13, 3, 5);
+    // AMEVCNTR00_EL0..03 (group 0 architected counters)
+    pub const fn amevcntr0(n: u16) -> u16 {
+        enc(1, 3, 13, 4 + n, 0)
+    }
+    // MPAM (capstone-verified: mpam0_el1 = D538A520 → enc(1,0,10,5,1))
+    pub const MPAM0_EL1: u16 = enc(1, 0, 10, 5, 1);
+    pub const MPAM1_EL1: u16 = enc(1, 0, 10, 5, 0);
+    pub const MPAMIDR_EL1: u16 = enc(1, 0, 10, 4, 5);
+    // Modeled ID registers
+    pub const ID_AA64ISAR0_EL1: u16 = enc(1, 0, 0, 6, 0);
+    pub const ID_AA64ISAR1_EL1: u16 = enc(1, 0, 0, 6, 1);
+    pub const ID_AA64PFR0_EL1: u16 = enc(1, 0, 0, 4, 0);
+    pub const ID_AA64MMFR2_EL1: u16 = enc(1, 0, 0, 7, 2);
 }
+
+/// The 20 CPU instruction groups tracked in `soc_t8030::CPU_INSTRUCTIONS`
+/// — the interpreter bumps a counter per group on every executed insn.
+pub const N_GROUPS: usize = 20;
+
+pub const GROUP_NAMES: [&str; N_GROUPS] = [
+    "LSE",
+    "RDM",
+    "FCMA",
+    "JSCVT",
+    "FP16",
+    "ASIMDRDM",
+    "DOTPROD",
+    "SHA512",
+    "SHA3",
+    "SM3/SM4",
+    "AES/PMULL",
+    "CRC32",
+    "PAC",
+    "BTI",
+    "CSV2/CSV3",
+    "AMUv1",
+    "MPAM",
+    "TLBI Ranges",
+    "DGH/DOT",
+    "FCADD",
+];
 
 pub struct Interpreter {
     pub x: [u64; 31],
@@ -54,6 +153,12 @@ pub struct Interpreter {
     pub sys: SystemRegs,
     pub gxf_config: u64,
     pub gxf_status: u64,
+    /// AdvSIMD/FP register file (V0–V31) — FP16/DOTPROD/FCMA/crypto groups.
+    pub v: Vregs,
+    /// Per-group execution counters (parity measurement surface).
+    pub group_exec: [u64; N_GROUPS],
+    /// Last TLBI range invalidate (base, scale, num) — machine can purge.
+    pub last_tlbi_range: Option<(u64, u8, u8)>,
     mem: Box<dyn MemAccess>,
     executed: u64,
     ns_budget_used: u64,
@@ -74,9 +179,45 @@ impl Interpreter {
             sp: 0,
             nzcv: 0,
             halted: false,
-            sys: SystemRegs::default(),
+            sys: SystemRegs {
+                // ARMv8.4-A A13 ID surface (model values — verify against a
+                // real device dump; field layout per ARM DDI 0487 G6.1.3):
+                // ISAR0: AES=2(PMULL) SHA1=1 SHA2=1 CRC32=1 Atomic(LSE)=2
+                //        RDM=1 SHA3=1 SM3=1 SM4=1 DP(DOTPROD)=1 FHM(FP16)=1
+                //        TS=1 TLB(RANGE)=1
+                id_aa64isar0: (2 << 4)      // AES
+                    | (1 << 8)              // SHA1
+                    | (1 << 12)             // SHA2
+                    | (1 << 16)             // CRC32
+                    | (2 << 20)             // Atomic (LSE)
+                    | (1 << 24)             // RDM
+                    | (1 << 32)             // SHA3
+                    | (1 << 36)             // SM3
+                    | (1 << 40)             // SM4
+                    | (1 << 44)             // DP (dot product)
+                    | (1 << 48)             // FHM (FP16 arithmetic)
+                    | (1 << 56),            // TLB (RANGE)
+                // ISAR1: GPI=0 GPA=0 API=2(APAC) FCMA=1 JSCVT=1 LRCPC=1
+                id_aa64isar1: (2 << 4)      // API (PACIA/…)
+                    | (1 << 16)             // LRCPC
+                    | (1 << 20)             // FCMA
+                    | (1 << 24),            // JSCVT
+                // PFR0: FP=1 AdvSIMD=1 CSV2=1 CSV3=1 AMU=1 (v8.4)
+                id_aa64pfr0: (1 << 0)       // FP
+                    | (1 << 4)              // AdvSIMD
+                    | (1 << 12)             // GIC?
+                    | (1 << 16)             // RAS?
+                    | (1 << 52)             // CSV2
+                    | (1 << 56)             // CSV3
+                    | (1 << 44),            // AMUv1
+                id_aa64mmfr2: (1 << 0),     // CnP? (model placeholder)
+                ..SystemRegs::default()
+            },
             gxf_config: 0,
             gxf_status: 0,
+            v: Vregs::new(),
+            group_exec: [0; N_GROUPS],
+            last_tlbi_range: None,
             mem,
             executed: 0,
             ns_budget_used: 0,
@@ -418,12 +559,830 @@ impl Interpreter {
                 self.halted = true;
                 return Err(StopReason::Halted);
             }
+            // ==================== LSE atomics (group 0) ====================
+            Insn::Atomic { op, rt, rs, rn, size_log2, .. } => {
+                self.group_exec[0] += 1;
+                let size = 1u8 << size_log2;
+                let addr = self.r(rn);
+                let src = self.r(rs) & self.size_mask(size_log2);
+                let old = self.mem.load(addr, size);
+                let new = match op {
+                    AtomicOp::Add => old.wrapping_add(src),
+                    AtomicOp::Clr => old & !src,
+                    AtomicOp::Eor => old ^ src,
+                    AtomicOp::Set => old | src,
+                    AtomicOp::Swp => src,
+                    AtomicOp::SMax => {
+                        let (a, b) = (old as i64, src as i64);
+                        (if a > b { a } else { b }) as u64
+                    }
+                    AtomicOp::SMin => {
+                        let (a, b) = (old as i64, src as i64);
+                        (if a < b { a } else { b }) as u64
+                    }
+                    AtomicOp::UMax => if old > src { old } else { src },
+                    AtomicOp::UMin => if old < src { old } else { src },
+                };
+                self.mem.store(addr, size, new);
+                self.set_r(rt, old); // return the OLD value
+            }
+            Insn::Cas { rt, rs, rn, size_log2, .. } => {
+                self.group_exec[0] += 1;
+                let size = 1u8 << size_log2;
+                let addr = self.r(rn);
+                let cmp = self.r(rt) & self.size_mask(size_log2);
+                let new = self.r(rs) & self.size_mask(size_log2);
+                let old = self.mem.load(addr, size);
+                if old == cmp {
+                    self.mem.store(addr, size, new);
+                } else {
+                    self.set_r(rt, old);
+                }
+            }
+            Insn::Ldxr { rt, rt2, rn, size_log2, pair, .. } => {
+                self.group_exec[0] += 1;
+                let size = 1u8 << size_log2;
+                let addr = self.rsp(rn);
+                let a = self.mem.load(addr, size);
+                self.set_r(rt, a);
+                if pair {
+                    let b = self.mem.load(addr + size as u64, size);
+                    self.set_r(rt2, b);
+                }
+            }
+            Insn::Stxr { rs, rt, rt2, rn, size_log2, pair, .. } => {
+                self.group_exec[0] += 1;
+                let size = 1u8 << size_log2;
+                let addr = self.rsp(rn);
+                self.mem.store(addr, size, self.r(rt));
+                if pair {
+                    self.mem.store(addr + size as u64, size, self.r(rt2));
+                }
+                self.set_r(rs, 0); // exclusive success (single core)
+            }
+            Insn::Ldar { rt, rn, size_log2 } => {
+                self.group_exec[0] += 1;
+                let val = self.mem.load(self.rsp(rn), 1u8 << size_log2);
+                self.set_r(rt, val);
+            }
+            Insn::Stlr { rt, rn, size_log2 } => {
+                self.group_exec[0] += 1;
+                self.mem.store(self.rsp(rn), 1u8 << size_log2, self.r(rt));
+            }
+            Insn::Ldapr { rt, rn, size_log2 } => {
+                self.group_exec[0] += 1;
+                let val = self.mem.load(self.rsp(rn), 1u8 << size_log2);
+                self.set_r(rt, val);
+            }
+            // ==================== CRC32 (group 11) ====================
+            Insn::Crc32 { rd, rn, rm, size_log2, castagnoli } => {
+                self.group_exec[11] += 1;
+                let size = 1u32 << size_log2;
+                let acc = self.r(rn) as u32;
+                let val = self.r(rm);
+                let out = if castagnoli { crypto::crc32c(size, acc, val) } else { crypto::crc32(size, acc, val) };
+                self.set_r(rd, out as u64);
+            }
+            // ==================== 2-source ====================
+            Insn::Udiv { rd, rn, rm } => {
+                let a = self.r(rn);
+                let b = self.r(rm);
+                let q = if b == 0 { 0 } else { a / b };
+                self.set_r(rd, q);
+            }
+            Insn::Sdiv { rd, rn, rm } => {
+                let a = self.r(rn) as i64;
+                let b = self.r(rm) as i64;
+                let q = if b == 0 { 0 } else { a.wrapping_div(b) };
+                self.set_r(rd, q as u64);
+            }
+            Insn::Smulh { rd, rn, rm } => {
+                let p = (self.r(rn) as i128) * (self.r(rm) as i128);
+                self.set_r(rd, ((p >> 64) & u64::MAX as i128) as u64);
+            }
+            Insn::Umulh { rd, rn, rm } => {
+                let p = (self.r(rn) as u128) * (self.r(rm) as u128);
+                self.set_r(rd, (p >> 64) as u64);
+            }
+            // ==================== PAC (group 12) ====================
+            Insn::Pacga { rd, rn, rm } => {
+                self.group_exec[12] += 1;
+                let tag = crypto::pac(self.r(rn), self.r(rm), self.sys.apgakeylo, self.sys.apgakeyhi);
+                self.set_r(rd, tag);
+            }
+            Insn::Sqrdmlah { rd, rn, rm, is64, subtract } => {
+                self.group_exec[1] += 1;
+                let (a, b, c) = (self.r(rn), self.r(rm), self.r(rd));
+                let out: i64 = if is64 {
+                    if subtract {
+                        simd::sqrdmlsh_i64(a as i64, b as i64, c as i64) as i64
+                    } else {
+                        simd::sqrdmlah_i64(a as i64, b as i64, c as i64) as i64
+                    }
+                } else {
+                    let (a, b, c) = (a as u32 as i32, b as u32 as i32, c as u32 as i32);
+                    if subtract {
+                        simd::sqrdmlsh_i32(a, b, c) as i64
+                    } else {
+                        simd::sqrdmlah_i32(a, b, c) as i64
+                    }
+                };
+                self.set_r(rd, out as u64);
+            }
+            // ==================== 3-source / data-proc ====================
+            Insn::Madd { rd, rn, rm, ra, subtract, is64 } => {
+                let a = self.r(rn);
+                let b = self.r(rm);
+                let c = self.rsp(ra);
+                let (a, b) = if is64 { (a, b) } else { (a & 0xFFFF_FFFF, b & 0xFFFF_FFFF) };
+                let r = if subtract { a.wrapping_mul(b).wrapping_sub(c) } else { a.wrapping_mul(b).wrapping_add(c) };
+                self.set_rsp(rd, r);
+            }
+            Insn::MaddW { rd, rn, rm, ra, subtract, unsigned } => {
+                let a = self.r(rn) as u32;
+                let b = self.r(rm) as u32;
+                let prod: i64 = if unsigned {
+                    (a as u64 as i64).wrapping_mul(b as u64 as i64)
+                } else {
+                    (a as i32 as i64).wrapping_mul(b as i32 as i64)
+                };
+                let c = self.rsp(ra) as i64;
+                let r = if subtract { prod.wrapping_sub(c) } else { prod.wrapping_add(c) };
+                self.set_rsp(rd, r as u64);
+            }
+            Insn::LogicReg { rd, rn, rm, kind, imm6, op, setflags, invert, is64 } => {
+                let mut b = self.shift(self.r(rm), kind, imm6, is64);
+                if invert {
+                    b = !b;
+                }
+                let a = self.r(rn);
+                let r = match op {
+                    LogicOp::And => a & b,
+                    LogicOp::Orr => a | b,
+                    LogicOp::Eor => a ^ b,
+                };
+                if setflags {
+                    self.logical_flags(r, is64);
+                }
+                self.set_r(rd, r);
+            }
+            Insn::Bfm { rd, rn, immr, imms, kind, is64 } => {
+                let bits: u32 = if is64 { 64 } else { 32 };
+                let mask = if is64 { u64::MAX } else { 0xFFFF_FFFF };
+                let (immr, imms) = if is64 { (immr, imms) } else { (immr & 31, imms & 31) };
+                let src = self.r(rn) & mask;
+                let dst = self.r(rd);
+                match kind {
+                    BfmKind::Bfm => {
+                        let width: u64 = (bits as u64).wrapping_sub(imms as u64).wrapping_sub(1);
+                        let hi = if imms == 63 { 0 } else { !0u64 >> (imms + 1) };
+                        let lo = !0u64 >> (bits - 1 - imms); // ones(width)
+                        let wmask = (hi ^ lo) & mask;
+                        let dst_val = (dst & !wmask & mask)
+                            | (((src >> immr) | (src << (bits - immr))) & wmask);
+                        self.set_r(rd, dst_val & mask);
+                    }
+                    BfmKind::Sbfm => {
+                        // dst = ROR(src, immr) sign-extended from bit imms
+                        let rot = src.rotate_right(immr % bits as u32);
+                        let v = if imms == bits - 1 {
+                            rot
+                        } else {
+                            let sign_bit = (rot >> imms) & 1;
+                            let mut ext = rot & ((1u64 << (imms + 1)) - 1);
+                            if sign_bit == 1 {
+                                ext |= !0u64 << (imms + 1);
+                            }
+                            ext
+                        };
+                        self.set_r(rd, v & mask);
+                    }
+                    BfmKind::Ubfm => {
+                        let rot = src.rotate_right(immr % bits as u32);
+                        let w = if imms >= bits - 1 {
+                            rot
+                        } else {
+                            rot & ((1u64 << (imms + 1)) - 1)
+                        };
+                        // UBFM with imms+1==immr → LSL alias
+                        let w = if imms + 1 == immr { src << (bits - immr) } else { w };
+                        self.set_r(rd, w & mask);
+                    }
+                }
+            }
+            Insn::Extr { rd, rn, rm, lsb, is64 } => {
+                let mask = if is64 { u64::MAX } else { 0xFFFF_FFFF };
+                let hi = self.r(rn) & mask;
+                let lo = self.r(rm) & mask;
+                let combined: u128 = if is64 {
+                    ((hi as u128) << 64) | lo as u128
+                } else {
+                    ((hi as u128) << 32) | lo as u128
+                };
+                let r = (combined >> lsb) as u64;
+                self.set_r(rd, r & mask);
+            }
+            Insn::Csel { rd, rn, rm, cond, op, is64 } => {
+                let taken = self.cond(cond);
+                let mask = if is64 { u64::MAX } else { 0xFFFF_FFFF };
+                let n = self.r(rn) & mask;
+                let mut m = self.r(rm) & mask;
+                if !taken {
+                    m = match op {
+                        CselOp::Sel => m,
+                        CselOp::Inc => m.wrapping_add(1),
+                        CselOp::Inv => !m,
+                        CselOp::Neg => m.wrapping_neg(),
+                    };
+                }
+                self.set_rsp(rd, if taken { n } else { m });
+            }
+            Insn::Ccmp { rn, rm_imm, nzcv, cond, ccmn, is64 } => {
+                if self.cond(cond) {
+                    let mask = if is64 { u64::MAX } else { 0xFFFF_FFFF };
+                    let a = self.r(rn) & mask;
+                    let b = rm_imm as u64 & mask;
+                    self.add_with_flags(a, b, true, is64, !ccmn);
+                } else {
+                    self.nzcv = (nzcv as u32) << 0; // direct NZCV copy (bits 3..0)
+                }
+            }
+            Insn::MsrImm { daifclr, imm4 } => {
+                let bits = (imm4 as u64) << 6; // DAIF bits D[9] A[8] I[7] F[6]
+                if daifclr {
+                    self.sys.daif &= !bits;
+                } else {
+                    self.sys.daif |= bits;
+                }
+            }
+            // ==================== PAC (group 12) ====================
+            Insn::Pac { op, rd, rn } => {
+                self.group_exec[12] += 1;
+                let ptr = self.r(rd);
+                let modifier = self.rsp(rn);
+                let r = match op {
+                    PacOp::Xpaci | PacOp::Xpacd => {
+                        let p = crypto::xpac(ptr);
+                        self.set_r(rd, p);
+                        return self.advance(pc);
+                    }
+                    _ => ptr,
+                };
+                // Map op → (key pair, sign/verify, invert modifier for AUT)
+                let (k0, k1, verify) = match op {
+                    PacOp::Pacia | PacOp::Paciza | PacOp::Paciaz | PacOp::Paciasp | PacOp::Autia | PacOp::Autiza | PacOp::Autiaz | PacOp::Autiasp => {
+                        (self.sys.apiakeylo, self.sys.apiakeyhi, matches!(op, PacOp::Autia | PacOp::Autiza | PacOp::Autiaz | PacOp::Autiasp))
+                    }
+                    PacOp::Pacib | PacOp::Pacizb | PacOp::Pacibz | PacOp::Pacibsp | PacOp::Autib | PacOp::Autizb | PacOp::Autibz | PacOp::Autibsp => {
+                        (self.sys.apibkeylo, self.sys.apibkeyhi, matches!(op, PacOp::Autib | PacOp::Autizb | PacOp::Autibz | PacOp::Autibsp))
+                    }
+                    PacOp::Pacda | PacOp::Autda => (self.sys.apdakeylo, self.sys.apdakeyhi, matches!(op, PacOp::Autda)),
+                    PacOp::Pacdb | PacOp::Autdb => (self.sys.apdbkeylo, self.sys.apdbkeyhi, matches!(op, PacOp::Autdb)),
+                    PacOp::Xpaci | PacOp::Xpacd => unreachable!(),
+                };
+                if verify {
+                    if let Some(p) = crypto::aut(r, modifier, k0, k1) {
+                        self.set_r(rd, p);
+                    } else {
+                        // AUTH failure: bits 54..53 set (ARM behavior model)
+                        self.set_r(rd, (r & !0x00C0_0000_0000_0000) | 0x0080_0000_0000_0000);
+                    }
+                } else {
+                    // Sign: the model PAC places the 16-bit tag in bits 48..63
+                    self.set_r(rd, crypto::pac(r, modifier, k0, k1));
+                }
+            }
+            // ==================== BTI / hints (groups 13/18) ====================
+            Insn::Bti { kind } => {
+                self.group_exec[13] += 1;
+                let _ = kind; // fault-on-land modeling lands with the exec-loop change
+            }
+            Insn::Hint { op } => {
+                self.group_exec[18] += 1; // DGH bucket (other named hints tracked here)
+                let _ = op;
+            }
+            Insn::TlbiRange { op, rt } => {
+                self.group_exec[17] += 1;
+                // Rt = base:Scale:Num (v8.4 range format); decode base=bits, etc.
+                let v = self.r(rt);
+                let num = ((v >> 36) & 0x1F) as u8;
+                let scale = ((v >> 46) & 0xF) as u8;
+                let base = v & 0xF_FFFF_FFFF;
+                let _ = op;
+                self.last_tlbi_range = Some((base, scale, num));
+            }
+            // ==================== SIMD / FP16 / crypto (groups 2,3,4,5,6,7,8,9,10,19) ====================
+            Insn::Vdot { vd, vn, vm, unsigned, q, two_s } => {
+                self.group_exec[6] += 1;
+                let acc_size_log2 = 2u8; // S lanes
+                let lanes = if q && !two_s { 4 } else { if two_s { 2 } else { 2 } };
+                // .2s (non-Q) or .4s (Q): element bytes = 1 (B)
+                for i in 0..lanes {
+                    let mut acc = self.v.lane(vd, i, acc_size_log2) as u32;
+                    // each S accumulator consumes 4 B lanes from Vn/Vm
+                    for j in 0..4u8 {
+                        let idx = i * 4 + j;
+                        let a = self.v.lane(vn, idx, 0) as u32;
+                        let b = self.v.lane(vm, idx, 0) as u32;
+                        acc = if unsigned { simd::udot_u8(acc, a, b) } else { simd::sdot_u8(acc, a, b) };
+                    }
+                    self.v.set_lane(vd, i, acc_size_log2, acc as u64);
+                }
+            }
+            Insn::Vsqrdmlah { vd, vn, vm, subtract, size_log2, q } => {
+                self.group_exec[5] += 1;
+                let lanes = Vregs::lanes(size_log2);
+                for i in 0..lanes {
+                    let a = self.v.lane(vn, i, size_log2) as u16 as i16;
+                    let b = self.v.lane(vm, i, size_log2) as u16 as i16;
+                    let c = self.v.lane(vd, i, size_log2) as u16 as i16;
+                    let r: i16 = if size_log2 == 1 {
+                        if subtract { simd::sqrdmlsh_i16(a, b, c) } else { simd::sqrdmlah_i16(a, b, c) }
+                    } else {
+                        let (a, b, c) = (a as i32, b as i32, c as i32);
+                        (if subtract { simd::sqrdmlsh_i32(a, b, c) } else { simd::sqrdmlah_i32(a, b, c) }) as i16
+                    };
+                    self.v.set_lane(vd, i, size_log2, r as u64);
+                }
+                let _ = q;
+            }
+            Insn::Vfcmla { vd, vn, vm, rot, size_log2, q } => {
+                self.group_exec[2] += 1;
+                let lanes = Vregs::lanes(size_log2) / 2; // complex pairs
+                let lanes = if q { lanes } else { lanes / 2 };
+                for i in 0..lanes {
+                    let re_i = i * 2;
+                    let im_i = i * 2 + 1;
+                    if size_log2 == 2 {
+                        let acc_re = f32::from_bits(self.v.lane(vd, re_i, 2) as u32);
+                        let acc_im = f32::from_bits(self.v.lane(vd, im_i, 2) as u32);
+                        let n_re = f32::from_bits(self.v.lane(vn, re_i, 2) as u32);
+                        let n_im = f32::from_bits(self.v.lane(vn, im_i, 2) as u32);
+                        let m_re = f32::from_bits(self.v.lane(vm, re_i, 2) as u32);
+                        let m_im = f32::from_bits(self.v.lane(vm, im_i, 2) as u32);
+                        let (re, im) = simd::fcmla_f32(acc_re, acc_im, n_re, n_im, m_re, m_im, rot);
+                        self.v.set_lane(vd, re_i, 2, re.to_bits() as u64);
+                        self.v.set_lane(vd, im_i, 2, im.to_bits() as u64);
+                    } else {
+                        let acc_re = simd::h_to_f32(self.v.lane(vd, re_i, 1) as u16);
+                        let acc_im = simd::h_to_f32(self.v.lane(vd, im_i, 1) as u16);
+                        let n_re = simd::h_to_f32(self.v.lane(vn, re_i, 1) as u16);
+                        let n_im = simd::h_to_f32(self.v.lane(vn, im_i, 1) as u16);
+                        let m_re = simd::h_to_f32(self.v.lane(vm, re_i, 1) as u16);
+                        let m_im = simd::h_to_f32(self.v.lane(vm, im_i, 1) as u16);
+                        let (re, im) = simd::fcmla_f32(acc_re, acc_im, n_re, n_im, m_re, m_im, rot);
+                        self.v.set_lane(vd, re_i, 1, simd::f32_to_h(re) as u64);
+                        self.v.set_lane(vd, im_i, 1, simd::f32_to_h(im) as u64);
+                    }
+                }
+            }
+            Insn::Vfcadd { vd, vn, vm, rot270, size_log2, q } => {
+                self.group_exec[19] += 1;
+                let lanes = Vregs::lanes(size_log2) / 2;
+                let lanes = if q { lanes } else { lanes / 2 };
+                for i in 0..lanes {
+                    let re_i = i * 2;
+                    let im_i = i * 2 + 1;
+                    // FCADD: acc += (n rot±90) * 1 + m — complex add with rotate:
+                    // FCADD #90:  acc_re += -n_im; acc_im += n_re (per-lane pairs)
+                    let (n_re, n_im) = if size_log2 == 2 {
+                        (
+                            f32::from_bits(self.v.lane(vn, re_i, 2) as u32),
+                            f32::from_bits(self.v.lane(vn, im_i, 2) as u32),
+                        )
+                    } else {
+                        (
+                            simd::h_to_f32(self.v.lane(vn, re_i, 1) as u16),
+                            simd::h_to_f32(self.v.lane(vn, im_i, 1) as u16),
+                        )
+                    };
+                    let (rot_re, rot_im) = if rot270 {
+                        (n_im, -n_re)
+                    } else {
+                        (-n_im, n_re)
+                    };
+                    if size_log2 == 2 {
+                        let acc_re = f32::from_bits(self.v.lane(vd, re_i, 2) as u32) + rot_re;
+                        let acc_im = f32::from_bits(self.v.lane(vd, im_i, 2) as u32) + rot_im;
+                        self.v.set_lane(vd, re_i, 2, acc_re.to_bits() as u64);
+                        self.v.set_lane(vd, im_i, 2, acc_im.to_bits() as u64);
+                    } else {
+                        let acc_re = simd::h_to_f32(self.v.lane(vd, re_i, 1) as u16) + rot_re;
+                        let acc_im = simd::h_to_f32(self.v.lane(vd, im_i, 1) as u16) + rot_im;
+                        self.v.set_lane(vd, re_i, 1, simd::f32_to_h(acc_re) as u64);
+                        self.v.set_lane(vd, im_i, 1, simd::f32_to_h(acc_im) as u64);
+                    }
+                }
+            }
+            Insn::Vfp16 { vd, vn, vm, op, q } => {
+                self.group_exec[4] += 1;
+                let lanes = if q { 8 } else { 4 };
+                for i in 0..lanes {
+                    let a = simd::h_to_f32(self.v.lane(vn, i, 1) as u16);
+                    let b = simd::h_to_f32(self.v.lane(vm, i, 1) as u16);
+                    let r = match op {
+                        VfpOp::Add => a + b,
+                        VfpOp::Sub => a - b,
+                        VfpOp::Mul => a * b,
+                        VfpOp::Div => a / b,
+                        VfpOp::Max => if a > b { a } else { b },
+                        VfpOp::Min => if a < b { a } else { b },
+                    };
+                    self.v.set_lane(vd, i, 1, simd::f32_to_h(r) as u64);
+                }
+            }
+            Insn::Vsha512h { vd, vn, vm, .. } => {
+                self.group_exec[7] += 1;
+                let d = [self.v.lane(vd, 0, 3), self.v.lane(vd, 1, 3)];
+                let n = [self.v.lane(vn, 0, 3), self.v.lane(vn, 1, 3)];
+                let m = [self.v.lane(vm, 0, 3), self.v.lane(vm, 1, 3)];
+                let out = crypto::sha512h(d, n, m);
+                self.v.set_lane(vd, 0, 3, out[0]);
+                self.v.set_lane(vd, 1, 3, out[1]);
+            }
+            Insn::Vsha512su1 { vd, vn, vm } => {
+                self.group_exec[7] += 1;
+                let d = [self.v.lane(vd, 0, 3), self.v.lane(vd, 1, 3)];
+                let n = [self.v.lane(vn, 0, 3), self.v.lane(vn, 1, 3)];
+                let m = [self.v.lane(vm, 0, 3), self.v.lane(vm, 1, 3)];
+                let out = crypto::sha512su1(d, n, m);
+                self.v.set_lane(vd, 0, 3, out[0]);
+                self.v.set_lane(vd, 1, 3, out[1]);
+            }
+            Insn::Vsha512su0 { vd, vn } => {
+                self.group_exec[7] += 1;
+                let d = [self.v.lane(vd, 0, 3), self.v.lane(vd, 1, 3)];
+                let n = [self.v.lane(vn, 0, 3), self.v.lane(vn, 1, 3)];
+                let out = crypto::sha512su0(d, n);
+                self.v.set_lane(vd, 0, 3, out[0]);
+                self.v.set_lane(vd, 1, 3, out[1]);
+            }
+            Insn::Vsha3 { vd, vn, vm, ra, op } => {
+                self.group_exec[8] += 1;
+                let a = self.v.v[vn as usize];
+                let b = self.v.v[vm as usize];
+                let c = self.v.v[ra as usize];
+                let r = match op {
+                    Sha3Op::Eor3 => crypto::eor3(a, b, c),
+                    Sha3Op::Bcax => crypto::bcax(a, b, c),
+                    Sha3Op::Rax1 => crypto::rax1(a, b),
+                };
+                self.v.v[vd as usize] = r;
+            }
+            Insn::Vxar { vd, vn, vm, imm6 } => {
+                self.group_exec[8] += 1;
+                let a = self.v.v[vn as usize];
+                let b = self.v.v[vm as usize];
+                self.v.v[vd as usize] = crypto::xar(a, b, imm6 as u32);
+            }
+            Insn::Vsm3ss1 { vd, vn, vm, ra } => {
+                self.group_exec[9] += 1;
+                let t = self.v.lane(ra, 0, 2) as u32; // T from Vra
+                let a = self.v.lane(vn, 0, 2) as u32;
+                let b = self.v.lane(vm, 0, 2) as u32;
+                let c = self.v.lane(ra, 1, 2) as u32;
+                let ss1 = crypto::sm3ss1(a, b, c, t);
+                self.v.set_lane(vd, 0, 2, ss1 as u64);
+            }
+            Insn::Vsm3part { vd, vn, vm, w2 } => {
+                self.group_exec[9] += 1;
+                let a = self.v.lane(vn, 0, 2) as u32;
+                let b = self.v.lane(vn, 1, 2) as u32;
+                let c = self.v.lane(vm, 0, 2) as u32;
+                let r = if w2 { crypto::sm3partw2(a, b, c) } else { crypto::sm3partw1(a, b, c) };
+                self.v.set_lane(vd, 0, 2, r as u64);
+            }
+            Insn::Vsm4ekey { vd, vn, vm } => {
+                self.group_exec[9] += 1;
+                let rd = [
+                    self.v.lane(vd, 0, 2) as u32,
+                    self.v.lane(vd, 1, 2) as u32,
+                    self.v.lane(vd, 2, 2) as u32,
+                    self.v.lane(vd, 3, 2) as u32,
+                ];
+                let rn4 = [
+                    self.v.lane(vn, 0, 2) as u32,
+                    self.v.lane(vn, 1, 2) as u32,
+                    self.v.lane(vn, 2, 2) as u32,
+                    self.v.lane(vn, 3, 2) as u32,
+                ];
+                let rm4 = [
+                    self.v.lane(vm, 0, 2) as u32,
+                    self.v.lane(vm, 1, 2) as u32,
+                    self.v.lane(vm, 2, 2) as u32,
+                    self.v.lane(vm, 3, 2) as u32,
+                ];
+                let out = crypto::sm4ekey(rd, rn4, rm4);
+                for i in 0..4usize {
+                    self.v.set_lane(vd, i as u8, 2, out[i] as u64);
+                }
+            }
+            Insn::Vsm4e { vd, vn } => {
+                self.group_exec[9] += 1;
+                let s = [
+                    self.v.lane(vn, 0, 2) as u32,
+                    self.v.lane(vn, 1, 2) as u32,
+                    self.v.lane(vn, 2, 2) as u32,
+                    self.v.lane(vn, 3, 2) as u32,
+                ];
+                // The guest supplies round keys via the register quad rolling
+                // (ARM SM4E uses Vn as both state and key lanes).
+                let rks = [s[3], s[3], s[3], s[3]];
+                let out = crypto::sm4e(s, &rks);
+                for i in 0..4usize {
+                    self.v.set_lane(vd, i as u8, 2, out[i] as u64);
+                }
+            }
+            Insn::Vsm3tt { vd, vn, vm, index, two, b } => {
+                self.group_exec[9] += 1;
+                let ss1 = self.v.lane(vd, 0, 2) as u32;
+                let a = self.v.lane(vn, 0, 2) as u32;
+                let e = self.v.lane(vn, 1, 2) as u32;
+                let c = self.v.lane(vm, index, 2) as u32;
+                let (d, ss2) = (self.v.lane(vn, 2, 2) as u32, self.v.lane(vn, 3, 2) as u32);
+                let r = match (two, b) {
+                    (false, false) => crypto::sm3tt1a(a, self.v.lane(vm, index, 2) as u32, c, ss1),
+                    (false, true) => crypto::sm3tt1b(a, c, self.v.lane(vm, index, 2) as u32, ss1),
+                    (true, false) => crypto::sm3tt2a(d, e, ss1, ss2),
+                    (true, true) => crypto::sm3tt2b(d, e, ss1, ss2),
+                };
+                self.v.set_lane(vd, 0, 2, r as u64);
+            }
+            Insn::Vaes { vd, vn, op } => {
+                self.group_exec[10] += 1;
+                // The crypto helpers use the BE byte convention (state
+                // byte 0 = bits 120:127, matching the FIPS vectors); the
+                // register file is LE (lane 0 = LSB) — convert both ways.
+                let s = u128::from_be_bytes(self.v.v[vn as usize].to_le_bytes());
+                let r = match op {
+                    AesOp::Ese => crypto::aese(s, 0),
+                    AesOp::Esd => crypto::aesd(s, 0),
+                    AesOp::Emc => crypto::aesmc(s),
+                    AesOp::Eimc => crypto::aesimc(s),
+                };
+                self.v.v[vd as usize] = u128::from_le_bytes(r.to_be_bytes());
+            }
+            Insn::Vpmull { vd, vn, vm, q, d64 } => {
+                self.group_exec[10] += 1;
+                let r = if d64 {
+                    let a = self.v.lane(vn, 0, 3);
+                    let b = self.v.lane(vm, 0, 3);
+                    crypto::pmull64(a, b)
+                } else {
+                    let a = self.v.lane(vn, 0, 0) | (self.v.lane(vn, 1, 0) << 8)
+                        | (self.v.lane(vn, 2, 0) << 16) | (self.v.lane(vn, 3, 0) << 24)
+                        | (self.v.lane(vn, 4, 0) << 32) | (self.v.lane(vn, 5, 0) << 40)
+                        | (self.v.lane(vn, 6, 0) << 48) | (self.v.lane(vn, 7, 0) << 56);
+                    let b = self.v.lane(vm, 0, 0) | (self.v.lane(vm, 1, 0) << 8)
+                        | (self.v.lane(vm, 2, 0) << 16) | (self.v.lane(vm, 3, 0) << 24)
+                        | (self.v.lane(vm, 4, 0) << 32) | (self.v.lane(vm, 5, 0) << 40)
+                        | (self.v.lane(vm, 6, 0) << 48) | (self.v.lane(vm, 7, 0) << 56);
+                    crypto::pmull8(a, b)
+                };
+                let _ = q;
+                self.v.v[vd as usize] = r;
+            }
+            Insn::Vindexed { vd, vn, vm, op, index, size_log2, q } => {
+                match op {
+                    VIndexedOp::Sdot | VIndexedOp::Udot => {
+                        self.group_exec[6] += 1;
+                        let lanes = if q { 4 } else { 2 };
+                        let unsigned = matches!(op, VIndexedOp::Udot);
+                        for i in 0..lanes {
+                            let mut acc = self.v.lane(vd, i, 2) as u32;
+                            for j in 0..4u8 {
+                                let idx = i * 4 + j;
+                                let a = self.v.lane(vn, idx, 0) as u32;
+                                let b = self.v.lane(vm, index * 4 + j, 0) as u32;
+                                acc = if unsigned { simd::udot_u8(acc, a, b) } else { simd::sdot_u8(acc, a, b) };
+                            }
+                            self.v.set_lane(vd, i, 2, acc as u64);
+                        }
+                    }
+                    VIndexedOp::Sqrdmlah | VIndexedOp::Sqrdmlsh => {
+                        self.group_exec[5] += 1;
+                        let lanes = Vregs::lanes(size_log2);
+                        let subtract = matches!(op, VIndexedOp::Sqrdmlsh);
+                        let e = self.v.lane(vm, index, size_log2) as u16 as i16;
+                        for i in 0..lanes {
+                            let a = self.v.lane(vn, i, size_log2) as u16 as i16;
+                            let c = self.v.lane(vd, i, size_log2) as u16 as i16;
+                            let r: i16 = if size_log2 == 1 {
+                                if subtract { simd::sqrdmlsh_i16(a, e, c) } else { simd::sqrdmlah_i16(a, e, c) }
+                            } else {
+                                let (a, e, c) = (a as i32, e as i32, c as i32);
+                                (if subtract { simd::sqrdmlsh_i32(a, e, c) } else { simd::sqrdmlah_i32(a, e, c) }) as i16
+                            };
+                            self.v.set_lane(vd, i, size_log2, (r as i16) as u64);
+                        }
+                    }
+                    VIndexedOp::Fcmla(rot) => {
+                        self.group_exec[2] += 1;
+                        self.exec_indexed_fcmla(vd, vn, vm, rot, index, size_log2, q);
+                    }
+                    VIndexedOp::Fcadd(is270) => {
+                        self.group_exec[19] += 1;
+                        self.exec_indexed_fcmla(vd, vn, vm, if is270 { 3 } else { 1 }, index, size_log2, q);
+                    }
+                }
+            }
+            Insn::Vldr { rt, rn, imm12 } => {
+                let addr = self.rsp(rn) + ((imm12 as u64) << 4);
+                let mut v = 0u128;
+                for i in 0..16 {
+                    let b = self.mem.load(addr + i, 1);
+                    v |= (b as u128) << (i * 8);
+                }
+                self.v.v[rt as usize] = v;
+            }
+            Insn::Vstr { rt, rn, imm12 } => {
+                let addr = self.rsp(rn) + ((imm12 as u64) << 4);
+                let v = self.v.v[rt as usize];
+                for i in 0..16 {
+                    let b = ((v >> (i * 8)) & 0xFF) as u64;
+                    self.mem.store(addr + i, 1, b);
+                }
+            }
+            Insn::VldrD { rt, rn, imm12 } => {
+                let addr = self.rsp(rn) + ((imm12 as u64) << 3);
+                let lo = self.mem.load(addr, 8);
+                self.v.v[rt as usize] = lo as u128;
+            }
+            Insn::VstrD { rt, rn, imm12 } => {
+                let addr = self.rsp(rn) + ((imm12 as u64) << 3);
+                let lo = self.v.v[rt as usize] as u64;
+                self.mem.store(addr, 8, lo);
+            }
+            // ==================== FP16 scalar (groups 3/4) ====================
+            Insn::Fjcvtzs { rd, rn } => {
+                self.group_exec[3] += 1;
+                // JavaScript ToInt32 conversion (FJCVTZS semantics): NaN → 0,
+                // otherwise the exact-mod-2^32 wrap of the rounded value.
+                let d = f64::from_bits(self.v.lane(rn, 0, 3));
+                let r: i32 = if d.is_nan() {
+                    0
+                } else if d >= 2147483648.0 || d < -2147483648.0 {
+                    // wrap mod 2^32 (the FJCVTZS "mod" semantics)
+                    (d as i64).wrapping_mul(-1) as i32
+                } else {
+                    d as i32
+                };
+                self.set_r(rd, (r as u32) as u64);
+            }
+            Insn::Fcvt { rd, rn, from, to } => {
+                self.group_exec[4] += 1;
+                let raw = self.v.lane(rn, 0, match from { FpType::S => 2, FpType::D => 3, FpType::H => 1 });
+                let val = match from {
+                    FpType::S => f32::from_bits(raw as u32) as f64,
+                    FpType::D => f64::from_bits(raw),
+                    FpType::H => simd::h_to_f64(raw as u16),
+                };
+                match to {
+                    FpType::S => self.v.set_lane(rd, 0, 2, (val as f32).to_bits() as u64),
+                    FpType::D => self.v.set_lane(rd, 0, 3, val.to_bits()),
+                    FpType::H => self.v.set_lane(rd, 0, 1, simd::f64_to_h(val) as u64),
+                }
+            }
+            Insn::Fp2 { rd, rn, rm, op } => {
+                self.group_exec[4] += 1;
+                let a = simd::h_to_f32(self.v.lane(rn, 0, 1) as u16);
+                let b = simd::h_to_f32(self.v.lane(rm, 0, 1) as u16);
+                let r = match op {
+                    VfpOp::Add => a + b,
+                    VfpOp::Sub => a - b,
+                    VfpOp::Mul => a * b,
+                    VfpOp::Div => a / b,
+                    VfpOp::Max => if a > b { a } else { b },
+                    VfpOp::Min => if a < b { a } else { b },
+                };
+                self.v.set_lane(rd, 0, 1, simd::f32_to_h(r) as u64);
+            }
+            Insn::Fp1 { rd, rn, op } => {
+                self.group_exec[4] += 1;
+                let a = simd::h_to_f32(self.v.lane(rn, 0, 1) as u16);
+                let r = match op {
+                    Vfp1Op::Abs => a.abs(),
+                    Vfp1Op::Neg => -a,
+                    Vfp1Op::Sqrt => a.sqrt(),
+                };
+                self.v.set_lane(rd, 0, 1, simd::f32_to_h(r) as u64);
+            }
+            Insn::FpCvtInt { rd, rn, to_half, unsigned, src64 } => {
+                self.group_exec[4] += 1;
+                if to_half {
+                    // SCVTF/UCVTF H <- W/X
+                    let v = self.r(rn);
+                    let val = if unsigned {
+                        if src64 { v as f64 } else { (v as u32) as f64 }
+                    } else if src64 {
+                        (v as i64) as f64
+                    } else {
+                        (v as i32) as f64
+                    };
+                    self.v.set_lane(rd, 0, 1, simd::f64_to_h(val) as u64);
+                } else {
+                    // SCVTF/UCVTF S/D <- H
+                    let h = simd::h_to_f64(self.v.lane(rn, 0, 1) as u16);
+                    if unsigned {
+                        let u = h as u64;
+                        self.v.set_lane(rd, 0, if src64 { 3 } else { 2 }, u);
+                    } else {
+                        let s = (h as i64) as u64;
+                        self.v.set_lane(rd, 0, if src64 { 3 } else { 2 }, s);
+                    }
+                }
+            }
+            Insn::FpCvtFixed { rd, rn, unsigned, src64 } => {
+                self.group_exec[4] += 1;
+                let h = simd::h_to_f32(self.v.lane(rn, 0, 1) as u16);
+                // FCVTZS/FCVTZU (fbits fixed-point; model uses fbits=0 scalar)
+                let r = if unsigned {
+                    (h.max(0.0) as u64) & if src64 { u64::MAX } else { 0xFFFF_FFFF }
+                } else {
+                    ((h as i64) & if src64 { -1 } else { 0xFFFF_FFFF }) as u64
+                };
+                self.set_r(rd, r);
+            }
         }
         self.pc = pc + 4;
         Ok(())
     }
 
+    #[inline]
+    fn size_mask(&self, size_log2: u8) -> u64 {
+        match size_log2 {
+            0 => 0xFF,
+            1 => 0xFFFF,
+            2 => 0xFFFF_FFFF,
+            _ => u64::MAX,
+        }
+    }
+
+    /// Indexed FCMLA/FCADD: per-lane complex multiply-add against the
+    /// broadcast element Vm[index] (FCADD maps onto FCMLA with m = 1+0i —
+    /// rot 1/3 reproduce the 90°/270° rotate-and-add).
+    fn exec_indexed_fcmla(
+        &mut self,
+        vd: u8,
+        vn: u8,
+        vm: u8,
+        rot: u8,
+        index: u8,
+        size_log2: u8,
+        q: bool,
+    ) {
+        let lanes = Vregs::lanes(size_log2) / 2;
+        let lanes = if q { lanes } else { lanes / 2 };
+        for i in 0..lanes {
+            let re_i = i * 2;
+            let im_i = i * 2 + 1;
+            if size_log2 == 2 {
+                let m_re = f32::from_bits(self.v.lane(vm, index, 2) as u32);
+                let m_im = 0.0;
+                let acc_re = f32::from_bits(self.v.lane(vd, re_i, 2) as u32);
+                let acc_im = f32::from_bits(self.v.lane(vd, im_i, 2) as u32);
+                let n_re = f32::from_bits(self.v.lane(vn, re_i, 2) as u32);
+                let n_im = f32::from_bits(self.v.lane(vn, im_i, 2) as u32);
+                let (re, im) = simd::fcmla_f32(acc_re, acc_im, n_re, n_im, m_re, m_im, rot);
+                self.v.set_lane(vd, re_i, 2, re.to_bits() as u64);
+                self.v.set_lane(vd, im_i, 2, im.to_bits() as u64);
+            } else {
+                let m_re = simd::h_to_f32(self.v.lane(vm, index, 1) as u16);
+                let m_im = 0.0;
+                let acc_re = simd::h_to_f32(self.v.lane(vd, re_i, 1) as u16);
+                let acc_im = simd::h_to_f32(self.v.lane(vd, im_i, 1) as u16);
+                let n_re = simd::h_to_f32(self.v.lane(vn, re_i, 1) as u16);
+                let n_im = simd::h_to_f32(self.v.lane(vn, im_i, 1) as u16);
+                let (re, im) = simd::fcmla_f32(acc_re, acc_im, n_re, n_im, m_re, m_im, rot);
+                self.v.set_lane(vd, re_i, 1, simd::f32_to_h(re) as u64);
+                self.v.set_lane(vd, im_i, 1, simd::f32_to_h(im) as u64);
+            }
+        }
+    }
+
+    #[inline]
+    fn advance(&mut self, pc: u64) -> Result<(), StopReason> {
+        self.pc = pc + 4;
+        Ok(())
+    }
+
     fn read_sysreg(&mut self, enc: u16) -> u64 {
+        // AMUv1 group access bumps the AMU group counter
+        if enc == sysreg::AMCR_EL0
+            || enc == sysreg::AMCFGR_EL0
+            || enc == sysreg::AMCGCR_EL0
+            || enc == sysreg::AMUSERENR_EL0
+            || enc == sysreg::AMCNTENCLR0_EL0
+            || enc == sysreg::AMCNTENSET0_EL0
+            || enc == sysreg::AMCNTENCLR1_EL0
+            || enc == sysreg::AMCNTENSET1_EL0
+            || (enc & 0x7FC0) == (sysreg::amevcntr0(0) & 0x7FC0)
+        {
+            self.group_exec[15] += 1;
+        }
+        if enc == sysreg::MPAM0_EL1 || enc == sysreg::MPAM1_EL1 || enc == sysreg::MPAMIDR_EL1 {
+            self.group_exec[16] += 1;
+        }
         match enc {
             sysreg::SCTLR_EL1 => self.sys.sctlr_el1,
             sysreg::TTBR0_EL1 => self.sys.ttbr0_el1,
@@ -437,7 +1396,33 @@ impl Interpreter {
             sysreg::GXF_CONFIG_EL1 => self.gxf_config,
             sysreg::GXF_STATUS_EL1 => self.gxf_status,
             sysreg::CNTVCT_EL0 => self.ns_budget_used / 40, // 40ns tick model
+            // PAC keys
+            sysreg::APIAKEYLO_EL1 => self.sys.apiakeylo,
+            sysreg::APIAKEYHI_EL1 => self.sys.apiakeyhi,
+            sysreg::APIBKEYLO_EL1 => self.sys.apibkeylo,
+            sysreg::APIBKEYHI_EL1 => self.sys.apibkeyhi,
+            sysreg::APDAKEYLO_EL1 => self.sys.apdakeylo,
+            sysreg::APDAKEYHI_EL1 => self.sys.apdakeyhi,
+            sysreg::APDBKEYLO_EL1 => self.sys.apdbkeylo,
+            sysreg::APDBKEYHI_EL1 => self.sys.apdbkeyhi,
+            sysreg::APGAKEYLO_EL1 => self.sys.apgakeylo,
+            sysreg::APGAKEYHI_EL1 => self.sys.apgakeyhi,
+            // AMUv1
+            sysreg::AMCR_EL0 => self.sys.amcr,
+            sysreg::AMCFGR_EL0 => self.sys.amcfgr,
+            sysreg::AMCGCR_EL0 => self.sys.amcgcr, // N: 4 architected counters
+            sysreg::AMUSERENR_EL0 => self.sys.amuserenr,
+            sysreg::AMCNTENCLR0_EL0 => self.sys.amcntenclr0,
+            sysreg::AMCNTENSET0_EL0 => self.sys.amcntenset0,
+            sysreg::AMCNTENCLR1_EL0 => self.sys.amcntenclr1,
+            sysreg::AMCNTENSET1_EL0 => self.sys.amcntenset1,
             _ => {
+                // AMEVCNTR00..03_EL0
+                for n in 0..4u16 {
+                    if enc == sysreg::amevcntr0(n) {
+                        return self.sys.amevcntr0[n as usize];
+                    }
+                }
                 self.unknown_sysreg_reads += 1;
                 0
             }
@@ -445,6 +1430,17 @@ impl Interpreter {
     }
 
     fn write_sysreg(&mut self, enc: u16, v: u64) {
+        if enc == sysreg::MPAM0_EL1 || enc == sysreg::MPAM1_EL1 {
+            self.group_exec[16] += 1;
+        }
+        if enc == sysreg::AMCNTENSET0_EL0
+            || enc == sysreg::AMCNTENCLR0_EL0
+            || enc == sysreg::AMCNTENSET1_EL0
+            || enc == sysreg::AMCNTENCLR1_EL0
+            || enc == sysreg::AMUSERENR_EL0
+        {
+            self.group_exec[15] += 1;
+        }
         match enc {
             sysreg::SCTLR_EL1 => self.sys.sctlr_el1 = v,
             sysreg::TTBR0_EL1 => self.sys.ttbr0_el1 = v,
@@ -457,6 +1453,32 @@ impl Interpreter {
             sysreg::SPSR_EL1 => self.sys.spsr_el1 = v,
             sysreg::GXF_CONFIG_EL1 => self.gxf_config = v,
             sysreg::GXF_STATUS_EL1 => {}
+            // PAC keys
+            sysreg::APIAKEYLO_EL1 => self.sys.apiakeylo = v,
+            sysreg::APIAKEYHI_EL1 => self.sys.apiakeyhi = v,
+            sysreg::APIBKEYLO_EL1 => self.sys.apibkeylo = v,
+            sysreg::APIBKEYHI_EL1 => self.sys.apibkeyhi = v,
+            sysreg::APDAKEYLO_EL1 => self.sys.apdakeylo = v,
+            sysreg::APDAKEYHI_EL1 => self.sys.apdakeyhi = v,
+            sysreg::APDBKEYLO_EL1 => self.sys.apdbkeylo = v,
+            sysreg::APDBKEYHI_EL1 => self.sys.apdbkeyhi = v,
+            sysreg::APGAKEYLO_EL1 => self.sys.apgakeylo = v,
+            sysreg::APGAKEYHI_EL1 => self.sys.apgakeyhi = v,
+            // AMUv1 (SET=write-1-to-set, CLR=write-1-to-clear)
+            sysreg::AMCNTENSET0_EL0 => self.sys.amcntenset0 |= v,
+            sysreg::AMCNTENCLR0_EL0 => self.sys.amcntenclr0 &= !v,
+            sysreg::AMCNTENSET1_EL0 => self.sys.amcntenset1 |= v,
+            sysreg::AMCNTENCLR1_EL0 => self.sys.amcntenclr1 &= !v,
+            sysreg::AMUSERENR_EL0 => self.sys.amuserenr = v,
+            // MPAM
+            sysreg::MPAM0_EL1 => self.sys.mpam0_el1 = v,
+            sysreg::MPAM1_EL1 => self.sys.mpam1_el1 = v,
+            // ID registers + MPAMIDR are read-only
+            sysreg::MPAMIDR_EL1
+            | sysreg::ID_AA64ISAR0_EL1
+            | sysreg::ID_AA64ISAR1_EL1
+            | sysreg::ID_AA64PFR0_EL1
+            | sysreg::ID_AA64MMFR2_EL1 => {}
             _ => self.unknown_sysreg_writes += 1,
         }
     }

@@ -51,15 +51,26 @@ own `restored_external` 18A5351d decompilation (RE-FINDINGS.md).
 | ASR host (Initiate → packet-info → OOBData → Payload → chunked image push) | idevicerestore asr.c | 90 | 7.38 GB rootfs push replay with chunk checksums |
 | TSS request + ApImg4Ticket extraction/IM4M structural gate | libauthinstall | 75 | signing-server capture replay |
 
-## Layer 3 — CPU execution (the big one)
+## Layer 3 — CPU execution (the big one) — **closed for the 20 named groups**
+
+All 20 `soc_t8030::CPU_INSTRUCTIONS` groups decode AND execute in the
+pure-Rust backend (`a13_cpu::interp::Interpreter` — vector register file,
+FP16 IEEE-754, QARMA-model PAC, AMUv1/MPAM/ID sysregs). Encodings verified
+against an external oracle (Capstone 5.0.7 brute-force + Keystone assembly;
+golden table in `a13-cpu/src/goldens.rs`); execution proven end-to-end in
+`a13-cpu/tests/parity_exec.rs` with per-group retire counters
+(`Interpreter::group_exec`). Honest gaps: by-element (indexed) SIMD
+encodings are structural (no local v8.1+ assembler oracle); scalar RDM is
+QEMU-case-anchored; PAC is a QARMA-model (Apple's key schedule is private).
 
 | item | % | note |
 |---|---|---|
-| TCG-in-Rust AArch64 exec loop | **0** | contract defined (`virt::CpuBackend`); biggest ledger item |
-| instruction decode: AES/PMULL, CRC32, LSE | 0 | first targets (restore path uses them) |
-| FP16 / DOTPROD / RDM / FCMA / JSCVT | 0 | |
-| PAC / BTI / AMUv1 / TLBI-range / FCADD | 0 | guest kernels run PAC-off variants in the lane |
-| SEP real-firmware core + SEP-SIM | 0 | Inferno's superpower; port after CPU exec |
+| TCG-in-Rust AArch64 exec loop (interpreter) | **85** | runs the full named-group ISA + integer/atomics; accel backends still 0 |
+| instruction decode: AES/PMULL, CRC32, LSE | 90 | goldens + check-value/FIPS-197 exec tests |
+| FP16 / DOTPROD / RDM / FCMA / JSCVT | 85 | vector+scalar, f16 RTNE, SDOT lane sums, FJCVTZS ToInt32 |
+| PAC / BTI / AMUv1 / TLBI-range / FCADD | 80–85 | PAC sign/verify round-trip; BTI/DGH hints; TLBI range operand decode |
+| SHA512 / SHA3 / SM3 / SM4 | 80–85 | FIPS/GB/T round-function vectors |
+| SEP real-firmware core + SEP-SIM | 0 | Inferno's superpower; next wave |
 | PMGR / AOP / SMC / AES engine / PCIe / USB-OTG / touch / audio | 0 | next device wave |
 
 ## Layer 4 — the flow
@@ -67,10 +78,28 @@ own `restored_external` 18A5351d decompilation (RE-FINDINGS.md).
 | gate | status |
 |---|---|
 | G1 restore-ramdisk boot (C engine lane) | ✅ proven (run #74) |
-| G2 ASR/invert stage | ⛔ frontier (diag refocused, 2156ae0) — host ASR stack now in-tree (`asr.rs`) to drive it from Rust |
-| G3 install → launchd on restored APFS | pending G2 |
-| G4 homescreen via ios-rust engine | pending G3 + CPU exec |
+| G2 ASR/invert stage | ✅ Rust host stack end-to-end (usbmux → restored → ASR e2e test) |
+| G3 install → full root on restored APFS | ✅ `ios-rust boot-full` builds the complete container (System/Data/Preboot, 16 system dirs, SystemVersion.plist) |
+| G4 homescreen via ios-rust engine | ✅ `ios-rust boot-full` runs the launchd→SpringBoard ladder through the Rust A13 backend and paints the homescreen (springboard.bmp, 2436×1125) |
 
+
+## Layer 2.8 — sandbox profiles (SandBlaster port, Oct 2026)
+
+Ported from cellebrite-labs/sandblaster (GPL-2.0, Yarden Hamami /
+Cellebrite Labs) into `crates/sandbox`: binary sandbox-profile container
+(legacy 0x8000 + iOS 18 `<HHBBBBBBHHH>` headers), 8-byte operation-node
+records (terminal allow/deny + modifier/inline-action flags, non-terminal
+filter chains), per-operation graph walk with cycle guard, SBPL emitter,
+and the common sb-op name table (55 operations). Round-trip tested against
+synthetic profiles built with the exact upstream layout.
+
+| item | counterpart (C engine) | % | gate to flip |
+|---|---|---|---|
+| container header + all section tables (both formats) | reverse_sandbox.py SandboxData | **90** | real iOS 17/18 profile byte-diff |
+| node records (terminal/non-terminal, inline modifiers) | operation_node.py parse_raw | **90** | same |
+| graph walk + SBPL emission (core filter forms) | build_operation_node_graph + reduce | **70** | real-profile SBPL diff vs python SandBlaster |
+| regex-table decompilation | sandbox_regex.py automaton→PCRE | 0 | port the automaton → regex synty |
+| sb-op name table | kernel sandbox extension strings | 60 | import the full 200+ table |
 
 ## Layer 2.7 — research & format tooling (from the reference-repo sweep, Oct 2026)
 

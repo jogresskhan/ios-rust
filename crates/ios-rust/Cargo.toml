@@ -20,6 +20,7 @@ vm-core = { path = "../vm-core" }
 a13-cpu = { path = "../a13-cpu" }
 apple-soc = { path = "../apple-soc" }
 restore = { path = "../restore" }
+sandbox = { path = "../sandbox" }
 plist = { path = "../plist" }
 usbmux = { path = "../usbmux" }
 restored = { path = "../restored" }

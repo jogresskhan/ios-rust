@@ -19,6 +19,7 @@ ios-rust run -M apple-t8030 -kernel kernelcache.im4p -dtb adt.img4 \
              -serial file:console.log -drive file=rootfs.dmg,format=raw
 ios-rust restore <ipsw>      # IM4P/BuildManifest parse + ramdisk variant matrix
 ios-rust boot <ipsw>         # fetch → restore → install → homescreen ladder
+ios-rust boot-full [ipsw] [dir]  # FULL SYSTEM: full-root APFS → boot ladder → SpringBoard (G1–G4 ✅)
 ios-rust parity              # live parity ledger (% per component)
 ios-rust vault list|get|put|usage   # research-S3 integration
 ios-rust selftest            # release invariants
@@ -60,6 +61,9 @@ unknown flags are accepted-and-ignored so existing lane scripts keep working).
 | `vuln-db` | **iOS vulnerability research KB**: 18 CVE/technique entries, XNU zone-allocator mitigation timeline, FRIDA catalog, 34 tool refs | data-complete |
 | `devicecheck` | **DeviceCheck token internals** (andrd3v/dcdev RE): token buffer layout, ECDH-P256 → HKDF-SHA256 → AES-256-GCM, MESU/humbug endpoints, entitlements fixture | working |
 | `xnu` | **XNU ARM64 ABI KB**: 423 BSD syscalls, 63 Mach traps, errno, `boot_args`, early-boot call order, SVC/VM/port constants (xnu-7195.141.2 + darwin-abi.h) | data-complete |
+| `sandbox` | **SandBlaster port** (cellebrite-labs/sandblaster → Rust): binary sandbox-profile container (legacy 0x8000 + iOS 18 headers), 8-byte operation nodes, graph walk → **SBPL decompiler** | 75 |
+| `a13-cpu` ISA parity | **all 20 `soc_t8030::CPU_INSTRUCTIONS` groups decode+execute in pure Rust** (LSE atomics, RDM, FCMA, JSCVT, FP16, ASIMD RDM, DOTPROD, SHA512, SHA3, SM3/SM4, AES/PMULL, CRC32, PAC, BTI, CSV2/3, AMUv1, MPAM, TLBI RANGE, DGH/DOT, FCADD) — goldens from Capstone/Keystone oracles, per-group retire counters | 85 |
+| `boot-full` | **full-system pipeline**: IPSW → full-root APFS (System/Data/Preboot) → A13 boot ladder → launchd → **SpringBoard** homescreen (2436×1125 BMP) | 80 |
 | `host-linux` | **Linux host integration** (ios-emulator-linux + darwin-vm): capability check (KVM/RAM/APFS/tools), dep manifest, reference QEMU command builder | working |
 
 ## CPU instruction parity (named, as required)

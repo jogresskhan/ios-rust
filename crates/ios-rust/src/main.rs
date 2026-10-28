@@ -298,16 +298,30 @@ fn cmd_parity() -> i32 {
         ("NVRAM store", 55),
         ("SMC key protocol", 50),
         ("GPIO/I2C/SPI", 45),
-        ("ANS2/NVMe admin queues", 40),
-        ("AES-XTS engine (key wall)", 35),
-        ("SEP simulator control-ops", 45),
+        ("ANS2/NVMe admin queues", 75),
+        ("AES engine (reg map + cmd FIFO + AES core)", 90),
+        ("SEP simulator control-ops", 90),
+        ("SEP real-firmware core (sep.c 5673L)", 0),
         ("ADP v4 display + fb swap", 50),
-        ("MIPI-DSI (faithful stub)", 15),
-        ("Type-C/OTG session", 35),
-        ("APCIE ECAM", 30),
+        ("ADP v2 display pipe", 75),
+        ("MIPI-DSI (1:1 of upstream stub)", 90),
+        ("Type-C/OTG session (ATC container)", 75),
+        ("APCIE (LTSSM/MSI/RID-SID/ECAM)", 75),
         ("AOP + RTKit rings", 45),
-        ("MCA audio (map only)", 20),
-        ("Scaler (map only)", 20),
+        ("MCA audio (SIO/DMA/MCLK)", 90),
+        ("Scaler (irq/lock/frame/format)", 75),
+        ("Buttons (HID/SMC transitions)", 75),
+        ("MultiTouch SPI (HBPP+LL stack)", 75),
+        ("Roswell CP-auth relay", 75),
+        ("PMU D2255 (RTC/alarm/IRQ)", 75),
+        ("SPMI baseband slave", 75),
+        ("A7IOP core (v2+v4 regs)", 75),
+        ("A7IOP mailbox (FIFO doorbells)", 75),
+        ("Mic tempsensor (I2C)", 75),
+        ("Baseband XMM7660 (PCIe)", 75),
+        ("apple-soc: Inferno stub 1:1 rows (tempsensor/chestnut/fan53740/lm_backlight)", 60),
+        ("apple-soc: full device inventory (39 rows, test-enforced)", 100),
+        ("Kernel patcher chain (C-engine-only)", 0),
         ("IPSW: IM4P/manifest/variants", 100),
         ("Restore stage painter", 40),
         ("plist (libplist XML subset)", 90),
@@ -341,7 +355,16 @@ fn cmd_parity() -> i32 {
     for (name, pct) in rows {
         println!("  {:3}%  {name}", pct);
     }
-    println!("workspace model parity: {avg:.1}% (honest ledger; 100% = every gate flipped)");
+    let devs = apple_soc::inventory::DEVICES;
+    let ported = apple_soc::inventory::ported_count();
+    let dtotal = devs.len();
+    let davg = apple_soc::inventory::avg_pct();
+    println!(
+        "workspace model parity: {avg:.1}% (honest ledger; 100% = every gate flipped)"
+    );
+    println!(
+        "apple-soc devices: {ported}/{dtotal} ported (avg {davg:.1}%) — see apple_soc::inventory"
+    );
     0
 }
 

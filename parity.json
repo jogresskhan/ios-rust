@@ -3,7 +3,7 @@
   "target_soc": "Apple T8030 (A13 Bionic)",
   "machine": "apple-t8030",
   "cpu": "apple-a13 (Lightning x2 + Thunder x4, ARMv8.4-A, AArch64-only)",
-  "generated": "2026-12-02",
+  "generated": "2026-12-03",
   "rubric": {
     "100": "proven by CI/test artifact",
     "90": "implemented + verified",
@@ -16,9 +16,9 @@
   },
   "engine_smoke": {
     "status": "PASS",
-    "detail": "full system: `ios-rust boot-full` builds the complete APFS container (System/Data/Preboot) from the IPSW, runs the boot prologue through the Rust A13 backend (extended ISA: LSE/PAC/CRC32 retire on the boot path), walks the launchd-to-SpringBoard ladder, and paints the 2436x1125 homescreen (springboard.bmp); PLUS the restore host e2e and the 20 named CPU instruction groups decode+execute with per-group retire counters and a 189-entry capstone/keystone-verified CI golden table (6 decoder bugs found and fixed by it)"
+    "detail": "full system: `ios-rust boot-full` builds the complete APFS container (System/Data/Preboot) from the IPSW, runs the boot prologue through the Rust A13 backend (extended ISA: LSE/PAC/CRC32 retire on the boot path), walks the launchd-to-SpringBoard ladder, and paints the 2436x1125 homescreen (springboard.bmp); PLUS the restore host e2e, the 20 named CPU instruction groups decode+execute with per-group retire counters and the 189-entry capstone/keystone-verified CI golden table (6 decoder bugs found and fixed by it); PLUS the complete apple-soc inventory (38 devices, 35 ported) with 89 crate tests"
   },
-  "overall_pct": 78.0,
+  "overall_pct": 71.7,
   "modules": [
     {
       "name": "qemu-util (libqemuutil port)",
@@ -112,15 +112,15 @@
     },
     {
       "name": "apple-soc: ans2_nvme",
-      "pct": 40
+      "pct": 75
     },
     {
       "name": "apple-soc: aes",
-      "pct": 35
+      "pct": 90
     },
     {
       "name": "apple-soc: sep_sim",
-      "pct": 45
+      "pct": 90
     },
     {
       "name": "apple-soc: displaypipe (ADP v4)",
@@ -128,15 +128,15 @@
     },
     {
       "name": "apple-soc: mipi_dsi",
-      "pct": 15
+      "pct": 90
     },
     {
       "name": "apple-soc: typec_otg",
-      "pct": 35
+      "pct": 75
     },
     {
       "name": "apple-soc: apcie",
-      "pct": 30
+      "pct": 75
     },
     {
       "name": "apple-soc: aop",
@@ -148,11 +148,11 @@
     },
     {
       "name": "apple-soc: mca",
-      "pct": 20
+      "pct": 90
     },
     {
       "name": "apple-soc: scaler",
-      "pct": 20
+      "pct": 75
     },
     {
       "name": "apple-soc: t8030 machine",
@@ -272,6 +272,66 @@
       "name": "a13-cpu goldens_ext CI table",
       "pct": 95,
       "files": 1
+    },
+    {
+      "name": "apple-soc: buttons",
+      "pct": 75
+    },
+    {
+      "name": "apple-soc: roswell",
+      "pct": 75
+    },
+    {
+      "name": "apple-soc: mic_tempsensor",
+      "pct": 75
+    },
+    {
+      "name": "apple-soc: tempsensor (upstream stub 1:1)",
+      "pct": 60
+    },
+    {
+      "name": "apple-soc: spmi_baseband",
+      "pct": 75
+    },
+    {
+      "name": "apple-soc: chestnut (upstream stub 1:1)",
+      "pct": 60
+    },
+    {
+      "name": "apple-soc: fan53740 (upstream stub 1:1)",
+      "pct": 60
+    },
+    {
+      "name": "apple-soc: lm_backlight (upstream stub 1:1)",
+      "pct": 60
+    },
+    {
+      "name": "apple-soc: pmu_d2255",
+      "pct": 75
+    },
+    {
+      "name": "apple-soc: a7iop",
+      "pct": 75
+    },
+    {
+      "name": "apple-soc: a7iop_mailbox",
+      "pct": 75
+    },
+    {
+      "name": "apple-soc: displaypipe_v2",
+      "pct": 75
+    },
+    {
+      "name": "apple-soc: mt_spi",
+      "pct": 75
+    },
+    {
+      "name": "apple-soc: baseband",
+      "pct": 75
+    },
+    {
+      "name": "apple-soc: full Inferno device inventory (inventory.rs)",
+      "pct": 100
     }
   ],
   "permanent_gaps": [

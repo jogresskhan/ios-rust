@@ -12,10 +12,22 @@
 //! * apple-silicon-derived device models: AGPL-3.0-or-later (this crate).
 
 pub mod aic;
+pub mod buttons;
+pub mod roswell;
+pub mod mic_tempsensor;
+pub mod tempsensor;
+pub mod spmi_baseband;
+pub mod chestnut;
+pub mod fan53740;
+pub mod lm_backlight;
 pub mod ans2_nvme;
 pub mod apcie;
 pub mod aes;
 pub mod aop;
+pub mod a7iop;
+pub mod a7iop_mailbox;
+pub mod displaypipe_v2;
+pub mod pmu_d2255;
 pub mod dart;
 pub mod gpio_i2c_spi;
 pub mod mca;
@@ -32,7 +44,10 @@ pub mod spmi_pmu;
 pub mod t8030;
 pub mod typec_otg;
 pub mod wdt;
+pub mod mt_spi;
+pub mod baseband;
 
 pub mod displaypipe;
+pub mod inventory;
 
 pub use vm_core::{Bus, Device, FrameBuffer, framebuffer::FrameSink};

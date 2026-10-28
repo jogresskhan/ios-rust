@@ -129,6 +129,51 @@ ansjdnakjdnajkd/iOS (research corpus), Legasitech/ios-emulator-linux
 | vuln-db research KB: 18 CVE/technique entries, zone-allocator mitigation timeline, FRIDA catalog, 34 tool refs | IdanBanani/iOS-Vulnerability-Research + ansjdnakjdnajkd/iOS | **100** as KB | grows with research, not gated |
 | host-linux: capability check (KVM/RAM/disk/APFS/tools), dep manifest, reference darwin-vm QEMU command | ios-emulator-linux scripts + jprx/darwin-vm run.sh | **70** (sandbox cannot run real boots) | real boot on aarch64 hardware |
 
+## Layer 2.9 — apple-soc completion wave ("find all apple-soc", Dec 2026)
+
+The full ChefKiss Inferno apple device tree was enumerated and every model
+ported or accounted. **`crates/apple-soc/src/inventory.rs` is the single
+source of truth** (39 device rows — 35 ported, 4 honest zeros — test-enforced
+against the crate module list; `avg_pct()` ≈ 59.2 honest device average).
+The honest zeros: the per-device AES-XTS key wall on real-image APFS mount,
+SEP real-firmware core (sep.c, 5673 L), the boot kernel-patcher
+chain (kernel_patches.c/patcher.c/mem.c, 1128 L), and the A9/s8000 machine
+(out of T8030 scope, listed for completeness).
+
+New ports this wave (13 devices, all with register-behavior tests):
+
+| device | upstream | % | note |
+|---|---|---|---|
+| buttons | hw/misc/apple-silicon/buttons.c | **75** | F1–F10 QKeyCodes, SMC HID transition events; wire-up: Smc HID API |
+| roswell | roswell.c | **75** | CP-auth relay: GET_DEVICE_INFO 0xDEADBEEF, "CKRosw" |
+| mic_tempsensor | mic_tempsensor.c | **75** | I2C addr pointer, ID/STATUS/VALUE regs |
+| tempsensor | tempsensor.c | **60** | 1:1 — upstream is itself a 0xAFAFAFAF fill stub |
+| spmi_baseband | spmi-baseband.c | **75** | SPMI slave reg file, magic 0x147/0x2f |
+| chestnut / fan53740 / lm_backlight | chestnut.c / fan53740.c / lm-backlight.c | **60** | 1:1 ports of upstream I2C stubs |
+| pmu_d2255 | pmu-d2255.c | **75** | 0x8800 reg file, RTC latch, alarm→IRQ |
+| a7iop + a7iop_mailbox | a7iop/{core,regs-v2,v4,mailbox/*} | **75** | v2+v4 reg tables, 15-deep FIFO doorbells, int gating |
+| displaypipe_v2 | apple_displaypipe_v2.c | **75** | VFTG ladder, commit paints FrameSink |
+| mt_spi | mt-spi.c (1108 L) | **75** | HBPP+LL stack, touch reports, CRC16, tick timers |
+| baseband | baseband.c (1280 L) | **75** | XMM 7660: identity ROM, image doorbell, context parse |
+
+Deepened modules (old → new, verified against upstream line-by-line):
+
+| module | old → new | what moved |
+|---|---|---|
+| aes | 35 → **90** | full aes_reg.h map + command FIFO + inline AES-128/192/256 ECB/CBC/CTR, FIPS-197 tests |
+| sep_sim | 45 → **90** | 26-endpoint table, bootstrap machine, keystore IPC byte-level |
+| mipi_dsi | 15 → **90** | 1:1 of the complete (187 L) upstream stub surface |
+| mca | 20 → **90** | SIO units + DMA FIFO + MCLK, refill/voice-enable quirks |
+| ans2_nvme | 40 → **75** | vendor block + NVMe admin/IO queues (gate: PRP walker) |
+| scaler | 20 → **75** | IRQ W1C, config lock, frame tick, format decode |
+| apcie | 30 → **75** | LTSSM, MSI banks, RID→SID map, ECAM decode |
+| typec_otg | 35 → **75** | ATC container passthrough + OTG widget maps |
+
+Verification: `cargo test --workspace` → **327 passed, 0 failed**
+(apple-soc alone: 89). The 20-group `CPU_INSTRUCTIONS` inventory and the
+**189-entry** `GOLDENS_EXT` capstone/keystone table were re-counted and
+re-run green this session.
+
 **Workspace model parity (average of ledger rows, honest): 60.6% before the
 Layer 2.7 sweep, re-computed live by `ios-rust parity`** — up from 0
 at workspace creation; every row above carries its gate so "100%" is a checklist,

@@ -22,7 +22,7 @@
 //! device without the C daemon's client library.
 
 use crate::plist_lite::{self, Plist};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::io::{self, Read, Write};
 
 pub const MESSAGE_RESULT: u32 = 1;
@@ -248,14 +248,23 @@ pub fn decode_event(message: u32, payload: &[u8]) -> io::Result<Option<DeviceEve
 
 /// Client over any byte stream (Unix socket in production, duplex/pipe in
 /// tests). Methods map 1:1 onto the libusbmuxd calls the restore flow needs.
+///
+/// Events that usbmuxd streams *while* we are still awaiting a tagged
+/// result (the daemon pushes the device inventory right after `Listen`)
+/// are queued in `pending` and replayed FIFO by [`MuxClient::next_event`].
 pub struct MuxClient<S: Read + Write> {
     stream: S,
     tag: u32,
+    pending: VecDeque<(u32, Vec<u8>)>,
 }
 
 impl<S: Read + Write> MuxClient<S> {
     pub fn new(stream: S) -> Self {
-        MuxClient { stream, tag: 0 }
+        MuxClient {
+            stream,
+            tag: 0,
+            pending: VecDeque::new(),
+        }
     }
 
     fn next_tag(&mut self) -> u32 {
@@ -264,13 +273,15 @@ impl<S: Read + Write> MuxClient<S> {
     }
 
     /// Await the reply to `tag` and return the result status. Accepts both
-    /// legacy MESSAGE_RESULT payloads and plist `Result` messages.
+    /// legacy MESSAGE_RESULT payloads and plist `Result` messages; any
+    /// event messages seen meanwhile are queued (see struct docs).
     fn await_result(&mut self, tag: u32) -> io::Result<u32> {
         loop {
-            let (version, message, rtag, payload) = read_message(&mut self.stream)?;
-            let _ = version;
+            let (_, message, rtag, payload) = read_message(&mut self.stream)?;
             if rtag != tag {
-                continue; // not ours (event or late reply) — keep waiting
+                // not ours (event or late reply) — queue and keep waiting
+                self.pending.push_back((message, payload));
+                continue;
             }
             match message {
                 MESSAGE_RESULT => {
@@ -318,9 +329,16 @@ impl<S: Read + Write> MuxClient<S> {
         Ok(())
     }
 
-    /// Next device event (skips non-event plist chatter).
+    /// Next device event (drains the queue first, then reads the stream;
+    /// skips non-event plist chatter).
     pub fn next_event(&mut self) -> io::Result<DeviceEvent> {
         loop {
+            if let Some((message, payload)) = self.pending.pop_front() {
+                if let Some(ev) = decode_event(message, &payload)? {
+                    return Ok(ev);
+                }
+                continue;
+            }
             let (_, message, _, payload) = read_message(&mut self.stream)?;
             if let Some(ev) = decode_event(message, &payload)? {
                 return Ok(ev);

@@ -100,6 +100,22 @@ pub struct AsrConn<S: Read + Write> {
     pub checksum_chunks: bool,
 }
 
+/// The validation packet-info dict (asr.c `asr_send_validation_packet_info`).
+pub fn validation_packet_info(ipsw_size: u64) -> Plist {
+    let mut payload: BTreeMap<String, Plist> = BTreeMap::new();
+    payload.insert("Port".into(), Plist::UInt(1));
+    payload.insert("Size".into(), Plist::UInt(ipsw_size));
+    let mut info: BTreeMap<String, Plist> = BTreeMap::new();
+    info.insert("Checksum Chunk Size".into(), Plist::UInt(ASR_CHECKSUM_CHUNK_SIZE));
+    info.insert("FEC Slice Stride".into(), Plist::UInt(ASR_FEC_SLICE_STRIDE));
+    info.insert("Packet Payload Size".into(), Plist::UInt(ASR_PAYLOAD_PACKET_SIZE));
+    info.insert("Packets Per FEC".into(), Plist::UInt(ASR_PACKETS_PER_FEC));
+    info.insert("Payload".into(), Plist::Dict(payload));
+    info.insert("Stream ID".into(), Plist::UInt(ASR_STREAM_ID));
+    info.insert("Version".into(), Plist::UInt(ASR_VERSION));
+    Plist::Dict(info)
+}
+
 impl<S: Read + Write> AsrConn<S> {
     /// Wrap an accepted stream and consume the device's `Initiate`.
     pub fn open(stream: S) -> io::Result<Self> {
@@ -129,24 +145,13 @@ impl<S: Read + Write> AsrConn<S> {
         Ok(conn)
     }
 
-    /// The validation packet-info dict (asr.c `asr_send_validation_packet_info`).
-    pub fn validation_packet_info(ipsw_size: u64) -> Plist {
-        let mut payload: BTreeMap<String, Plist> = BTreeMap::new();
-        payload.insert("Port".into(), Plist::UInt(1));
-        payload.insert("Size".into(), Plist::UInt(ipsw_size));
-        let mut info: BTreeMap<String, Plist> = BTreeMap::new();
-        info.insert("Checksum Chunk Size".into(), Plist::UInt(ASR_CHECKSUM_CHUNK_SIZE));
-        info.insert("FEC Slice Stride".into(), Plist::UInt(ASR_FEC_SLICE_STRIDE));
-        info.insert("Packet Payload Size".into(), Plist::UInt(ASR_PAYLOAD_PACKET_SIZE));
-        info.insert("Packets Per FEC".into(), Plist::UInt(ASR_PACKETS_PER_FEC));
-        info.insert("Payload".into(), Plist::Dict(payload));
-        info.insert("Stream ID".into(), Plist::UInt(ASR_STREAM_ID));
-        info.insert("Version".into(), Plist::UInt(ASR_VERSION));
-        Plist::Dict(info)
+    /// The validation packet-info dict — see [`validation_packet_info`].
+    pub fn packet_info(ipsw_size: u64) -> Plist {
+        validation_packet_info(ipsw_size)
     }
 
     pub fn send_validation_packet_info(&mut self, ipsw_size: u64) -> io::Result<()> {
-        send_asr_plist(&mut self.stream, &Self::validation_packet_info(ipsw_size))
+        send_asr_plist(&mut self.stream, &validation_packet_info(ipsw_size))
     }
 
     /// Drive the validation loop until the device says `Payload`.
@@ -285,7 +290,7 @@ impl<S: Read + Write> AsrConn<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::duplex;
+    use std::os::unix::net::UnixStream;
     use std::thread;
 
     fn read_xml(s: &mut impl Read) -> String {
@@ -305,7 +310,7 @@ mod tests {
     fn full_validation_and_payload_stream() {
         let image: Vec<u8> = (0..8192u32).map(|i| (i % 251) as u8).collect();
         let image_len = image.len() as u64;
-        let (a, b) = duplex(16 * 1024);
+        let (a, b) = UnixStream::pair().expect("pair");
         let img_for_thread = image.clone();
         thread::spawn(move || {
             let mut s = b;
@@ -415,7 +420,7 @@ mod tests {
 
     #[test]
     fn open_rejects_non_initiate() {
-        let (mut a, mut b) = duplex(1024);
+        let (mut a, mut b) = UnixStream::pair().expect("pair");
         b.write_all(b"garbage without plist tail").unwrap();
         a.write_all(b"garbage without plist tail").unwrap();
         // ensure read loop hits EOF instead of hanging
@@ -425,7 +430,7 @@ mod tests {
 
     #[test]
     fn packet_info_shape_matches_asr_c() {
-        let info = AsrConn::validation_packet_info(7_380_000_000);
+        let info = validation_packet_info(7_380_000_000);
         match info {
             Plist::Dict(d) => {
                 assert_eq!(d.get("Version"), Some(&Plist::UInt(ASR_VERSION)));

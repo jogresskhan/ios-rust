@@ -5,3 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license = "GPL-2.0-or-later"
 description = "libauthinstall subset: TSS request build, APTicket (ApImg4Ticket) extraction, IM4M structural validation"
+
+[dependencies]
+plist = { path = "../plist" }
+img4 = { path = "../img4" }

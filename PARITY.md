@@ -71,7 +71,37 @@ own `restored_external` 18A5351d decompilation (RE-FINDINGS.md).
 | G3 install → launchd on restored APFS | pending G2 |
 | G4 homescreen via ios-rust engine | pending G3 + CPU exec |
 
-**Workspace model parity (average of ledger rows, honest): ~56%** — up from 0
+**Workspace model parity (average of ledger rows, honest): 60.6%** — up from 0
 at workspace creation; every row above carries its gate so "100%" is a checklist,
 not a slogan. Update this file with every verdict (same discipline as the
 ios-sweet-rust ledger).
+
+## Layer 5 — the pure-Rust restore host (X-row closure, 2026-10-28)
+
+The ios-sweet-rust parity map's five MISSING host-side rows are now
+implemented in Rust, twice over by design: as **standalone crates**
+(canonical, protocol ground truth) and as `restore::` in-crate modules
+(integrated path). CI runs both stacks (132/132 tests).
+
+| item | counterpart | % | gate to flip |
+|---|---|---|---|
+| `plist` crate — XML plist parse/serialize + `parse_prefix` for TCP-coalesced bursts | libplist XML subset | **90** | binary plist (bplist00) reader |
+| `usbmux` crate — usbmuxd client: binary framing (htons ports), Listen/DeviceList/Connect, unix+TCP | libusbmuxd | **90** | device pass over a real unix socket |
+| `restored` crate — QueryType/QueryValue/StartRestore/notifications, port **0xF27E** (cross-checked against the Ghidra decomp of `restored_external` entry(), ios-sweet-rust run 40609705374) | libimobiledevice restore.c | **75** | real restored handshake (needs CPU exec) |
+| `asr` crate — Initiate→packet-info→OOBData→Payload state machine, 128 KiB chunks + per-chunk SHA-1 (own FIPS 180-1) | idevicerestore asr.c | **75** | real 7.38 GB push (needs CPU exec) |
+| `authinstall` crate — TSS request build (UniqueBuildID/ApChipID/…/ApNonce + @ApImg4Ticket), ticket extraction, IM4M structural validation | libauthinstall + idevicerestore tss.c/img4.c | **60** | TLS transport + live TSS round trip |
+| `apfs` crate — fletcher64 (upstream sum-to-zero scheme), nx/volume superblocks, omap+fsroot B-trees, COW file create/replace | apfs.kext / apfs-fuse DiskStruct.h | **60** | mount real Apple image (AES-XTS per-device key wall) |
+| host pipeline — `run_host_restore`: usbmux → restored → ASR push → Status 0 "Restore Finished" | idevicerestore restore.c | **75** | full run against real device |
+
+Proof carried in CI: `ios-rust` bin test `host_restore::end_to_end_host_restore_over_mock_device`
+drives the whole sequence against an in-process mock device (usbmuxd +
+restored + ASR), verifying the SHA-1-tagged chunk stream of a pushed
+image. The restore-internal variants (`restore::plist_lite`, `usbmux`,
+`asr`, `restored_proto`, `tss`) cover the same protocols inside the
+restore crate with their own tests; ASR frame reading, usbmux header
+bounds and the restored frame-bounds test were repaired in the same
+pass so both stacks are green.
+
+The workspace average moved **54.2 → 60.6** (parity.json, 51 modules,
+132/132 tests). CI trigger repaired (`on.push.branches` was the literal
+scalar `ain]` — push builds to main never ran).

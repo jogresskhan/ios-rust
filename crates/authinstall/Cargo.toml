@@ -1,0 +1,7 @@
+[package]
+name = "authinstall"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license = "GPL-2.0-or-later"
+description = "libauthinstall subset: TSS request build, APTicket (ApImg4Ticket) extraction, IM4M structural validation"

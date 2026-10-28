@@ -178,6 +178,22 @@ Verification: `cargo test --workspace` → **327 passed, 0 failed**
 **189-entry** `GOLDENS_EXT` capstone/keystone table were re-counted and
 re-run green this session.
 
+## Layer 2.11 — boot-full v2: the real kernel on the Rust backend (Dec 2026)
+
+`ios-rust boot-full` gained stage **[2.5/4]**: when the real fixtures are
+present, the pipeline decompresses the actual T8030 kernelcache, applies the
+T8030 patch table to the real bytes, lets the **real ADT** drive device
+attach (`attach_from_adt`), and executes the kernel's first real function
+from `__TEXT_EXEC` through the pure-Rust A13 interpreter to a **clean
+RET → HLT** (iBoot-style guest state: stack in DRAM, LR on an HLT pause
+page).
+
+| item | evidence | % |
+|---|---|---|
+| T8030 machine assembly, real-ADT attach | real DeviceTree.n104ap: **59/105 peripherals modeled** (aic/uart/wdt/dart/pmgr/ans2/aes/smc/… attach at their real MMIO bases); 35 unmatched named (nco, mcc, dwi, pwm, pmp, sio, rsm …) — the next device-wave worklist | **90** |
+| real-kernel boot stage | 39,204,080 B decode · patches 6/20 on real bytes · interpreter `executed 8 insns from 0xfffffff007bb0000, stop: Halted` (first function RETs clean) | **75** |
+| **next honest gate (0)** | **kernel image rebase/fixup load** — the prelinked cache ships GOT pointers zeroed (iBoot applies rebase/chained-fixups with the boot slide); without it the first indirect call goes to 0. This is the same fixup machinery as the "KEXT extraction w/ chained fixups" row. | **0** |
+
 ## Layer 2.10 — REAL-ARTIFACT gates ("use the GitHub action to make download cache", Dec 2026)
 
 Real Apple artifacts are now first-class CI fixtures (`.github/workflows/

@@ -16,9 +16,9 @@
   },
   "engine_smoke": {
     "status": "PASS",
-    "detail": "full system: `ios-rust boot-full` builds the complete APFS container (System/Data/Preboot), runs the boot prologue through the Rust A13 backend, walks the launchd-to-SpringBoard ladder, paints the 2436x1125 homescreen; PLUS the 20 CPU groups with the 189-entry golden table; PLUS REAL-ARTIFACT gates now proven: the T8030 iOS 13.7 17H35 kernelcache from Apple's CDN decompresses (39 MB LZFSE), yields Darwin 19.6.0 + 232 kexts, and takes 6 T8030 patches on real bytes; the real DeviceTree.n104ap ADT parses (105 peripherals, arm-io,t8030); a live TSS response from gs.apple.com parses and the ApImg4Ticket IM4M validates structurally; 6 real-data bugs found and fixed by the fixtures"
+    "detail": "boot-full v2: full APFS container build (System/Data/Preboot) \u2192 REAL-KERNEL STAGE (the actual T8030 iOS 13.7 kernelcache from Apple's CDN: 39 MB LZFSE decode, 6/20 T8030 patches applied to real bytes, real ADT drives device attach 59/105 peripherals, and the pure-Rust A13 interpreter executes the kernel's first real function to a clean RET\u2192HLT from __TEXT_EXEC 0xfffffff007bb0000) \u2192 launchd\u2192SpringBoard ladder \u2192 2436x1125 homescreen; PLUS 20 CPU groups with the 189-entry golden table; PLUS real TSS response parse (gs.apple.com capture). Next honest gate: kernel image rebase/fixup load (GOT pointers ship zeroed) to boot past the first indirect call."
   },
-  "overall_pct": 73.4,
+  "overall_pct": 73.6,
   "modules": [
     {
       "name": "qemu-util (libqemuutil port)",
@@ -156,7 +156,7 @@
     },
     {
       "name": "apple-soc: t8030 machine",
-      "pct": 75
+      "pct": 90
     },
     {
       "name": "ipsw (fetch/manifest/im4p/variants)",
@@ -352,6 +352,10 @@
     {
       "name": "real-fixture CI gate (Apple CDN bytes + live TSS)",
       "pct": 100
+    },
+    {
+      "name": "real-kernel boot stage (boot-full [2.5/4])",
+      "pct": 75
     }
   ],
   "permanent_gaps": [
@@ -387,5 +391,6 @@
     "libusbmuxd + idevicerestore asr.c + libimobiledevice restored.c (LGPL-2.1, protocol reference)",
     "restored_external 18A5351d decompilation (RE-FINDINGS.md, checkpoint 0x0104/0x065B/0x067E contract)",
     "ARM DDI 0487 (A64 encodings)"
-  ]
+  ],
+  "tests_passed": 343
 }

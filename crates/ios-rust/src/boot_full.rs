@@ -19,15 +19,16 @@
 use std::path::{Path, PathBuf};
 use std::str;
 
-use a13_cpu::interp::Interpreter;
-use a13_cpu::{CpuBackend, InterpBudget, MemAccess, StopReason};
+use a13_cpu::interp::{Interpreter, GROUP_NAMES, N_GROUPS};
+use a13_cpu::{CpuBackend, InterpBudget, MemAccess, RunResult, StopReason};
 use apple_soc::t8030::{T8030Machine, DEFAULT_DRAM_MB};
-use ipsw::im4p::Im4p;
+use img4::im4p::Im4p;
+use kernelcache::sections;
 use restore::bootargs::{boot_args, chosen_properties, BootMode, USER_BOOT_LADDER};
 use restore::stage::{paint, Stage};
-use vm_core::Bus;
+use vm_core::{Bus, Device, Ram};
 
-pub const BOOT_FULL_ID: &str = "boot-full v1 (ipsw → full-root → springboard)";
+pub const BOOT_FULL_ID: &str = "boot-full v2 (ipsw → full-root → real-kernel → springboard)";
 
 /// The full-root layout the pipeline constructs inside the APFS container.
 pub const SYSTEM_VOLUME_TREE: &[&str] = &[
@@ -83,7 +84,7 @@ pub fn intake(ipsw: Option<&Path>) -> Result<(Vec<Component>, String), String> {
         // IPSW = zip of components + BuildManifest; the im4p path handles
         // the single-container case; a real zip is unpacked by the ipsw
         // crate's component index (lane-staged for the A13 targets).
-        match Im4p::parse(&raw) {
+        match ipsw::im4p::Im4p::parse(&raw) {
             Ok(parsed) => {
                 let fourcc = str::from_utf8(&parsed.fourcc_type)
                     .unwrap_or("????")
@@ -294,6 +295,222 @@ pub struct BootReport {
     pub chosen: Vec<(String, String)>,
 }
 
+// ---------------------------------------------------------------------------
+// Stage 2.5 — the REAL kernel: actual Apple T8030 firmware through the Rust
+// backend (gated on fixtures; `ios-rust boot-full` degrades honestly when
+// they are absent).
+// ---------------------------------------------------------------------------
+
+/// Report of the real-kernel boot stage.
+pub struct RealKernelReport {
+    /// Decompressed kernelcache size (real Apple bytes).
+    pub image_bytes: usize,
+    /// T8030 patch table results on the real image.
+    pub patches_applied: usize,
+    pub patches_missed: usize,
+    /// Names of the patches that landed on real bytes.
+    pub applied_names: Vec<String>,
+    /// Real ADT: peripherals under /arm-io.
+    pub adt_peripherals: usize,
+    /// Devices attached by compatible match (our models).
+    pub devices_attached: usize,
+    /// Compatibles we do not model yet ("find more things").
+    pub unmatched: Vec<String>,
+    /// __TEXT_EXEC.__text VA where execution started.
+    pub text_exec_va: u64,
+    /// Real kernel instructions retired by the Rust interpreter.
+    pub insns_executed: u64,
+    /// Where the interpreter stopped (honest: usually the first unknown).
+    pub stop: String,
+    pub stop_pc: u64,
+    pub stop_insn: u32,
+    /// Named ISA groups that retired at least one real-kernel instruction.
+    pub groups_hit: Vec<(String, u64)>,
+}
+
+/// Locate the real fixtures: $IOS_RUST_FIXTURES, ./fixtures, or the
+/// workspace fixtures dir.
+pub fn fixtures_dir() -> Option<PathBuf> {
+    if let Some(d) = std::env::var_os("IOS_RUST_FIXTURES") {
+        let p = PathBuf::from(d);
+        if p.join("kernelcache.release.iphone12b").exists() {
+            return Some(p);
+        }
+    }
+    for cand in ["fixtures", "/home/z/work/ios-rust/fixtures"] {
+        let p = PathBuf::from(cand);
+        if p.join("kernelcache.release.iphone12b").exists() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// Run the real-kernel stage. `None` = fixtures absent (honest skip).
+pub fn real_kernel_stage() -> Option<Result<RealKernelReport, String>> {
+    let dir = fixtures_dir()?;
+    Some(real_kernel_run(&dir))
+}
+
+fn real_kernel_run(dir: &Path) -> Result<RealKernelReport, String> {
+    // 1) decompress the REAL kernelcache
+    let kc_path = dir.join("kernelcache.release.iphone12b");
+    let raw = std::fs::read(&kc_path).map_err(|e| format!("read {}: {e}", kc_path.display()))?;
+    let mut img = kernelcache::decompress(&raw)?;
+
+    // 2) the T8030 patch table on the real bytes
+    let report = kernelcache::apply_t8030_patches(&mut img, 0x8000_0000_0);
+    let applied_names = report.applied.clone();
+    let patches_applied = report.applied.len();
+    let patches_missed = report.missed.len();
+
+    // 3) real ADT → device attach (the machine discovers hardware the way
+    //    XNU does: compatible strings on /arm-io children)
+    let dt_raw = std::fs::read(dir.join("DeviceTree.n104ap.im4p"))
+        .map_err(|e| format!("read devicetree: {e}"))?;
+    let im4p = img4::im4p::Im4p::parse(&dt_raw).map_err(|e| format!("devicetree IM4P: {e}"))?;
+    let adt = adt::AdtNode::parse(&im4p.data).map_err(|e| format!("ADT: {e}"))?;
+    let adt_peripherals = adt
+        .find("arm-io")
+        .map(|n| n.children.len())
+        .unwrap_or(0);
+
+    let mut machine = T8030Machine::new(DEFAULT_DRAM_MB);
+    let devices_attached = machine.attach_from_adt(&adt);
+    let unmatched: Vec<String> = machine
+        .unimplemented_devices
+        .iter()
+        .map(|(name, _, _, _)| name.clone())
+        .collect();
+    let serial = machine.serial.clone();
+    let mut bus = std::mem::replace(&mut machine.bus, Bus::new());
+
+    // 4) map the (patched) kernel image at its real VA and execute REAL
+    //    instructions through the pure-Rust A13 interpreter.
+    //    Image base = __TEXT.vmaddr (segment 0 is mapped from file offset
+    //    0 in a prelinked kernelcache), derived from a __TEXT section:
+    //    base = sect.addr - sect.offset. Using __TEXT_EXEC for this is
+    //    wrong — its vmaddr is far past the file start.
+    let text = sections::find_section(&img, "__TEXT_EXEC", "__text")
+        .ok_or("kernelcache: no __TEXT_EXEC.__text")?;
+    let anchor = sections::find_section(&img, "__TEXT", "__cstring")
+        .or_else(|| sections::sections(&img).into_iter().find(|s| s.segment == "__TEXT"))
+        .ok_or("kernelcache: no __TEXT section")?;
+    let image_base = anchor
+        .addr
+        .checked_sub(anchor.offset)
+        .ok_or("kernel __TEXT VA < file offset")?;
+    let text_va = image_base.checked_add(text.offset).ok_or("text VA overflow")?;
+    let mut kernel_ram = Ram::new("xnu-kernel", img.len() as u64);
+    if let Some(data) = kernel_ram.ram_mut() {
+        data.copy_from_slice(&img);
+    }
+    bus.attach(image_base, img.len() as u64, Box::new(kernel_ram));
+
+    // "boot-pause" page: HLT sentinel that real RETs land on.
+    let pause_va = image_base - 0x1000;
+    let mut pause = Ram::new("boot-pause", 0x1000);
+    if let Some(data) = pause.ram_mut() {
+        data[..4].copy_from_slice(&0xD440_0000u32.to_le_bytes()); // HLT
+    }
+    bus.attach(pause_va, 0x1000, Box::new(pause));
+
+    // reuse the file's existing BusMem (Bus.read/write → MemAccess)
+
+    let mut cpu = Interpreter::new(Box::new(BusMem(bus)));
+    cpu.set_reset_vector(text_va);
+    // PAC key setup as iBoot leaves it for xnu (guest-visible ID surface)
+    cpu.sys.apiakeylo = 0x0123_4567_89AB_CDEF;
+    cpu.sys.apiakeyhi = 0xFEDC_BA98_7654_3210;
+    // Guest state iBoot would leave behind: a real stack (DRAM top) and a
+    // link register pointing at the pause page so the kernel's first
+    // function runs to a clean RET instead of returning into the void.
+    cpu.sp = 0x8_1000_0000; // inside the 4 GiB DRAM region
+    cpu.x[30] = pause_va; // LR
+    let res = cpu.run(InterpBudget {
+        max_insn: 20_000,
+        max_ns: 2_000_000_000,
+    });
+
+    let groups_hit: Vec<(String, u64)> = GROUP_NAMES
+        .iter()
+        .zip(cpu.group_exec.iter())
+        .filter(|(_, &n)| n > 0)
+        .map(|(n, &c)| (n.to_string(), c))
+        .collect();
+
+    let stop = match &res.stop {
+        StopReason::UnknownInsn { pc, insn } => {
+            format!("UnknownInsn {insn:#010x} @ {pc:#x}")
+        }
+        other => format!("{other:?}"),
+    };
+    let (stop_pc, stop_insn) = match &res.stop {
+        StopReason::UnknownInsn { pc, insn } => (*pc, *insn),
+        _ => (0, 0),
+    };
+    let _ = serial; // real-kernel stage is silent for now (UART not reached)
+
+    Ok(RealKernelReport {
+        image_bytes: img.len(),
+        patches_applied,
+        patches_missed,
+        applied_names,
+        adt_peripherals,
+        devices_attached,
+        unmatched,
+        text_exec_va: text_va,
+        insns_executed: res.executed,
+        stop,
+        stop_pc,
+        stop_insn,
+        groups_hit,
+    })
+}
+
+/// Print stage [2.5/4] when the real fixtures are present.
+fn print_real_kernel_stage() -> Option<RealKernelReport> {
+    match real_kernel_stage() {
+        Some(Ok(r)) => {
+            println!(
+                "[2.5/4] real kernel: {} B LZFSE-decoded · patches {}/{} applied (real bytes) · \
+                 ADT {}/{} peripherals modeled",
+                r.image_bytes, r.patches_applied, r.patches_applied + r.patches_missed,
+                r.devices_attached, r.adt_peripherals
+            );
+            for a in r.applied_names.iter().take(6) {
+                println!("        ✅ patch: {a}");
+            }
+            println!(
+                "[2.5/4] A13 interpreter on REAL __TEXT_EXEC: executed {} insns from {:#x}, \
+                 stop: {}",
+                r.insns_executed, r.text_exec_va, r.stop
+            );
+            if !r.groups_hit.is_empty() {
+                let g: Vec<String> =
+                    r.groups_hit.iter().map(|(n, c)| format!("{n}×{c}")).collect();
+                println!("        ISA groups retired on real kernel: {}", g.join(", "));
+            }
+            if !r.unmatched.is_empty() {
+                println!(
+                    "        unmatched peripherals ({}): {}…",
+                    r.unmatched.len(),
+                    r.unmatched.iter().take(8).cloned().collect::<Vec<_>>().join(", ")
+                );
+            }
+            Some(r)
+        }
+        Some(Err(e)) => {
+            println!("[2.5/4] real kernel stage skipped: {e}");
+            None
+        }
+        None => {
+            println!("[2.5/4] real kernel stage skipped: fixtures absent (set IOS_RUST_FIXTURES)");
+            None
+        }
+    }
+}
+
 /// Run the complete pipeline and print the honest ladder report.
 pub fn run(ipsw: Option<&Path>, out_dir: &Path) -> i32 {
     println!("{BOOT_FULL_ID}");
@@ -323,6 +540,9 @@ pub fn run(ipsw: Option<&Path>, out_dir: &Path) -> i32 {
         root_len / 1024,
         SYSTEM_VOLUME_TREE.len()
     );
+
+    // 2.5) the REAL kernel through the Rust backend (when fixtures exist)
+    let _real = print_real_kernel_stage();
 
     // 3+4) G4: boot the restored install
     match boot_restored_install(out_dir) {

@@ -747,6 +747,7 @@ name = "ios-rust"
 version = "0.1.0"
 dependencies = [
  "a13-cpu",
+ "adt",
  "anyhow",
  "apfs",
  "apple-soc",
@@ -758,6 +759,7 @@ dependencies = [
  "dsc",
  "hex",
  "host-linux",
+ "img4",
  "ipsw",
  "kernelcache",
  "plist",

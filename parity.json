@@ -16,63 +16,251 @@
   },
   "engine_smoke": {
     "status": "PASS",
-    "detail": "real A13 interpreter over real T8030 bus: guest program writes IOS\\n via UART0 MMIO + HLT; framebuffer 2436x1125 painted to BMP"
+    "detail": "real A13 interpreter over real T8030 bus: guest program writes IOS\\n via UART0 MMIO + HLT; framebuffer 2436x1125 painted to BMP; PLUS the pure-Rust restore host (usbmuxhost → restored → ASR) proven end-to-end against an in-process mock device (restore-host e2e test)"
   },
-  "overall_pct": 54.2,
+  "overall_pct": 60.6,
   "modules": [
-    {"name": "qemu-util (libqemuutil port)", "pct": 100, "files": 19},
-    {"name": "soc-t8030 identity", "pct": 100, "files": 1},
-    {"name": "vm-core bus/device/framebuffer", "pct": 100, "files": 4},
-    {"name": "a13-cpu decoder", "pct": 75, "files": 1},
-    {"name": "a13-cpu interpreter", "pct": 60, "files": 1},
-    {"name": "a13-cpu gxf", "pct": 40, "files": 1},
-    {"name": "a13-cpu accel (HVF/KVM)", "pct": 0, "files": 1},
-    {"name": "adt", "pct": 90, "files": 3},
-    {"name": "macho (fileset)", "pct": 40, "files": 3},
-    {"name": "img4/im4p/der", "pct": 75, "files": 3},
-    {"name": "apple-soc: aic", "pct": 55},
-    {"name": "apple-soc: s3c_uart", "pct": 55},
-    {"name": "apple-soc: wdt", "pct": 60},
-    {"name": "apple-soc: dart", "pct": 55},
-    {"name": "apple-soc: sart", "pct": 50},
-    {"name": "apple-soc: pmgr", "pct": 45},
-    {"name": "apple-soc: spmi_pmu", "pct": 50},
-    {"name": "apple-soc: nvram", "pct": 55},
-    {"name": "apple-soc: smc", "pct": 50},
-    {"name": "apple-soc: gpio_i2c_spi", "pct": 45},
-    {"name": "apple-soc: ans2_nvme", "pct": 40},
-    {"name": "apple-soc: aes", "pct": 35},
-    {"name": "apple-soc: sep_sim", "pct": 45},
-    {"name": "apple-soc: displaypipe (ADP v4)", "pct": 50},
-    {"name": "apple-soc: mipi_dsi", "pct": 15},
-    {"name": "apple-soc: typec_otg", "pct": 35},
-    {"name": "apple-soc: apcie", "pct": 30},
-    {"name": "apple-soc: aop", "pct": 45},
-    {"name": "apple-soc: rtkit", "pct": 45},
-    {"name": "apple-soc: mca", "pct": 20},
-    {"name": "apple-soc: scaler", "pct": 20},
-    {"name": "apple-soc: t8030 machine", "pct": 75},
-    {"name": "ipsw (fetch/manifest/im4p/variants)", "pct": 100},
-    {"name": "restore (stage/bootargs/trustcache/lzfse)", "pct": 60},
-    {"name": "restore: plist_lite (libplist XML codec)", "pct": 90},
-    {"name": "restore: usbmux host client (libusbmuxd class)", "pct": 90},
-    {"name": "restore: restored protocol client (v14)", "pct": 75},
-    {"name": "restore: ASR host (validation + payload push)", "pct": 90},
-    {"name": "restore: TSS / ApImg4Ticket (libauthinstall class)", "pct": 75},
-    {"name": "gui headless BMP", "pct": 60},
-    {"name": "gui window", "pct": 0},
-    {"name": "vault client", "pct": 100},
-    {"name": "virt (CLI + machine boot ladder)", "pct": 70},
-    {"name": "ios-rust single binary", "pct": 100}
+    {
+      "name": "qemu-util (libqemuutil port)",
+      "pct": 100,
+      "files": 19
+    },
+    {
+      "name": "soc-t8030 identity",
+      "pct": 100,
+      "files": 1
+    },
+    {
+      "name": "vm-core bus/device/framebuffer",
+      "pct": 100,
+      "files": 4
+    },
+    {
+      "name": "a13-cpu decoder",
+      "pct": 75,
+      "files": 1
+    },
+    {
+      "name": "a13-cpu interpreter",
+      "pct": 60,
+      "files": 1
+    },
+    {
+      "name": "a13-cpu gxf",
+      "pct": 40,
+      "files": 1
+    },
+    {
+      "name": "a13-cpu accel (HVF/KVM)",
+      "pct": 0,
+      "files": 1
+    },
+    {
+      "name": "adt",
+      "pct": 90,
+      "files": 3
+    },
+    {
+      "name": "macho (fileset)",
+      "pct": 40,
+      "files": 3
+    },
+    {
+      "name": "img4/im4p/der",
+      "pct": 75,
+      "files": 3
+    },
+    {
+      "name": "apple-soc: aic",
+      "pct": 55
+    },
+    {
+      "name": "apple-soc: s3c_uart",
+      "pct": 55
+    },
+    {
+      "name": "apple-soc: wdt",
+      "pct": 60
+    },
+    {
+      "name": "apple-soc: dart",
+      "pct": 55
+    },
+    {
+      "name": "apple-soc: sart",
+      "pct": 50
+    },
+    {
+      "name": "apple-soc: pmgr",
+      "pct": 45
+    },
+    {
+      "name": "apple-soc: spmi_pmu",
+      "pct": 50
+    },
+    {
+      "name": "apple-soc: nvram",
+      "pct": 55
+    },
+    {
+      "name": "apple-soc: smc",
+      "pct": 50
+    },
+    {
+      "name": "apple-soc: gpio_i2c_spi",
+      "pct": 45
+    },
+    {
+      "name": "apple-soc: ans2_nvme",
+      "pct": 40
+    },
+    {
+      "name": "apple-soc: aes",
+      "pct": 35
+    },
+    {
+      "name": "apple-soc: sep_sim",
+      "pct": 45
+    },
+    {
+      "name": "apple-soc: displaypipe (ADP v4)",
+      "pct": 50
+    },
+    {
+      "name": "apple-soc: mipi_dsi",
+      "pct": 15
+    },
+    {
+      "name": "apple-soc: typec_otg",
+      "pct": 35
+    },
+    {
+      "name": "apple-soc: apcie",
+      "pct": 30
+    },
+    {
+      "name": "apple-soc: aop",
+      "pct": 45
+    },
+    {
+      "name": "apple-soc: rtkit",
+      "pct": 45
+    },
+    {
+      "name": "apple-soc: mca",
+      "pct": 20
+    },
+    {
+      "name": "apple-soc: scaler",
+      "pct": 20
+    },
+    {
+      "name": "apple-soc: t8030 machine",
+      "pct": 75
+    },
+    {
+      "name": "ipsw (fetch/manifest/im4p/variants)",
+      "pct": 100
+    },
+    {
+      "name": "restore (stage/bootargs/trustcache/lzfse)",
+      "pct": 60
+    },
+    {
+      "name": "restore: plist_lite (libplist XML codec)",
+      "pct": 90
+    },
+    {
+      "name": "restore: usbmux host client (libusbmuxd class)",
+      "pct": 90
+    },
+    {
+      "name": "restore: restored protocol client (v14)",
+      "pct": 75
+    },
+    {
+      "name": "restore: ASR host (validation + payload push)",
+      "pct": 90
+    },
+    {
+      "name": "restore: TSS / ApImg4Ticket (libauthinstall class)",
+      "pct": 75
+    },
+    {
+      "name": "gui headless BMP",
+      "pct": 60
+    },
+    {
+      "name": "gui window",
+      "pct": 0
+    },
+    {
+      "name": "vault client",
+      "pct": 100
+    },
+    {
+      "name": "virt (CLI + machine boot ladder)",
+      "pct": 70
+    },
+    {
+      "name": "ios-rust single binary",
+      "pct": 100
+    },
+    {
+      "name": "plist (XML plist subset, standalone crate)",
+      "pct": 90
+    },
+    {
+      "name": "usbmux (usbmuxhost standalone crate)",
+      "pct": 90
+    },
+    {
+      "name": "restored (protocol client, standalone crate)",
+      "pct": 75
+    },
+    {
+      "name": "asr (client + SHA-1, standalone crate)",
+      "pct": 75
+    },
+    {
+      "name": "authinstall (TSS/IM4M standalone crate)",
+      "pct": 60
+    },
+    {
+      "name": "apfs (reader+writer standalone crate)",
+      "pct": 60
+    },
+    {
+      "name": "host restore pipeline e2e (usbmux→restored→ASR mock)",
+      "pct": 75
+    }
   ],
   "permanent_gaps": [
-    {"name": "APFS mount", "reason": "Apple restored RestoreOptions wall + AES-XTS per-device keys (see research vault parity-metrics.json)"},
-    {"name": "AES-XTS real keys", "reason": "per-device key wall; sanctioned Dopamine path is research-only"},
-    {"name": "TSS signing server", "reason": "Apple CA is external by design; request/response shape + IM4M validation implemented (tss.rs)"},
-    {"name": "baseband", "reason": "proprietary, permanent for research scope"},
-    {"name": "camera/FaceID/SEP personal keys", "reason": "permanent for research scope"}
+    {
+      "name": "APFS mount",
+      "reason": "Apple restored RestoreOptions wall + AES-XTS per-device keys (see research vault parity-metrics.json)"
+    },
+    {
+      "name": "AES-XTS real keys",
+      "reason": "per-device key wall; sanctioned Dopamine path is research-only"
+    },
+    {
+      "name": "TSS signing server",
+      "reason": "Apple CA is external by design; request/response shape + IM4M validation implemented (tss.rs)"
+    },
+    {
+      "name": "baseband",
+      "reason": "proprietary, permanent for research scope"
+    },
+    {
+      "name": "camera/FaceID/SEP personal keys",
+      "reason": "permanent for research scope"
+    }
   ],
-  "tests": {"total": 107, "passing": 86},
+  "tests": {
+    "total": 132,
+    "passing": 132
+  },
   "sources": [
     "ChefKiss Inferno @cc4302a (hw/ device models, AGPL-3.0/GPL-2.0)",
     "ios-sweet-rust sweet-core (MIT, IM4P/ADT/Macho logic + vendored Apple LZFSE BSD-3)",

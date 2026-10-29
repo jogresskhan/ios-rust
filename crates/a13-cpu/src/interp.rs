@@ -1004,6 +1004,281 @@ impl Interpreter {
                     imm64 as u128
                 };
             }
+            Insn::MoviVec { rd, op, value, width_log2, q } => {
+                self.group_exec[1] += 1;
+                // Modified immediate: value = precomputed 64-bit lane-unit
+                // pattern (decode). MOVI/MVNI write; ORR |=; BIC &= !.
+                match op {
+                    VecImmOp::Movi | VecImmOp::Mvni => {
+                        let imm128 = if q {
+                            (value as u128) | ((value as u128) << 64)
+                        } else {
+                            value as u128 // upper half UNDEF → zero
+                        };
+                        self.v.v[rd as usize] = imm128;
+                    }
+                    VecImmOp::Orr => {
+                        let pat = if q {
+                            (value as u128) | ((value as u128) << 64)
+                        } else {
+                            value as u128
+                        };
+                        self.v.v[rd as usize] |= pat;
+                    }
+                    VecImmOp::Bic => {
+                        let pat = if q {
+                            (value as u128) | ((value as u128) << 64)
+                        } else {
+                            value as u128
+                        };
+                        self.v.v[rd as usize] &= !pat;
+                    }
+                }
+            }
+            Insn::FmovVecImm { rd, q, imm8 } => {
+                self.group_exec[1] += 1;
+                // FMOV (vector, immediate): VFP-ExpandImm, single-precision
+                // form (.2s/.4s). imm8 = a:B:cdef:  exp = NOT(b6)b6b5b4<<4
+                // | 0xF (low 4 bits forced — the VFP imm exponent rule,
+                // verified against the real kernel's fmov d8,#1.0 imm8=0x70);
+                // frac[22:19] = b3..b0.
+                let b = imm8;
+                let exp = (((((!b >> 6) & 1) << 3) | ((b >> 6) & 1) << 2)
+                    | ((b >> 5) & 1) << 1)
+                    | ((b >> 4) & 1);
+                let exp8 = (exp << 4) | 0xF;
+                let frac = (b & 0xF) as u32;
+                let bits = (((b >> 7) as u32) << 31) | ((exp8 as u32) << 23) | (frac << 19);
+                let lane = bits as u64;
+                let imm128 = if q {
+                    (lane | (lane << 32)) as u128
+                        | (((lane | (lane << 32)) as u128) << 64)
+                } else {
+                    (lane | (lane << 32)) as u128
+                };
+                self.v.v[rd as usize] = imm128;
+            }
+            Insn::VShiftImm { rd, rn, op, immh_immb, size, u, q } => {
+                self.group_exec[1] += 1;
+                // Shift amount (keystone sweep rules, session C):
+                //   LEFT forms (shl/sli, sqshl/uqshl/sqshlu, sshll/ushll):
+                //       shift = X − (8<<size)
+                //   RIGHT forms (sshr/ushr, *sra, r*shr, sri, narrowing,
+                //   scvtf/ucvtf): shift = (16<<size) − X.
+                let left_style = matches!(op, VShiftOp::Shl | VShiftOp::Sqshl | VShiftOp::Shll);
+                let shift = if left_style {
+                    (immh_immb as u32) - (8u32 << size)
+                } else {
+                    ((16u32 << size) - immh_immb as u32) as u32
+                };
+                let lane_bits = 8u32 << size;
+                let mask = (1u128 << lane_bits) - 1;
+                let sext = |v: u128| -> i128 {
+                    if v & (1 << (lane_bits - 1)) != 0 {
+                        (v as i128) - (1i128 << lane_bits)
+                    } else {
+                        v as i128
+                    }
+                };
+                let sat_signed = |v: i128| -> u128 {
+                    let lo = -(1i128 << (lane_bits - 1));
+                    let hi = (1i128 << (lane_bits - 1)) - 1;
+                    v.clamp(lo, hi) as u128 & mask
+                };
+                let sat_unsigned = |v: i128| -> u128 {
+                    v.clamp(0, (mask) as i128) as u128
+                };
+                match op {
+                    // ---- full-width shifts ----
+                    VShiftOp::Shr | VShiftOp::Shra | VShiftOp::Rshr | VShiftOp::Rsra
+                    | VShiftOp::Shl | VShiftOp::Sri | VShiftOp::Sqshl | VShiftOp::Sqshlu => {
+                        let eb = 1u64 << size;
+                        let total = if q { 16u64 } else { 8 };
+                        let lanes = (total / eb) as u8;
+                        let a = self.v.v[rn as usize];
+                        let d = self.v.v[rd as usize];
+                        let mut r: u128 = 0;
+                        for l in 0..lanes {
+                            let sh = (l as u32) * lane_bits;
+                            let av = (a >> sh) & mask;
+                            let dv = (d >> sh) & mask;
+                            let out = match op {
+                                VShiftOp::Shr => {
+                                    if u {
+                                        (av >> shift) & mask
+                                    } else {
+                                        (sext(av) >> shift) as u128 & mask
+                                    }
+                                }
+                                VShiftOp::Shra => {
+                                    let sv = if u {
+                                        (av >> shift) & mask
+                                    } else {
+                                        (sext(av) >> shift) as u128 & mask
+                                    };
+                                    (dv.wrapping_add(sv) as u128) & mask
+                                }
+                                VShiftOp::Rshr => {
+                                    let round = 1u128 << (shift - 1);
+                                    if u {
+                                        ((av + round) >> shift) & mask
+                                    } else {
+                                        ((sext(av) + round as i128) >> shift) as u128 & mask
+                                    }
+                                }
+                                VShiftOp::Rsra => {
+                                    let round = 1u128 << (shift - 1);
+                                    let sv = if u {
+                                        ((av + round) >> shift) & mask
+                                    } else {
+                                        ((sext(av) + round as i128) >> shift) as u128 & mask
+                                    };
+                                    (dv.wrapping_add(sv) as u128) & mask
+                                }
+                                VShiftOp::Shl => {
+                                    if u {
+                                        // SLI: insert — low `shift` bits of Vd kept
+                                        ((av << shift) & mask)
+                                            | (dv & ((1u128 << shift) - 1))
+                                    } else {
+                                        (av << shift) & mask
+                                    }
+                                }
+                                VShiftOp::Sri => {
+                                    // SRI: shift right, keep low `shift` bits of Vd
+                                    ((av >> shift) & mask)
+                                        | (dv & if shift >= lane_bits {
+                                            mask
+                                        } else {
+                                            (1u128 << shift) - 1
+                                        })
+                                }
+                                VShiftOp::Sqshl => {
+                                    if u {
+                                        sat_unsigned((av << shift) as i128)
+                                    } else {
+                                        sat_signed(sext(av) << shift)
+                                    }
+                                }
+                                VShiftOp::Sqshlu => {
+                                    // signed input, UNSIGNED saturating result
+                                    sat_unsigned(sext(av) << shift)
+                                }
+                                _ => unreachable!(),
+                            };
+                            r |= (out & mask) << sh;
+                        }
+                        self.v.v[rd as usize] = if q { r } else { r & 0xFFFF_FFFF_FFFF_FFFF };
+                    }
+                    // ---- narrowing: src elem = 2× dest; src lanes = 8>>size
+                    //      (FULL 128-bit source); Q picks the dest half. ----
+                    VShiftOp::Shrn | VShiftOp::Rshrn | VShiftOp::Sqshrn | VShiftOp::Sqrshrn => {
+                        // `size` came from X = the DEST width: dest element
+                        // bits = 8<<size; src element bits = 16<<size.
+                        let src_bits = lane_bits * 2;
+                        let src_mask = (1u128 << src_bits) - 1;
+                        let lanes = (16u32 / src_bits) as u8; // 8>>size
+                        let a = self.v.v[rn as usize];
+                        let mut out: u64 = 0;
+                        let sext_s = |v: u128| -> i128 {
+                            if v & (1 << (src_bits - 1)) != 0 {
+                                (v as i128) - (1i128 << src_bits)
+                            } else {
+                                v as i128
+                            }
+                        };
+                        let rounding = matches!(op, VShiftOp::Rshrn | VShiftOp::Sqrshrn);
+                        let round = if rounding { 1i128 << (shift - 1) } else { 0 };
+                        for l in 0..lanes {
+                            let sh = (l as u32) * src_bits;
+                            let av = (a >> sh) & src_mask;
+                            let dest_val: u64 = match (op, u) {
+                                (VShiftOp::Shrn, _) => ((av >> shift) & mask) as u64,
+                                (VShiftOp::Rshrn, _) => ((av >> shift) & mask) as u64,
+                                (VShiftOp::Sqshrn, false) => {
+                                    sat_signed((sext_s(av) >> shift)) as u64
+                                }
+                                (VShiftOp::Sqshrn, true) => {
+                                    // UQSHRN: unsigned source, unsigned sat
+                                    ((av >> shift) & mask).min(mask) as u64
+                                }
+                                (VShiftOp::Sqrshrn, false) => {
+                                    sat_signed(sext_s(av) + round >> shift) as u64
+                                }
+                                (VShiftOp::Sqrshrn, true) => {
+                                    // UQRSHRN: unsigned source + round, unsigned sat
+                                    (((av as i128) + round) >> shift).clamp(0, mask as i128)
+                                        as u64
+                                }
+                                _ => 0,
+                            };
+                            out |= (dest_val & mask as u64) << ((l as u32) * lane_bits);
+                        }
+                        // Q=0: write low half, zero upper; Q=1: write UPPER
+                        // half (the "2" variant), preserve low.
+                        self.v.v[rd as usize] = if q {
+                            (self.v.v[rd as usize] & 0xFFFF_FFFF_FFFF_FFFF)
+                                | ((out as u128) << 64)
+                        } else {
+                            out as u128
+                        };
+                    }
+                    // ---- widening: src elem = half dest; Q picks the SRC
+                    //      half; dest = FULL 128-bit register. ----
+                    VShiftOp::Shll => {
+                        let src_bits = lane_bits; // src element = 8<<size bits
+                        let src_mask = (1u128 << src_bits) - 1;
+                        let lanes = (64u32 / src_bits) as u8; // 8>>size
+                        let a = self.v.v[rn as usize];
+                        let src = if q { a >> 64 } else { a & 0xFFFF_FFFF_FFFF_FFFF };
+                        let mut r: u128 = 0;
+                        for l in 0..lanes {
+                            let sh = (l as u32) * src_bits;
+                            let av = (src >> sh) & src_mask;
+                            let widened: i128 = if u {
+                                av as i128
+                            } else {
+                                // sign-extend then widen
+                                if av & (1 << (src_bits - 1)) != 0 {
+                                    (av as i128) | -(1i128 << src_bits)
+                                } else {
+                                    av as i128
+                                }
+                            };
+                            let out = ((widened << shift) as u128)
+                                & ((1u128 << (src_bits * 2)) - 1);
+                            r |= out << ((l as u32) * src_bits * 2);
+                        }
+                        self.v.v[rd as usize] = r;
+                    }
+                    // ---- fixed-point int → FP ----
+                    VShiftOp::Cvtf => {
+                        let eb = 1u64 << size;
+                        let total = if q { 16u64 } else { 8 };
+                        let lanes = (total / eb) as u8;
+                        let a = self.v.v[rn as usize];
+                        let mut r: u128 = 0;
+                        for l in 0..lanes {
+                            let sh = (l as u32) * lane_bits;
+                            let av = (a >> sh) & mask;
+                            let int_val = if u { av as i128 } else { sext(av) };
+                            let f = int_val as f64 / (1u64 << shift) as f64;
+                            let bits: u64 = match size {
+                                3 => f.to_bits(),
+                                2 => (f as f32).to_bits() as u64,
+                                _ => (simd::f64_to_h(f) as u64),
+                            };
+                            let wbits: u32 = match size {
+                                3 => 64,
+                                2 => 32,
+                                _ => 16,
+                            };
+                            r |= ((bits as u128) & ((1u128 << wbits) - 1)) << sh;
+                        }
+                        self.v.v[rd as usize] = if q { r } else { r & 0xFFFF_FFFF_FFFF_FFFF };
+                    }
+                }
+            }
             Insn::LdStSimd9 { vt, rn, imm9, width_log2, load, mode } => {
                 let base = self.rsp(rn);
                 let addr = match mode {

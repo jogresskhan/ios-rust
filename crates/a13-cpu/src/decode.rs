@@ -184,6 +184,27 @@ pub enum Insn {
     /// measured 12/12 against capstone incl. `movi v0.2d, #0xffffffffffffffff`
     /// (0x6F07E7E0, real 18C66 boot @ 0x…7b8cbf4).
     MoviVec64 { rd: u8, q: bool, imm8: u8 },
+    /// Shift-by-immediate (0x0F group, bit10=1, immh:immb valid as a shift).
+    /// Field map pinned by keystone sweeps (session C): X = immh:immb =
+    /// bits[22:16] must lie in [8<<size, 16<<size) and SHIFT = (16<<size)−X;
+    /// element size derives from X's MSB (bits 23:22 are 0 in shift forms);
+    /// opcode = bits[15:11], U(29) splits signed/unsigned arms.
+    VShiftImm {
+        rd: u8,
+        rn: u8,
+        op: VShiftOp,
+        immh_immb: u8,
+        size: u8,
+        u: bool,
+        q: bool,
+    },
+    /// Modified-immediate (0x0F group, bit10=1, X < 8): MOVI/MVNI/ORR-imm/
+    /// BIC-imm, cmode = bits[15:12]. `value` = precomputed 64-bit lane-unit
+    /// pattern; `width_log2` = the encoded element width (0=8b,1=16b,2=32b,
+    /// 3=64b bit-expansion). Exec replicates the unit across the register.
+    MoviVec { rd: u8, op: VecImmOp, value: u64, width_log2: u8, q: bool },
+    /// FMOV (vector, immediate) — cmode 1111, U=0: VFP-ExpandImm of imm8.
+    FmovVecImm { rd: u8, q: bool, imm8: u8 },
     /// CMN (register/immediate) — `adds wzr/xzr, xn, …` (add-flags test).
     CmnImm { rn: u8, imm12: u32, shift: bool, is64: bool },
     CmnReg { rn: u8, rm: u8, kind: ShiftKind, imm6: u32, is64: bool },
@@ -717,6 +738,34 @@ pub enum VReduceOp {
     Smaxv,
     Umaxv,
     Addv,
+}
+
+/// Shift-by-immediate op (0x0F group, opcode bits[15:11] + U arm).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VShiftOp {
+    Shr,     // 00000: SSHR (U=0) / USHR (U=1)
+    Shra,    // 00001: SSRA / USRA (accumulate)
+    Rshr,    // 00010: SRSHR / URSHR (rounding)
+    Rsra,    // 00011: SRSRA / URSRA
+    Sri,     // 01000: SRI (U=1 only — insert from below)
+    Shl,     // 01010: SHL (U=0) / SLI (U=1, insert)
+    Sqshlu,  // 01100: SQSHLU (U=1 only)
+    Sqshl,   // 01110: SQSHL (U=0) / UQSHL (U=1)
+    Shrn,    // 10000: SHRN (U=0) / SQSHRUN (U=1) — narrowing
+    Rshrn,   // 10001: RSHRN (U=0) / SQRSHRUN (U=1)
+    Sqshrn,  // 10010: SQSHRN (U=0) / UQSHRN (U=1)
+    Sqrshrn, // 10011: SQRSHRN (U=0) / UQRSHRN (U=1)
+    Shll,    // 10100: SSHLL (U=0) / USHLL (U=1) — widening
+    Cvtf,    // 11100: SCVTF (U=0) / UCVTF (U=1) — fixed-point int→fp
+}
+
+/// Modified-immediate op (0x0F group, cmode interpretation).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VecImmOp {
+    Movi,
+    Mvni,
+    Orr,
+    Bic,
 }
 
 pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
@@ -1728,11 +1777,143 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
     //     vector for any U/Q/Rd (keystone: movi v0.2d,#0 = 0x6F00E400,
     //     movi v3.16b,#0 = 0x4F00E403, movi d0,#0 = 0x2F00E400).
     //     Boot path: `movi v0.2d, #0; stur q0, …` at 0x…7b80824 (real
-    //     18C66 `start` struct-zeroing idiom). Nonzero-movi/ucvtf/fmov
-    //     siblings (bits 23:19 or 15:11 differ) stay undecoded here. ---
-    if (w & 0x9FF8_FC00) == 0x0F00_E400 {
+    //     18C66 `start` struct-zeroing idiom). U=0 cmode-1110 words are the
+    //     8-BIT byte-replication form (capstone: 0x4F02E740 = movi v0.16b,
+    //     #0x5a) and route to the general MoviVec below — this mask now
+    //     requires U=1 so only the 64-bit bit-expansion arm stays here.
+    //     Nonzero-movi/ucvtf/fmov siblings flow to the 0x0F dispatcher. ---
+    if (w & 0xBFF8_FC00) == 0x2F00_E400 {
         let imm8 = (((w >> 5) & 0x1F) | ((w >> 16) & 7) << 5) as u8;
         return Some(Insn::MoviVec64 { rd: reg(w, 0), q: (w >> 30) & 1 == 1, imm8 });
+    }
+
+    // --- AdvSIMD shift-by-immediate / modified-immediate (0x0F group,
+    //     bit10=1). Field map pinned empirically (session C: keystone
+    //     round-trip sweeps + capstone disasm, every row below verified):
+    //     * X = immh:immb = bits[22:16]; shift forms need X in
+    //       [8<<size, 16<<size) with SHIFT = (16<<size) − X and the element
+    //       size derived from X's MSB (bits 23:22 are fixed 0);
+    //     * X < 8 → modified-immediate: cmode = bits[15:12],
+    //       imm8 = (X&7)<<5 | bits[9:5]. Verified (cmode, U) → op:
+    //       U=0: 0/2/4/6 MOVI-32 sh (c>>1)*8 · 1/3/5/7 ORR-32 sh ((c−1)>>1)*8
+    //            · 8/A MOVI-16 · 9/B ORR-16 · E MOVI-8 byte-replication
+    //            · F FMOV (vector FP immediate)
+    //       U=1: 0/2/4/6 MVNI-32 · 1/3/5/7 BIC-32 · 8/A MVNI-16
+    //            · E MOVI-64 bit-expansion (handled by MoviVec64 above). ---
+    if (w & 0x9F00_0000) == 0x0F00_0000 && (w >> 10) & 1 == 1 && (w >> 23) & 1 == 0 {
+        let u = (w >> 29) & 1 == 1;
+        let q = (w >> 30) & 1 == 1;
+        let x = ((w >> 16) & 0x7F) as u8; // immh:immb, 7 bits here (bit23=0)
+        let op11 = ((w >> 11) & 0x1F) as u8;
+        let size = match x {
+            8..=15 => 0u8,
+            16..=31 => 1,
+            32..=63 => 2,
+            64..=127 => 3,
+            _ => {
+                // --- modified-immediate / FP-imm fallthrough (X < 8) ---
+                let cmode = ((w >> 12) & 0xF) as u8;
+                let imm8 = (((w >> 5) & 0x1F) | (((w >> 16) & 7) << 5)) as u8;
+                if cmode == 0xF && !u {
+                    return Some(Insn::FmovVecImm { rd: reg(w, 0), q, imm8 });
+                }
+                // (op, width_log2, shift) — only capstone-verified arms.
+                let spec = match (cmode, u) {
+                    (0b0000, false) => Some((VecImmOp::Movi, 2u8, (cmode >> 1) * 8)),
+                    (0b0010, false) => Some((VecImmOp::Movi, 2, (cmode >> 1) * 8)),
+                    (0b0100, false) => Some((VecImmOp::Movi, 2, (cmode >> 1) * 8)),
+                    (0b0110, false) => Some((VecImmOp::Movi, 2, (cmode >> 1) * 8)),
+                    (0b0001, false) => Some((VecImmOp::Orr, 2, ((cmode - 1) >> 1) * 8)),
+                    (0b0011, false) => Some((VecImmOp::Orr, 2, ((cmode - 1) >> 1) * 8)),
+                    (0b0101, false) => Some((VecImmOp::Orr, 2, ((cmode - 1) >> 1) * 8)),
+                    (0b0111, false) => Some((VecImmOp::Orr, 2, ((cmode - 1) >> 1) * 8)),
+                    (0b1000, false) => Some((VecImmOp::Movi, 1, 0)),
+                    (0b1010, false) => Some((VecImmOp::Movi, 1, 8)),
+                    (0b1001, false) => Some((VecImmOp::Orr, 1, 0)),
+                    (0b1011, false) => Some((VecImmOp::Orr, 1, 8)),
+                    (0b1110, false) => Some((VecImmOp::Movi, 0, 0)),
+                    (0b0000, true) => Some((VecImmOp::Mvni, 2, (cmode >> 1) * 8)),
+                    (0b0010, true) => Some((VecImmOp::Mvni, 2, (cmode >> 1) * 8)),
+                    (0b0100, true) => Some((VecImmOp::Mvni, 2, (cmode >> 1) * 8)),
+                    (0b0110, true) => Some((VecImmOp::Mvni, 2, (cmode >> 1) * 8)),
+                    (0b0001, true) => Some((VecImmOp::Bic, 2, ((cmode - 1) >> 1) * 8)),
+                    (0b0011, true) => Some((VecImmOp::Bic, 2, ((cmode - 1) >> 1) * 8)),
+                    (0b0101, true) => Some((VecImmOp::Bic, 2, ((cmode - 1) >> 1) * 8)),
+                    (0b0111, true) => Some((VecImmOp::Bic, 2, ((cmode - 1) >> 1) * 8)),
+                    (0b1000, true) => Some((VecImmOp::Mvni, 1, 0)),
+                    (0b1010, true) => Some((VecImmOp::Mvni, 1, 8)),
+                    _ => None,
+                };
+                let (op, width_log2, shift) = match spec {
+                    Some(s) => s,
+                    None => return None,
+                };
+                // 64-bit lane-unit pattern per family (capstone-verified
+                // semantics: MOVI zero-extends; MVNI inverts within width).
+                let value: u64 = match (op, width_log2) {
+                    (VecImmOp::Movi, 0) => {
+                        // byte replication across the 64-bit unit
+                        let b = imm8 as u64;
+                        b | (b << 8) | (b << 16) | (b << 24) | (b << 32) | (b << 40)
+                            | (b << 48) | (b << 56)
+                    }
+                    (VecImmOp::Movi, 1) => {
+                        let h = ((imm8 as u64) << shift) & 0xFFFF;
+                        h | (h << 16) | (h << 32) | (h << 48)
+                    }
+                    (VecImmOp::Movi, 2) => {
+                        let s32 = ((imm8 as u64) << shift) & 0xFFFF_FFFF;
+                        s32 | (s32 << 32)
+                    }
+                    (VecImmOp::Mvni, 1) => {
+                        let h = (!((imm8 as u64) << shift)) & 0xFFFF;
+                        h | (h << 16) | (h << 32) | (h << 48)
+                    }
+                    (VecImmOp::Mvni, 2) => {
+                        let s32 = (!((imm8 as u64) << shift)) & 0xFFFF_FFFF;
+                        s32 | (s32 << 32)
+                    }
+                    (VecImmOp::Orr, 1) => {
+                        let h = ((imm8 as u64) << shift) & 0xFFFF;
+                        h | (h << 16) | (h << 32) | (h << 48)
+                    }
+                    (VecImmOp::Orr, 2) | (VecImmOp::Bic, 2) => {
+                        let s32 = ((imm8 as u64) << shift) & 0xFFFF_FFFF;
+                        s32 | (s32 << 32)
+                    }
+                    _ => 0,
+                };
+                return Some(Insn::MoviVec { rd: reg(w, 0), op, value, width_log2, q });
+            }
+        };
+        let op = match (op11, u) {
+            (0b00000, _) => VShiftOp::Shr,     // sshr / ushr
+            (0b00010, _) => VShiftOp::Shra,    // ssra / usra (accumulate)
+            (0b00100, _) => VShiftOp::Rshr,    // srshr / urshr (rounding)
+            (0b00110, _) => VShiftOp::Rsra,    // srsra / ursra
+            (0b01000, true) => VShiftOp::Sri,  // sri
+            (0b01010, _) => VShiftOp::Shl,     // shl (U=0) / sli (U=1)
+            (0b01100, true) => VShiftOp::Sqshlu,
+            (0b01110, _) => VShiftOp::Sqshl,   // sqshl / uqshl
+            (0b10000, _) => VShiftOp::Shrn,    // shrn / sqshrun
+            (0b10001, _) => VShiftOp::Rshrn,   // rshrn / sqrshrun
+            (0b10010, _) => VShiftOp::Sqshrn,  // sqshrn / uqshrn
+            (0b10011, _) => VShiftOp::Sqrshrn, // sqrshrn / uqrshrn
+            (0b10100, _) => VShiftOp::Shll,    // sshll / ushll
+            // SCVTF/UCVTF (fixed-point): the 8-bit-int (.4h) form is
+            // reserved (capstone: 0x2F08E420 = UNDEF) — require size ≥ 1.
+            (0b11100, _) if size >= 1 => VShiftOp::Cvtf, // scvtf / ucvtf
+            _ => return None,
+        };
+        return Some(Insn::VShiftImm {
+            rd: reg(w, 0),
+            rn: reg(w, 5),
+            op,
+            immh_immb: x,
+            size,
+            u,
+            q,
+        });
     }
 
     // --- Scalar FP ↔ GPR move (FMOD-group opcode bits[20:16]: 00110 int←fp,
@@ -2745,16 +2926,42 @@ mod tests {
     fn gap_movi_vec64_family() {
         // keystone: movi v0.2d, #0 (the REAL boot word at 0x…7b80824)
         assert_eq!(decode(0, 0x6F00_E400), Some(Insn::MoviVec64 { rd: 0, q: true, imm8: 0 }));
-        // keystone: movi v3.16b, #0 — U=0, different Rd
-        assert_eq!(decode(0, 0x4F00_E403), Some(Insn::MoviVec64 { rd: 3, q: true, imm8: 0 }));
-        // keystone: movi d0, #0 — Q=0
-        assert_eq!(decode(0, 0x2F00_E400), Some(Insn::MoviVec64 { rd: 0, q: false, imm8: 0 }));
         // keystone: movi v0.2d, #0xff → imm8 bit0
         assert_eq!(decode(0, 0x6F00_E420), Some(Insn::MoviVec64 { rd: 0, q: true, imm8: 0x01 }));
         // capstone: movi v0.2d, #0xffffffffffffffff (REAL boot word 0x6F07E7E0)
         assert_eq!(decode(0, 0x6F07_E7E0), Some(Insn::MoviVec64 { rd: 0, q: true, imm8: 0xFF }));
         // Rd sweep within the guard
         assert_eq!(decode(0, 0x6F00_E41F), Some(Insn::MoviVec64 { rd: 31, q: true, imm8: 0 }));
+
+        // U=0 cmode-1110 words are the 8-BIT byte-replication form
+        // (capstone: 0x4F02E740 = movi v0.16b, #0x5a) — they route to the
+        // general MoviVec, NOT MoviVec64.
+        assert_eq!(
+            decode(0, 0x4F00_E403),
+            Some(Insn::MoviVec {
+                rd: 3,
+                op: VecImmOp::Movi,
+                value: 0,
+                width_log2: 0,
+                q: true
+            })
+        );
+        // 0x2F00E400 is U=1 Q=0 (movi d0, #0 — the D-register form): stays
+        // in the MoviVec64 bit-expansion guard. U=0 cmode-1110 words are
+        // the 8-BIT byte-replication form (capstone: 0x4F02E740 = movi
+        // v0.16b, #0x5a) — they route to the general MoviVec, NOT MoviVec64.
+        assert_eq!(decode(0, 0x2F00_E400), Some(Insn::MoviVec64 { rd: 0, q: false, imm8: 0 }));
+        // capstone: movi v0.16b, #0x5a — imm8 = (X&7)<<5 | defgh
+        assert_eq!(
+            decode(0, 0x4F02_E740),
+            Some(Insn::MoviVec {
+                rd: 0,
+                op: VecImmOp::Movi,
+                value: 0x5A5A_5A5A_5A5A_5A5A,
+                width_log2: 0,
+                q: true
+            })
+        );
 
         // NEGATIVE: siblings must NOT enter the movi-zero guard
         // (capstone: ucvtf v0.2d, v0.2d, #0x40 — immh != 0)
@@ -2763,8 +2970,268 @@ mod tests {
         assert_ne!(decode(0, 0x6F00_F400), Some(Insn::MoviVec64 { rd: 0, q: true, imm8: 0 }));
         // (capstone: undecodable — bit11 set)
         assert_eq!(decode(0, 0x6F00_EC00), None);
-        // (capstone: undecodable — immh bit set)
+        // (capstone: UNDEF — cvtf .4h (8-bit int) form is reserved)
         assert_eq!(decode(0, 0x6F08_E400), None);
+        // (capstone: ucvtf v0.2d, v0.2d, #0x40 — valid fixed-point cvtf)
+        assert!(matches!(
+            decode(0, 0x6F40_E400),
+            Some(Insn::VShiftImm { op: VShiftOp::Cvtf, size: 3, .. })
+        ));
+    }
+
+    #[test]
+    fn gap_shift_imm_family() {
+        // ---- keystone round-trips (session C sweeps) + real 18C66 words.
+        // Fields: (rd, rn, op, immh_immb, size, u, q) — X = immh:immb,
+        // size derives from X's MSB, NOT bits 23:22.
+        use Insn::VShiftImm;
+        use VShiftOp::*;
+        // ushr v0.8b, v1.8b, #8  (keystone 0x2F080420)
+        assert_eq!(
+            decode(0, 0x2F08_0420),
+            Some(VShiftImm { rd: 0, rn: 1, op: Shr, immh_immb: 8, size: 0, u: true, q: false })
+        );
+        // ushr v0.8b, v1.8b, #1  (keystone 0x2F0F0420)
+        assert_eq!(
+            decode(0, 0x2F0F_0420),
+            Some(VShiftImm { rd: 0, rn: 1, op: Shr, immh_immb: 15, size: 0, u: true, q: false })
+        );
+        // ushr v0.4h, v1.4h, #16 (keystone 0x2F100420)
+        assert_eq!(
+            decode(0, 0x2F10_0420),
+            Some(VShiftImm { rd: 0, rn: 1, op: Shr, immh_immb: 16, size: 1, u: true, q: false })
+        );
+        // ushr v0.2s, v1.2s, #32 (keystone 0x2F200420)
+        assert_eq!(
+            decode(0, 0x2F20_0420),
+            Some(VShiftImm { rd: 0, rn: 1, op: Shr, immh_immb: 32, size: 2, u: true, q: false })
+        );
+        // ushr v0.2d, v1.2d, #64 (keystone 0x6F400420)
+        assert_eq!(
+            decode(0, 0x6F40_0420),
+            Some(VShiftImm { rd: 0, rn: 1, op: Shr, immh_immb: 64, size: 3, u: true, q: true })
+        );
+        // sshr v2.4s, v1.4s, #2  (keystone 0x4F3E0422)
+        assert_eq!(
+            decode(0, 0x4F3E_0422),
+            Some(VShiftImm { rd: 2, rn: 1, op: Shr, immh_immb: 62, size: 2, u: false, q: true })
+        );
+        // REAL 18C66: shl v3.2d, v0.2d, #4 (0x4F445403 — boot-path word)
+        assert_eq!(
+            decode(0, 0x4F44_5403),
+            Some(VShiftImm { rd: 3, rn: 0, op: Shl, immh_immb: 68, size: 3, u: false, q: true })
+        );
+        // REAL 18C66: ushr v0.4s, v0.4s, #6 (0x6F3A0400)
+        assert_eq!(
+            decode(0, 0x6F3A_0400),
+            Some(VShiftImm { rd: 0, rn: 0, op: Shr, immh_immb: 58, size: 2, u: true, q: true })
+        );
+        // sshll v2.8h, v1.8b, #3 (keystone 0x0F0BA422 — widening)
+        assert_eq!(
+            decode(0, 0x0F0B_A422),
+            Some(VShiftImm { rd: 2, rn: 1, op: Shll, immh_immb: 11, size: 0, u: false, q: false })
+        );
+        // REAL 18C66: ushll v2.2d, v0.2s, #0 (0x2F20A402 — capstone print)
+        assert_eq!(
+            decode(0, 0x2F20_A402),
+            Some(VShiftImm { rd: 2, rn: 0, op: Shll, immh_immb: 32, size: 2, u: true, q: false })
+        );
+        // sqshlu v2.8b, v1.8b, #5 (keystone 0x2F0D6422)
+        assert_eq!(
+            decode(0, 0x2F0D_6422),
+            Some(VShiftImm { rd: 2, rn: 1, op: Sqshlu, immh_immb: 13, size: 0, u: true, q: false })
+        );
+        // sri v2.4s, v1.4s, #9 (keystone 0x6F374422)
+        assert_eq!(
+            decode(0, 0x6F37_4422),
+            Some(VShiftImm { rd: 2, rn: 1, op: Sri, immh_immb: 55, size: 2, u: true, q: true })
+        );
+        // scvtf v2.4s, v1.4s, #3 (keystone 0x4F3DE422)
+        assert_eq!(
+            decode(0, 0x4F3D_E422),
+            Some(VShiftImm { rd: 2, rn: 1, op: Cvtf, immh_immb: 61, size: 2, u: false, q: true })
+        );
+        // usra v2.4s, v1.4s, #7 (keystone 0x6F391422 — accumulate)
+        assert_eq!(
+            decode(0, 0x6F39_1422),
+            Some(VShiftImm { rd: 2, rn: 1, op: Shra, immh_immb: 57, size: 2, u: true, q: true })
+        );
+        // urshr v0.2d, v1.2d, #33 (keystone 0x6F5F2420 — rounding)
+        assert_eq!(
+            decode(0, 0x6F5F_2420),
+            Some(VShiftImm { rd: 0, rn: 1, op: Rshr, immh_immb: 95, size: 3, u: true, q: true })
+        );
+        // shrn v0.8b, v1.8h, #3 (keystone 0x0F0D8420 — narrowing)
+        assert_eq!(
+            decode(0, 0x0F0D_8420),
+            Some(VShiftImm { rd: 0, rn: 1, op: Shrn, immh_immb: 13, size: 0, u: false, q: false })
+        );
+        // sqshrn v0.8b, v1.8h, #3 (keystone 0x0F0D9420)
+        assert_eq!(
+            decode(0, 0x0F0D_9420),
+            Some(VShiftImm { rd: 0, rn: 1, op: Sqshrn, immh_immb: 13, size: 0, u: false, q: false })
+        );
+        // sqshrun v0.8b, v1.8h, #3 (keystone 0x2F0D8420)
+        assert_eq!(
+            decode(0, 0x2F0D_8420),
+            Some(VShiftImm { rd: 0, rn: 1, op: Shrn, immh_immb: 13, size: 0, u: true, q: false })
+        );
+
+        // ---- modified immediates (capstone-verified cmode table) ----
+        use Insn::MoviVec;
+        // orr v1.4s, #0x12 (capstone 0x4F001641 — cmode 0001, U=0)
+        assert_eq!(
+            decode(0, 0x4F00_1641),
+            Some(MoviVec {
+                rd: 1,
+                op: VecImmOp::Orr,
+                value: 0x0000_0012_0000_0012,
+                width_log2: 2,
+                q: true
+            })
+        );
+        // bic v1.2s, #0x12 (capstone 0x2F001641 — cmode 0001, U=1)
+        assert_eq!(
+            decode(0, 0x2F00_1641),
+            Some(MoviVec {
+                rd: 1,
+                op: VecImmOp::Bic,
+                value: 0x0000_0012_0000_0012,
+                width_log2: 2,
+                q: false
+            })
+        );
+        // movi v1.8h, #0x12 (capstone 0x4F008641 — cmode 1000)
+        assert_eq!(
+            decode(0, 0x4F00_8641),
+            Some(MoviVec {
+                rd: 1,
+                op: VecImmOp::Movi,
+                value: 0x0012_0012_0012_0012,
+                width_log2: 1,
+                q: true
+            })
+        );
+        // movi v1.8h, #0x12, lsl #8 (capstone 0x4F00A641 — cmode 1010)
+        assert_eq!(
+            decode(0, 0x4F00_A641),
+            Some(MoviVec {
+                rd: 1,
+                op: VecImmOp::Movi,
+                value: 0x1200_1200_1200_1200,
+                width_log2: 1,
+                q: true
+            })
+        );
+        // orr v1.8h, #0x12 (capstone 0x4F009641 — cmode 1001)
+        assert_eq!(
+            decode(0, 0x4F00_9641),
+            Some(MoviVec {
+                rd: 1,
+                op: VecImmOp::Orr,
+                value: 0x0012_0012_0012_0012,
+                width_log2: 1,
+                q: true
+            })
+        );
+        // movi v1.4s, #0x92 (capstone 0x4F040641 — cmode 0000, imm8 high
+        // bits ride in X: abc = X&7 = 4, defgh = 18 → 0x92)
+        assert_eq!(
+            decode(0, 0x4F04_0641),
+            Some(MoviVec {
+                rd: 1,
+                op: VecImmOp::Movi,
+                value: 0x0000_0092_0000_0092,
+                width_log2: 2,
+                q: true
+            })
+        );
+        // mvni v1.2s, #0x92 (capstone 0x2F040641 — cmode 0000, U=1)
+        assert_eq!(
+            decode(0, 0x2F04_0641),
+            Some(MoviVec {
+                rd: 1,
+                op: VecImmOp::Mvni,
+                value: 0xFFFF_FF6D_FFFF_FF6D,
+                width_log2: 2,
+                q: false
+            })
+        );
+        // movi v1.4s, #0xd2 (capstone 0x4F060641 — cmode 0000, X=6)
+        assert_eq!(
+            decode(0, 0x4F06_0641),
+            Some(MoviVec {
+                rd: 1,
+                op: VecImmOp::Movi,
+                value: 0x0000_00D2_0000_00D2,
+                width_log2: 2,
+                q: true
+            })
+        );
+        // movi v0.4s, #0x12, lsl #16 (keystone 0x4F004640 — cmode 0100)
+        assert_eq!(
+            decode(0, 0x4F00_4640),
+            Some(MoviVec {
+                rd: 0,
+                op: VecImmOp::Movi,
+                value: 0x0012_0000_0012_0000,
+                width_log2: 2,
+                q: true
+            })
+        );
+        // bic v0.4s, #0x12, lsl #16 (keystone 0x6F005640 — cmode 0101, U=1)
+        assert_eq!(
+            decode(0, 0x6F00_5640),
+            Some(MoviVec {
+                rd: 0,
+                op: VecImmOp::Bic,
+                value: 0x0012_0000_0012_0000,
+                width_log2: 2,
+                q: true
+            })
+        );
+        // REAL 18C66: bic v0.2s, #0x20 (0x2F011400 — cmode 0001, U=1)
+        assert_eq!(
+            decode(0, 0x2F01_1400),
+            Some(MoviVec {
+                rd: 0,
+                op: VecImmOp::Bic,
+                value: 0x0000_0020_0000_0020,
+                width_log2: 2,
+                q: false
+            })
+        );
+        // REAL 18C66: bic v0.4s, #3 (0x6F001460 — cmode 0001, U=1, Q=1)
+        assert_eq!(
+            decode(0, 0x6F00_1460),
+            Some(MoviVec {
+                rd: 0,
+                op: VecImmOp::Bic,
+                value: 0x0000_0003_0000_0003,
+                width_log2: 2,
+                q: true
+            })
+        );
+        // movi v0.16b, #0x41 (capstone 0x4F02E420 — cmode 1110, U=0)
+        assert_eq!(
+            decode(0, 0x4F02_E420),
+            Some(MoviVec {
+                rd: 0,
+                op: VecImmOp::Movi,
+                value: 0x4141_4141_4141_4141,
+                width_log2: 0,
+                q: true
+            })
+        );
+        // fmov vector immediate (cmode 1111, U=0)
+        assert_eq!(
+            decode(0, 0x0F00_F400),
+            Some(Insn::FmovVecImm { rd: 0, q: false, imm8: 0 })
+        );
+
+        // NEGATIVES: unverified cmode arms stay unknown (honest gaps)
+        assert_eq!(decode(0, 0x2F01_9400), None); // cmode 0b0110? U=1 9/B unverified
+        assert_eq!(decode(0, 0x6F0C_E401), None); // reserved cvtf .4h shape
     }
 
     #[test]

@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
 """Stream specific members out of the big restore IPSW over HTTP ranges.
-Only the requested members land on disk (each <100 MB)."""
-import struct, sys, urllib.request, zlib
+Only the requested members land on disk (each <100 MB).
 
-IPSW = ("https://updates.cdn-apple.com/2020SummerSeed/fullrestores/001-35886/"
-        "5FE9BE2E-17F8-41C8-96BB-B76E2B225888/"
-        "iPhone11,8,iPhone12,1_14.0_18A5351d_Restore.ipsw")
+Usage (matches tools/re/README.md):
+    ipsw_range.py <ipsw-url> <dest-dir> <pattern> [<pattern> ...]
+Patterns are regexes matched with re.search against member names
+("$" anchoring works, e.g. "kernelcache.release.iphone12b$").
+Default dest-dir is /tmp when the second arg is not a directory.
+"""
+import os, re, struct, sys, urllib.request, zlib
+
+IPSW = ("https://updates.cdn-apple.com/2020WinterFCS/fullrestores/001-87267/"
+        "C892DBD9-83E0-4538-95A8-5E9E45C4F095/"
+        "iPhone11,8,iPhone12,1_14.3_18C66_Restore.ipsw")
 
 
 class HttpRange:
@@ -103,13 +110,25 @@ def extract(f, e, out):
 
 
 if __name__ == "__main__":
-    f = HttpRange(IPSW)
+    url = sys.argv[1] if len(sys.argv) > 1 else IPSW
+    rest = sys.argv[2:] if len(sys.argv) > 2 else []
+    dest = "/tmp"
+    if rest and os.path.isdir(rest[0]):
+        dest = rest[0]
+        rest = rest[1:]
+    os.makedirs(dest, exist_ok=True)
+    f = HttpRange(url)
     print("ipsw size:", f.size)
     ents = central_dir(f)
     for e in ents:
         print(f"{e[0]:70s} method={e[1]} csize={e[2]:>12,} usize={e[3]:>12,}")
-    want = sys.argv[1:] if len(sys.argv) > 1 else []
+    pats = []
+    for w in rest:
+        try:
+            pats.append(re.compile(w))
+        except re.error:
+            pats.append(re.compile(re.escape(w)))
     for e in ents:
         base = e[0].rsplit("/", 1)[-1]
-        if any(w in e[0] for w in want):
-            extract(f, e, "/tmp/" + base)
+        if any(p.search(e[0]) for p in pats):
+            extract(f, e, os.path.join(dest, base))

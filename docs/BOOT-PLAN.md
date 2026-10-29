@@ -19,7 +19,42 @@ evidence next to it). Update it at the END of every work block.
 
 ---
 
-## M1 — ISA closure: every instruction class decoded  [~] (99.03% decode / 99.1% exec)
+## M1 — ISA closure: every instruction class decoded  [x] (99.31% decode / 99.3% exec — gate ≥99.3% CLEARED)
+**Progress (2026-10-29, sessions D+E — the M1 acceptance run):** the five
+remaining families landed and the gate CLEARED: **decode 99.03% → 99.31%
+(7,911,692/7,966,342; unknown 55,284 of which 36,792 are ≥16-word literal-pool
+runs = data), exec probe 98.9% → 99.3%** on the real 18C66 text. Families:
+SIMD ld/st register-offset Q/S/D (opc<0>=L, opc<1>=Q; S=size 10, D=size 11 —
+~5.5k words), load/store MULTIPLE structures (bit23=post, op4 bits 15:12,
+type bits 11:10 — de-interleave exec), SINGLE structure + LD1R/2R/3R/4R
+(index = Q:S:size per lane class), indexed by-element FP (fmla/fmls/fmul/
+fmulx) + INT (mla/mls/smlal/umlal/smlsl/umlsl/smull/umull/sqdmull/sqdmlal/
+sqdmlsl/sqdmulh/sqrdmulh) + FP16FML (fmlal/fmlsl) — capstone-authoritative
+map from pin_m1d3.py (62-combo brute force; index = H:L:M .h / H:L .s / H .d,
+rm 4-bit when M is an index bit), scalar FP (fcmp/fcmpe, fccmp/fccmpe, fcsel,
+fmov reg/imm via VFP-ExpandImm, FCVT{N,A,P,M,Z}S/U plain+fixed-point,
+SCVTF/UCVTF, FMOV gpr↔fp, ADDP/FADDP scalar), 2-reg-misc (rev64/32/16,
+abs/neg/fabs/fneg/fsqrt, xtn/sqxtn/uqxtn/sqxtun, fcvtn/fcvtxn/fcvtl,
+fcvtzs/u + scvtf/ucvtf vector, saddlv/uaddlv/addv/sadalp/uadalp, cls/clz/cnt,
+cm*#0, saddlp/uaddlp, suqadd/usqadd), permute (zip/uzp/trn), ext, dup
+(elem+gpr), ins (gpr+lane), umov/smov, tbl/tbx, SHA1 (h/c/p/m/su0/su1),
+SHA256 (h/h2/su0/su1 — 2-round compression semantics textbook-verified in
+python), PMULL .1q (d64), SIMD LDR literal + LDRSW literal + PRFM-literal,
+FMOV vector .2d/.4s immediate.
+**REAL-DATA BUG #15:** the across-lane reduce guard swallowed three-same
+insns with Vm=16/17 (fadd v0.4s,v0.4s,v16.4s = 0x4E30D400 — ~1.5k kernel
+words). **REAL-DATA BUG #16:** FCVTL (2-reg-misc opcode 011110, size=01)
+silently decoded as AESIMC (same opcode, size=00) — size==00 guard added.
+**REAL-DATA BUG #17:** ADC/ADCS/SBC/SBCS (0x1A group, bit23=0, opcode
+15:10=000000) decoded as CSEL/CSINC (bit23=1 arm) — keystone cross-check
+0x1A020020 adc vs 0x1A820020 csel; ~1.5k words carried wrong semantics.
+Goldens: gap_simd_regoff_mult_single, gap_indexed_std_family,
+gap_scalar_fp_family, gap_permute_copy_sha, gap_2reg_misc_literals_adc +
+the generated 100-row capstone-named table (goldens_m1.rs). `cargo test
+--workspace`: 288 passed / 0 failed. boot-first re-run (IOS_RUST_DRAM_MB=2048
+— sandbox memory limit): irestore+staging ✅, ADT-driven machine assembly ✅,
+9 insns retired, stop Halted (M2 zeroed-GOT stop — unchanged, not ISA).
+
 
 **Progress (2026-10-29, session C second half — three-same FP + unscaled
 AR):** three-same FP landed, 24 ops (fadd/fsub/fabd/faddp/fmul/fmulx/fdiv/

@@ -524,3 +524,32 @@ Remaining honest gap to the 99.3% M1 acceptance: indexed-multiply family
 SIMD ld/st multiple + register-offset ≈9.7k, scalar FP remainder
 (fcmp/fcsel/fmov-imm/scvtf-scalar ≈4.1k), EXT/DUP-gpr ≈3.4k,
 2-reg-misc narrowing (xtn/sqxtn/fcvtl/fcvtn/addp-scalar) ≈3k.
+
+**Sessions D+E (2026-10-29, M1 gate CLEARED — 99.03% → 99.31% decode /
+99.3% exec):** the five remaining families landed with capstone-oracle
+field maps (pin_m1d3.py 62-combo brute force; hand-derived rows corrected:
+the M bit is an INDEX bit for .h-lane indexed ops and the rm is 4 bits
+there; FCMLA/SQRDMLAH own opcode4 0xC/0xD with U=1; FMLAL/FMLSL own 0000/
+0100 with size=10). Landed: SIMD ld/st register-offset (opc<0>=L, opc<1>=Q,
+S=size10/D=size11), multiple + single structures (de-interleave exec),
+indexed FP/INT/FP16FML, scalar FP (fcmp-e bit4/fccmp/fcsel/fmov-imm
+VFP-ExpandImm/FCVT{N,A,P,M,Z}S/U plain+fixed/SCVTF/UCVTF/FMOV gpr↔fp/
+ADDP-scalar — the scalar pairwise class reuses the H type slot for D),
+2-reg-misc (18 op families incl. fcvtn/fcvtl narrowing/widening + vector
+fcvtzs/scvtf/ucvtf + across-lane addv/saddlv/uaddlv/sadalp/uadalp),
+permute/ext/dup/ins/umov/smov/tbl/tbx, SHA1/SHA256 crypto (sha256h/h2
+2-round semantics textbook-verified: both vectors written back, H uses
+W[0..1], H2 W[2..3]), PMULL .1q, SIMD LDR literal + LDRSW literal +
+PRFM-literal, FMOV vector .2d/.4s immediate. **REAL-DATA BUG #15:** the
+reduce guard's bits20:17==1000 slot swallowed three-same Vm=16/17 insns
+(fadd v0.4s,v0.4s,v16.4s = 0x4E30D400; ~1.5k words). **REAL-DATA BUG #16:**
+FCVTL silently decoded as AESIMC (same opcode bits 15:10=011110; the AES
+guard lacked the size==00 requirement). **REAL-DATA BUG #17:** ADC/ADCS/
+SBC/SBCS decoded as CSEL/CSINC (0x1A group; the divider is bit23: ADC
+family bit23=0 + opcode 000000, CSEL family bit23=1) — found by keystone
+cross-check 0x1A020020 vs 0x1A820020. Goldens: 5 new gap_* families +
+the 100-row generated capstone-named table (goldens_m1.rs).
+**Measured: decode 99.31% (7,911,692/7,966,342), exec probe 99.3%
+(UnknownInsn 136); unknown 54,650 of which 36,792 are ≥16-word
+literal-pool runs (data).** `cargo test --workspace` 288 passed / 0 failed.
+boot-first: 9 insns retired, stop Halted (M2 zeroed-GOT stop — not ISA).

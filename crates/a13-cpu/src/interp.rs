@@ -1692,7 +1692,7 @@ impl Interpreter {
                             r |= v << sh;
                         }
                     }
-                    VM::Xtn | VM::Sqxtn | VM::Uqxtn => {
+                    VM::Xtn | VM::Sqxtn | VM::Uqxtn | VM::Sqxtun => {
                         // narrowing: dest element = size, src = size+1; dest
                         // lane count = 2× (Q=0 → low half only, Q=1 → high)
                         let dbits = bits / 2;
@@ -1708,10 +1708,8 @@ impl Interpreter {
                             let v: i128 = match op {
                                 VM::Xtn => sextl(x),
                                 VM::Sqxtn => sextl(x).clamp(-lim - 1, lim),
-                                _ => {
-                                    // UQXTN: unsigned src, sat to unsigned
-                                    (x as i128).clamp(0, (lim << 1) | 1)
-                                }
+                                // UQXTN/SQXTUN: saturate to unsigned range
+                                _ => sextl(x).clamp(0, (lim << 1) | 1),
                             };
                             let dsh = (l as u32) * dbits as u32 + if q { 64 } else { 0 };
                             if dsh + dbits as u32 > 128 {
@@ -2393,7 +2391,8 @@ impl Interpreter {
                             0 | 1 => 0u8,
                             2 | 3 => 1,
                             4 | 5 => 2,
-                            _ => 3,
+                            6 | 7 => 3, // P (toward +inf)
+                            _ => 4,     // M (toward -inf)
                         };
                         let iv: i128 = match rm_kind {
                             0 => scaled as i128, // nearest-even (Rust cast)
@@ -2409,10 +2408,8 @@ impl Interpreter {
                                 r as i128
                             }
                             2 => scaled.trunc() as i128, // Z (toward zero)
-                            _ => {
-                                // round toward +inf (P)
-                                scaled.ceil() as i128
-                            }
+                            3 => scaled.ceil() as i128,  // P (toward +inf)
+                            _ => scaled.floor() as i128, // M (toward -inf)
                         };
                         if !unsigned {
                             let v = if gpr64 {

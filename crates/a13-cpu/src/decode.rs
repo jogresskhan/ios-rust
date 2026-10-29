@@ -903,6 +903,7 @@ pub enum V2MiscOp {
     Xtn,
     Sqxtn,
     Uqxtn,
+    Sqxtun,
     Fcvtn,
     Fcvtxn,
     Fcvtl,
@@ -1361,18 +1362,15 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
             0 => Some(Insn::LdrLit { rt: reg(w, 0), imm, is64: false }),
             1 => Some(Insn::LdrLit { rt: reg(w, 0), imm, is64: true }),
             2 => Some(Insn::LdrLitSw { rt: reg(w, 0), imm }),
-            _ => None,
+            // PRFM (literal) 0xD8-class — no prefetch effect in this model
+            _ => Some(Insn::Nop),
         };
     }
 
-    // --- Session D: SIMD LDR (literal) + PRFM (literal): bits 29:24 =
-    //     11100 with bit31=0 (top bytes 0x1C/0x5C/0x9C/0xDC). opc bits
-    //     31:30 {00: S(4B), 01: D(8B), 10: Q(16B)}; PRFM (0xD8, bit31=1)
-    //     is a Nop in this model. (keystone: 1C000020/5C000040/9C000080.) ---
+    // --- Session D: SIMD LDR (literal): bits 29:24 = 11100 (top bytes
+    //     0x1C S / 0x5C D / 0x9C Q — note 0x9C HAS bit31=1; keystone
+    //     1C000020/5C000040/9C000080). opc bits 31:30 pick the width. ---
     if (w >> 24) & 0x3F == 0x1C {
-        if (w >> 31) & 1 == 1 {
-            return Some(Insn::Nop); // PRFM (literal) — no prefetch effect
-        }
         let width_log2 = match (w >> 30) & 0x3 {
             0 => 2u8,
             1 => 3u8,
@@ -1608,14 +1606,15 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
         let size = ((w >> 30) & 0x3) as u8;
         let opc = (w >> 22) & 0x3;
         // Field map (keystone + capstone on real words): opc<0> (bit22) = L
-        // (load); opc<1> (bit23) = 1 → Q form, else size {01: S, 10: D}.
+        // (load); opc<1> (bit23) = 1 → Q form; else size {10: S, 11: D}
+        // (BC697822 ldr s2 has size=10; FC6A6920 ldr d0 has size=11).
         let load = opc & 1 == 1;
         let width_log2 = if opc & 0b10 != 0 {
             4u8
         } else {
             match size {
-                1 => 2u8, // S
-                2 => 3u8, // D
+                2 => 2u8, // S
+                3 => 3u8, // D
                 _ => return None,
             }
         };
@@ -2153,9 +2152,10 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
     //     size = bits 23:22). ---
     if (w & 0x9F00_0000) == 0x0E00_0000 && (w >> 21) & 1 == 0 {
         let u = (w >> 29) & 1 == 1;
-        if (w >> 23) & 1 == 1 {
-            // permute: bits 11:10 = 10
-            if (w >> 10) & 0x3 == 0b10 {
+        // permute class: bits 11:10 = 10, U = 0 (bit23 is the SIZE msb —
+        // zip1 .4s has bit23=1 while zip2 .16b has bit23=0!)
+        if !u && (w >> 10) & 0x3 == 0b10 {
+            {
                 use PermOp::*;
                 let op = match (w >> 12) & 0xF {
                     0b0001 => Uzp1,
@@ -2281,7 +2281,9 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
                 (false, 0b001111) if (w >> 10) & 0x3 == 0b11 => {
                     let imm5 = rm as u32;
                     let tz = imm5.trailing_zeros();
-                    if imm5 == 0 || imm5 & (1 << tz) == 0 || tz > 2 {
+                    // UMOV .d lane exists (capstone 4E083C20 mov x0, v1.d[0]:
+                    // imm5 = 8 → tz = 3) — B/H/S/D all valid
+                    if imm5 == 0 || imm5 & (1 << tz) == 0 || tz > 3 {
                         return None;
                     }
                     return Some(Insn::VVecToGpr {
@@ -2295,8 +2297,9 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
                 }
                 // EXT (U=1, bit10=0, bit15=0)
                 (true, _) if (w >> 10) & 1 == 0 && (w >> 15) & 1 == 0 && opcode >= 0b000000 => {
-                    // EXT: imm4 = bits 15:11 (bit15=0); opcode 6-bit = imm4<<1
-                    if (w >> 16) & 0x1F == 0 && opcode & 1 == 0 {
+                    // EXT: imm4 = bits 15:11 (bit15=0); opcode 6-bit = imm4<<1;
+                    // rm is a real register (capstone 6E022820 ext v0,v1,v2,#5)
+                    if opcode & 1 == 0 {
                         return Some(Insn::VExt {
                             rd: reg(w, 0),
                             rn: reg(w, 5),
@@ -2452,7 +2455,7 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
     if (w & 0x9F00_0000) == 0x0E00_0000
         && (w >> 21) & 1 == 1
         && (w >> 10) & 1 == 0
-        && matches!(reg(w, 16), 0 | 1 | 16)
+        && matches!(reg(w, 16), 0 | 1 | 16 | 17)
     {
         let opcode = (w >> 10) & 0x3F;
         let u = (w >> 29) & 1 == 1;
@@ -2480,6 +2483,7 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
             (0, 0b111110, false) => Some(Fabs),
             (0, 0b111110, true) => Some(Fneg),
             (1, 0b001010, false) => Some(Xtn),
+            (1, 0b001010, true) => Some(Sqxtun),
             (1, 0b010010, false) => Some(Sqxtn),
             (1, 0b010010, true) => Some(Uqxtn),
             (1, 0b011010, false) => Some(Fcvtn),
@@ -2492,8 +2496,8 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
             (1, 0b110110, true) => Some(Ucvtf),
             (16, 0b001110, false) => Some(Saddlv),
             (16, 0b001110, true) => Some(Uaddlv),
-            (16, 0b011010, false) => Some(Sadalp),
-            (16, 0b011010, true) => Some(Uadalp),
+            (0, 0b011010, false) => Some(Sadalp),
+            (0, 0b011010, true) => Some(Uadalp),
             (17, 0b101110, false) => Some(Addv),
             _ => None,
         };
@@ -2714,6 +2718,9 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
                     (0b0111, true) => Some((VecImmOp::Bic, 2, ((cmode - 1) >> 1) * 8)),
                     (0b1000, true) => Some((VecImmOp::Mvni, 1, 0)),
                     (0b1010, true) => Some((VecImmOp::Mvni, 1, 8)),
+                    (0b1001, true) => Some((VecImmOp::Bic, 1, 0)),
+                    (0b1011, true) => Some((VecImmOp::Bic, 1, 8)),
+                    (0b1011, false) => Some((VecImmOp::Orr, 1, 8)),
                     _ => None,
                 };
                 let (op, width_log2, shift) = match spec {
@@ -2752,6 +2759,13 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
                     (VecImmOp::Orr, 2) | (VecImmOp::Bic, 2) => {
                         let s32 = ((imm8 as u64) << shift) & 0xFFFF_FFFF;
                         s32 | (s32 << 32)
+                    }
+                    // BIC-16 (cmode 9/B): non-inverted 16-bit replication
+                    // (exec applies the NOT); capstone 0x2F019400 =
+                    // bic v0.4h, #0x20 -> value 0x0020_0020_0020_0020.
+                    (VecImmOp::Bic, 1) => {
+                        let h = ((imm8 as u64) << shift) & 0xFFFF;
+                        h | (h << 16) | (h << 32) | (h << 48)
                     }
                     _ => 0,
                 };
@@ -3239,6 +3253,11 @@ fn decode_fp_scalar(w: u32) -> Option<Insn> {
                 0b00101 => Some(FpIntCvtKind::FcvtGpr { round: 3 }),
                 0b01000 => Some(FpIntCvtKind::FcvtGpr { round: 6 }),
                 0b01001 => Some(FpIntCvtKind::FcvtGpr { round: 7 }),
+                // M pair (toward -inf) — capstone 0x9E700020 = fcvtms x0, d1
+                0b10000 => Some(FpIntCvtKind::FcvtGpr { round: 8 }),
+                0b10001 => Some(FpIntCvtKind::FcvtGpr { round: 9 }),
+                0b10000 => Some(FpIntCvtKind::FcvtGpr { round: 8 }),
+                0b10001 => Some(FpIntCvtKind::FcvtGpr { round: 9 }),
                 0b11000 => Some(FpIntCvtKind::FcvtGpr { round: 4 }),
                 0b11001 => Some(FpIntCvtKind::FcvtGpr { round: 5 }),
                 0b00010 => Some(FpIntCvtKind::Cvtf { unsigned: false }),
@@ -3278,10 +3297,26 @@ fn decode_fp_scalar(w: u32) -> Option<Insn> {
             fbits: 64 - imm6 as u16 as u8,
         });
     }
+    // Session D: scalar-space 2-reg-misc UCVTF/SCVTF (census 0x5E21D800
+    // scvtf / 0x7E61D842 ucvtf — bits 28:24 = 11110, rm = 1 fixed,
+    // opcode 110110; capstone renders "ucvtf d2, d2" — in-place vector
+    // convert with vn = rd). Must precede the 2-source Fp2 branch.
+    if bit21 && b11 && !b10 && rm == 1 && ((w >> 10) & 0x3F) == 0b110110 {
+        let size_log2 = if double { 3u8 } else { 2u8 };
+        return Some(Insn::V2Misc {
+            rd,
+            rn: rd,
+            q: (w >> 30) & 1 == 1,
+            size: size_log2,
+            op: if (w >> 29) & 1 == 1 { V2MiscOp::Ucvtf } else { V2MiscOp::Scvtf },
+        });
+    }
     // scalar pairwise ADDP (rm = 10000, bit21=1, opcode 101110, U=1,
     // census 0x5EF1B800 addp d0,v0.2d)
-    if bit21 && b11 && !b10 && rm == 16 && ((w >> 10) & 0x3F) == 0b101110 {
-        return Some(Insn::AddpScalar { rd, rn, double });
+    if bit21 && b11 && !b10 && rm == 17 && ((w >> 10) & 0x3F) == 0b101110 {
+        // the scalar pairwise class reuses the H type slot for D
+        // (capstone 5EF1B800 addp d0,v0.2d: ty bits 23:22 = 11)
+        return Some(Insn::AddpScalar { rd, rn, double: ty == FpType::H });
     }
     if b11 {
         // 2-source FP: opcode at bits 14:12, Rm at bits 20:16
@@ -4369,8 +4404,14 @@ mod tests {
             Some(Insn::FmovVecImm { rd: 0, q: false, imm8: 0, double: false })
         );
 
+        // capstone-verified upgrade (goldens_m1 row 0x6F059560): cmode
+        // 1001 U=1 = BIC .h shift 0 — the old session left it a negative
+        assert!(matches!(
+            decode(0, 0x2F01_9400),
+            Some(Insn::MoviVec { op: VecImmOp::Bic, width_log2: 1, .. })
+        ));
         // NEGATIVES: unverified cmode arms stay unknown (honest gaps)
-        assert_eq!(decode(0, 0x2F01_9400), None); // cmode 0b0110? U=1 9/B unverified
+        assert_eq!(decode(0, 0x2F01_D400), None); // cmode 0b1101 U=1 unverified
         assert_eq!(decode(0, 0x6F0C_E401), None); // reserved cvtf .4h shape
     }
 
@@ -4822,5 +4863,263 @@ mod tests {
             Some(LdSt9 { rt: 11, rn: 0, imm9: 0, size_log2: 3, load: true, mode: unscaled })
         );
     }
-}
 
+    // =====================================================================
+    // Session D — M1 closeout families (keystone/capstone-pinned words;
+    // every word below was derived with the RE oracle tooling or taken
+    // verbatim from the 18C66 census, per campaign rule: no hand-derivation).
+    // =====================================================================
+    #[test]
+    fn gap_simd_regoff_mult_single() {
+        // LDR/STR Q/S/D, [Xn, Xm{, extend}]: opc<0>=L, opc<1>=Q
+        assert_eq!(
+            decode(0, 0x3CA8_6945),
+            Some(Insn::LdStSimdRegOff {
+                vt: 5, rn: 10, rm: 8, option: ExtOp::Lsl, scaled: false,
+                width_log2: 4, load: false,
+            })
+        );
+        assert!(matches!(
+            decode(0, 0xBC69_7822),
+            Some(Insn::LdStSimdRegOff { vt: 2, width_log2: 2, load: true, .. })
+        ));
+        assert!(matches!(
+            decode(0, 0xFC6A_6920),
+            Some(Insn::LdStSimdRegOff { vt: 0, width_log2: 3, load: true, .. })
+        ));
+        // multiple structures: ld1 {v0.4s,v1.4s},[x4]; st1 3reg post #48
+        assert!(matches!(
+            decode(0, 0x4C40_A880),
+            Some(Insn::LdStMult { q: true, load: true, op4: 0xA, type2: 2, post: false, .. })
+        ));
+        assert!(matches!(
+            decode(0, 0x4CDF_6BE0),
+            Some(Insn::LdStMult { load: true, post: true, rm: 31, .. })
+        ));
+        assert!(matches!(
+            decode(0, 0x4C00_8D43),
+            Some(Insn::LdStMult { load: false, op4: 0x8, type2: 3, .. })
+        ));
+        // single structure: ld1 {v0.d}[1],[x13]; st1 {v0.s}[3],[x11]; ld1r
+        assert!(matches!(
+            decode(0, 0x4D40_85A0),
+            Some(Insn::LdStSingle { q: true, load: true, op4: 0x8, s: false, size2: 1, .. })
+        ));
+        assert!(matches!(
+            decode(0, 0x4D00_9160),
+            Some(Insn::LdStSingle { load: false, op4: 0x9, s: true, size2: 0, .. })
+        ));
+        assert!(matches!(
+            decode(0, 0x4D40_C900),
+            Some(Insn::LdStSingle { load: true, op4: 0xC, .. })
+        ));
+    }
+
+    #[test]
+    fn gap_indexed_std_family() {
+        // FP by element (census words): fmul v0.2d,v4.2d,v0.d[0] / fmla
+        assert!(matches!(
+            decode(0, 0x4FC0_9080),
+            Some(Insn::VindexStd { op: VindexStdOp::Fmul, size_log2: 3, index: 0, .. })
+        ));
+        assert!(matches!(
+            decode(0, 0x4F85_127D),
+            Some(Insn::VindexStd { op: VindexStdOp::Fmla, size_log2: 2, .. })
+        ));
+        assert!(matches!(
+            decode(0, 0x4FA5_531F),
+            Some(Insn::VindexStd { op: VindexStdOp::Fmls, .. })
+        ));
+        // .8h FP16-by-element (capstone 4F051060 fmla v0.8h,v3.8h,v5.h[0])
+        assert!(matches!(
+            decode(0, 0x4F05_1060),
+            Some(Insn::VindexStd { op: VindexStdOp::Fmla, size_log2: 1, index: 0, .. })
+        ));
+        // INT by element: mla/mls/sqdmulh (0x6F820020 mla .4s s[0])
+        assert!(matches!(
+            decode(0, 0x6F82_0020),
+            Some(Insn::VindexStd { op: VindexStdOp::Mla, size_log2: 2, .. })
+        ));
+        // 3-reg long: umlal2 (capstone 6E228020) / umull (2E22C020)
+        assert!(matches!(
+            decode(0, 0x6E22_8020),
+            Some(Insn::VLong { op: VLongOp::Mlal, u: true, q: true, .. })
+        ));
+        assert!(matches!(
+            decode(0, 0x2E22_C020),
+            Some(Insn::VLong { op: VLongOp::Mull, u: true, .. })
+        ));
+    }
+
+    #[test]
+    fn gap_scalar_fp_family() {
+        // fcmp d13, d8 / fcmp d13, #0.0 (census 1E6821A0 / 1E6021A8)
+        assert!(matches!(
+            decode(0, 0x1E68_21A0),
+            Some(Insn::FpCmp { rn: 13, rm: 8, zero: false, double: true, .. })
+        ));
+        assert!(matches!(
+            decode(0, 0x1E60_21A8),
+            Some(Insn::FpCmp { rn: 13, zero: true, double: true, .. })
+        ));
+        // fmov d8, #1.0 (census 1E6E1008) + VFP-ExpandImm via exec goldens
+        assert!(matches!(
+            decode(0, 0x1E6E_1008),
+            Some(Insn::FmovImm { rd: 8, imm8: 0x70, double: true, .. })
+        ));
+        // fmov s0, s1 register form (keystone 1E204020)
+        assert!(matches!(
+            decode(0, 0x1E20_4020),
+            Some(Insn::FmovReg { rd: 0, rn: 1, double: false, .. })
+        ));
+        // fccmp / fcsel / fminnm / fmaxnm (census words)
+        assert!(matches!(
+            decode(0, 0x1E20_0520),
+            Some(Insn::Fccmp { rn: 9, rm: 0, cond: 0, .. })
+        ));
+        assert!(matches!(
+            decode(0, 0x1E22_0C20),
+            Some(Insn::Fcsel { rd: 0, cond: 0, double: false, .. })
+        ));
+        assert!(matches!(
+            decode(0, 0x1E21_780A),
+            Some(Insn::Fp2 { rd: 10, op: VfpOp::Minnm, ty: FpType::S, .. })
+        ));
+        // fixed-point converts (census 1E18C000 fcvtzs w0,s0,#16)
+        assert!(matches!(
+            decode(0, 0x1E18_C000),
+            Some(Insn::FpIntCvt { kind: FpIntCvtKind::FcvtGpr { round: 4 }, fbits: 16, .. })
+        ));
+        // census 0x5E21D800 = scvtf s0, s0 — scalar-space 2-reg-misc
+        // in-place vector convert (capstone-verified; vn = rd)
+        assert!(matches!(
+            decode(0, 0x5E21_D800),
+            Some(Insn::V2Misc { op: V2MiscOp::Scvtf, rn: 0, size: 2, .. })
+        ));
+        assert!(matches!(
+            decode(0, 0x7E61_D842),
+            Some(Insn::V2Misc { op: V2MiscOp::Ucvtf, rn: 2, size: 3, .. })
+        ));
+        // addp d0, v0.2d (census 5EF1B800)
+        assert!(matches!(
+            decode(0, 0x5EF1_B800),
+            Some(Insn::AddpScalar { rd: 0, rn: 0, double: true, .. })
+        ));
+    }
+
+    #[test]
+    fn gap_permute_copy_sha() {
+        // zip1/zip2/ext/dup/tbl (census words)
+        assert!(matches!(
+            decode(0, 0x4E80_3820),
+            Some(Insn::VPerm { op: PermOp::Zip1, size: 2, .. })
+        ));
+        assert!(matches!(
+            decode(0, 0x4E07_78C5),
+            Some(Insn::VPerm { op: PermOp::Zip2, size: 0, .. })
+        ));
+        assert!(matches!(
+            decode(0, 0x6E00_4000),
+            Some(Insn::VExt { imm4: 8, q: true, .. })
+        ));
+        assert!(matches!(
+            decode(0, 0x4E08_0D21),
+            Some(Insn::VDupGpr { rd: 1, size_log2: 3, q: true, .. })
+        ));
+        assert!(matches!(
+            decode(0, 0x4E01_0000),
+            Some(Insn::VTbl { len: 1, tbx: false, q: true, .. })
+        ));
+        // mov v1.s[1], w13 (INS general, census 4E0C1DA1)
+        assert!(matches!(
+            decode(0, 0x4E0C_1DA1),
+            Some(Insn::VInsGpr { rd: 1, index: 1, size_log2: 2, .. })
+        ));
+        // umov w9, v0.b[0] (census 0E013C09)
+        assert!(matches!(
+            decode(0, 0x0E01_3C09),
+            Some(Insn::VVecToGpr { rd: 9, signed: false, size_log2: 0, .. })
+        ));
+        // SHA family (census): sha1h / sha256h / sha1p / sha256h2
+        assert!(matches!(
+            decode(0, 0x5E28_0A93),
+            Some(Insn::VSha1H { rd: 19, rn: 20, .. })
+        ));
+        assert!(matches!(
+            decode(0, 0x5E04_4272),
+            Some(Insn::VSha256H { vd: 18, vn: 19, h2: false, .. })
+        ));
+        assert!(matches!(
+            decode(0, 0x5E04_5293),
+            Some(Insn::VSha256H { h2: true, .. })
+        ));
+        assert!(matches!(
+            decode(0, 0x5E04_1272),
+            Some(Insn::VSha1Cpm { op: Sha1CpmOp::Parity, .. })
+        ));
+        assert!(matches!(
+            decode(0, 0x5E02_3020),
+            Some(Insn::VSha1Su0 { .. })
+        ));
+    }
+
+    #[test]
+    fn gap_2reg_misc_literals_adc() {
+        // 2-reg-misc (census): rev64 / xtn / ucvtf-vec / addv-rm17 / uadalp
+        assert!(matches!(
+            decode(0, 0x0E20_0800),
+            Some(Insn::V2Misc { op: V2MiscOp::Rev64, .. })
+        ));
+        assert!(matches!(
+            decode(0, 0x0EA1_2800),
+            Some(Insn::V2Misc { op: V2MiscOp::Xtn, .. })
+        ));
+        assert!(matches!(
+            decode(0, 0x6E21_D800),
+            Some(Insn::V2Misc { op: V2MiscOp::Ucvtf, .. })
+        ));
+        assert!(matches!(
+            decode(0, 0x4EB1_B800),
+            Some(Insn::V2Misc { op: V2MiscOp::Addv, .. })
+        ));
+        assert!(matches!(
+            decode(0, 0x6EA0_6800),
+            Some(Insn::V2Misc { op: V2MiscOp::Uadalp, .. })
+        ));
+        // REAL-DATA BUG #15 regression: three-same with Vm=16/17
+        assert!(matches!(
+            decode(0, 0x4E30_D400),
+            Some(Insn::V3SameFp { rm: 16, op: V3FpOp::Add, .. })
+        ));
+        // REAL-DATA BUG #17: ADC/ADCS/SBC (keystone 1A020020/BA020020/5A020020)
+        assert!(matches!(
+            decode(0, 0x1A02_0020),
+            Some(Insn::Adc { setflags: false, subtract: false, is64: false, .. })
+        ));
+        assert!(matches!(
+            decode(0, 0xBA02_0020),
+            Some(Insn::Adc { setflags: true, subtract: false, is64: true, .. })
+        ));
+        // CSEL must still decode (bit23=1): csel w0,w1,w2,eq = 1A820020
+        assert!(matches!(decode(0, 0x1A82_0020), Some(Insn::Csel { .. })));
+        // SIMD LDR literal (census 9C000080 ldr q0) + LDRSW literal
+        assert!(matches!(
+            decode(0, 0x9C00_0080),
+            Some(Insn::LdrLitVec { width_log2: 4, .. })
+        ));
+        assert!(matches!(
+            decode(0, 0x9800_0020),
+            Some(Insn::LdrLitSw { .. })
+        ));
+        // FMOV vector imm .2d (keystone 6F00F400 fmov v0.2d,#2.0)
+        assert!(matches!(
+            decode(0, 0x6F00_F400),
+            Some(Insn::FmovVecImm { imm8: 0x00, double: true, q: true, .. })
+        ));
+        // PMULL .1q d64 (capstone 0EE0E000)
+        assert!(matches!(
+            decode(0, 0x0EE0_E000),
+            Some(Insn::Vpmull { d64: true, .. })
+        ));
+    }
+}

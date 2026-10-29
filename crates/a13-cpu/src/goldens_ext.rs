@@ -313,6 +313,221 @@ pub fn mnemonic_of(i: &Insn) -> String {
             VIndexedOp::Sqrdmlah => "sqrdmlah", VIndexedOp::Sqrdmlsh => "sqrdmlsh",
             VIndexedOp::Fcmla(_) => "fcmla", VIndexedOp::Fcadd(_) => "fcadd",
         }.into(),
+        // --- Session D variants (goldens_m1 rows) ---
+        Insn::LdStSimdRegOff { load, .. } => if *load { "ldr" } else { "str" }.into(),
+        Insn::LdStMult { q, load, op4, .. } => {
+            let name = match op4 {
+                0x0 => "ld4",
+                0x2 => "ld1",
+                0x4 => "ld3",
+                0x6 => "ld1",
+                0x7 => "ld1",
+                0x8 => "ld2",
+                0xA => "ld1",
+                _ => "ld1",
+            };
+            let name = if *load { name } else {
+                match op4 {
+                    0x0 => "st4",
+                    0x2 => "st1",
+                    0x4 => "st3",
+                    0x6 => "st1",
+                    0x7 => "st1",
+                    0x8 => "st2",
+                    0xA => "st1",
+                    _ => "st1",
+                }
+            };
+            let _ = q;
+            name.into()
+        }
+        Insn::LdStSingle { load, op4, r, .. } => {
+            if *op4 >= 0xC {
+                // LD1R/LD2R (op4 0xC + r) / LD3R/LD4R (op4 0xE + r) — the
+                // bit21 field picks 2/4 regs (keystone 0D60C800 ld2r)
+                match (op4, *r) {
+                    (0xC, false) => "ld1r".into(),
+                    (0xC, true) => "ld2r".into(),
+                    (0xE, false) => "ld3r".into(),
+                    (0xE, true) => "ld4r".into(),
+                    _ => "ld1r".into(),
+                }
+            } else if *load {
+                "ld1".into()
+            } else {
+                "st1".into()
+            }
+        }
+        Insn::VindexStd { op, q, .. } => {
+            // widening by-element forms take the "2" suffix when Q=1
+            let two = if *q { "2" } else { "" };
+            match op {
+            crate::decode::VindexStdOp::Fmla => "fmla".into(),
+            crate::decode::VindexStdOp::Fmls => "fmls".into(),
+            crate::decode::VindexStdOp::Fmul => "fmul".into(),
+            crate::decode::VindexStdOp::Fmulx => "fmulx".into(),
+            crate::decode::VindexStdOp::Mla => "mla".into(),
+            crate::decode::VindexStdOp::Mul => "mul".into(),
+            crate::decode::VindexStdOp::Mls => "mls".into(),
+            crate::decode::VindexStdOp::Smlal => format!("smlal{two}"),
+            crate::decode::VindexStdOp::Umlal => format!("umlal{two}"),
+            crate::decode::VindexStdOp::Smlsl => format!("smlsl{two}"),
+            crate::decode::VindexStdOp::Umlsl => format!("umlsl{two}"),
+            crate::decode::VindexStdOp::Smull => format!("smull{two}"),
+            crate::decode::VindexStdOp::Umull => format!("umull{two}"),
+            crate::decode::VindexStdOp::Sqdmull => format!("sqdmull{two}"),
+            crate::decode::VindexStdOp::Sqdmlal => format!("sqdmlal{two}"),
+            crate::decode::VindexStdOp::Sqdmlsl => format!("sqdmlsl{two}"),
+            crate::decode::VindexStdOp::Sqdmulh => "sqdmulh".into(),
+            crate::decode::VindexStdOp::Sqrdmulh => "sqrdmulh".into(),
+            crate::decode::VindexStdOp::Fp16Fml { sub, two } => format!(
+                "fml{}l{}",
+                if *sub { "s" } else { "a" },
+                if *two { "2" } else { "" }
+            ),
+            }
+        },
+        Insn::VLong { op, u, q, .. } => {
+            let two = if *q { "2" } else { "" };
+            match (op, *u) {
+                (crate::decode::VLongOp::Addl, false) => format!("saddl{two}"),
+                (crate::decode::VLongOp::Addl, true) => format!("uaddl{two}"),
+                (crate::decode::VLongOp::Addw, false) => format!("saddw{two}"),
+                (crate::decode::VLongOp::Addw, true) => format!("uaddw{two}"),
+                (crate::decode::VLongOp::Subl, false) => format!("ssubl{two}"),
+                (crate::decode::VLongOp::Subl, true) => format!("usubl{two}"),
+                (crate::decode::VLongOp::Subw, false) => format!("ssubw{two}"),
+                (crate::decode::VLongOp::Subw, true) => format!("usubw{two}"),
+                (crate::decode::VLongOp::Mlal, false) => format!("smlal{two}"),
+                (crate::decode::VLongOp::Mlal, true) => format!("umlal{two}"),
+                (crate::decode::VLongOp::Mlsl, false) => format!("smlsl{two}"),
+                (crate::decode::VLongOp::Mlsl, true) => format!("umlsl{two}"),
+                (crate::decode::VLongOp::Mull, false) => format!("smull{two}"),
+                (crate::decode::VLongOp::Mull, true) => format!("umull{two}"),
+            }
+        }
+        Insn::V2Misc { op, q, .. } => {
+            let two = if *q { "2" } else { "" };
+            match op {
+                // REV64/REV32/REV16 have no "2" form — Q only widens the
+                // arrangement (capstone: rev64 v0.16b = plain "rev64")
+                crate::decode::V2MiscOp::Rev64 => "rev64".into(),
+                crate::decode::V2MiscOp::Rev32 => "rev32".into(),
+                crate::decode::V2MiscOp::Rev16 => "rev16".into(),
+                crate::decode::V2MiscOp::Saddlp => "saddlp".into(),
+                crate::decode::V2MiscOp::Uaddlp => "uaddlp".into(),
+                crate::decode::V2MiscOp::Suqadd => "suqadd".into(),
+                crate::decode::V2MiscOp::Usqadd => "usqadd".into(),
+                crate::decode::V2MiscOp::Cls => "cls".into(),
+                crate::decode::V2MiscOp::Clz => "clz".into(),
+                crate::decode::V2MiscOp::Cnt => "cnt".into(),
+                crate::decode::V2MiscOp::Cmgt0 => "cmgt".into(),
+                crate::decode::V2MiscOp::Cmge0 => "cmge".into(),
+                crate::decode::V2MiscOp::Cmeq0 => "cmeq".into(),
+                crate::decode::V2MiscOp::Cmle0 => "cmle".into(),
+                crate::decode::V2MiscOp::Cmlt0 => "cmlt".into(),
+                crate::decode::V2MiscOp::Abs => "abs".into(),
+                crate::decode::V2MiscOp::Neg => "neg".into(),
+                crate::decode::V2MiscOp::Fabs => "fabs".into(),
+                crate::decode::V2MiscOp::Fneg => "fneg".into(),
+                crate::decode::V2MiscOp::Xtn => format!("xtn{two}"),
+                crate::decode::V2MiscOp::Sqxtn => format!("sqxtn{two}"),
+                crate::decode::V2MiscOp::Uqxtn => format!("uqxtn{two}"),
+                crate::decode::V2MiscOp::Sqxtun => format!("sqxtun{two}"),
+                crate::decode::V2MiscOp::Fcvtn => {
+                    if *q { "fcvtn2" } else { "fcvtn" }.into()
+                }
+                crate::decode::V2MiscOp::Fcvtxn => "fcvtxn".into(),
+                crate::decode::V2MiscOp::Fcvtl => {
+                    if *q { "fcvtl2" } else { "fcvtl" }.into()
+                }
+                crate::decode::V2MiscOp::Fcvtzs => "fcvtzs".into(),
+                crate::decode::V2MiscOp::Fcvtzu => "fcvtzu".into(),
+                crate::decode::V2MiscOp::Scvtf => "scvtf".into(),
+                crate::decode::V2MiscOp::Ucvtf => "ucvtf".into(),
+                crate::decode::V2MiscOp::Fsqrt => "fsqrt".into(),
+                crate::decode::V2MiscOp::Saddlv => "saddlv".into(),
+                crate::decode::V2MiscOp::Uaddlv => "uaddlv".into(),
+                crate::decode::V2MiscOp::Sadalp => "sadalp".into(),
+                crate::decode::V2MiscOp::Uadalp => "uadalp".into(),
+                crate::decode::V2MiscOp::Addv => "addv".into(),
+            }
+        }
+        Insn::VPerm { op, .. } => match op {
+            crate::decode::PermOp::Zip1 => "zip1".into(),
+            crate::decode::PermOp::Zip2 => "zip2".into(),
+            crate::decode::PermOp::Uzp1 => "uzp1".into(),
+            crate::decode::PermOp::Uzp2 => "uzp2".into(),
+            crate::decode::PermOp::Trn1 => "trn1".into(),
+            crate::decode::PermOp::Trn2 => "trn2".into(),
+        },
+        Insn::VExt { .. } => "ext".into(),
+        Insn::VTbl { tbx, .. } => if *tbx { "tbx" } else { "tbl" }.into(),
+        Insn::VDupElem { .. } | Insn::VDupGpr { .. } => "dup".into(),
+        Insn::VInsGpr { .. } | Insn::VInsLane { .. } => "mov".into(),
+        // capstone: B/H/S lanes = "umov"/"smov"; the D-lane form (imm5=8)
+        // renders as plain "mov" (4E083C20 mov x0, v1.d[0])
+        Insn::VVecToGpr { signed, size_log2, .. } => match (signed, *size_log2) {
+            (true, _) => "smov".into(),
+            (false, 3) => "mov".into(),
+            (false, _) => "umov".into(),
+        },
+        Insn::VSha1H { .. } => "sha1h".into(),
+        Insn::VSha1Su1 { .. } => "sha1su1".into(),
+        Insn::VSha256Su0 { .. } => "sha256su0".into(),
+        Insn::VSha1Cpm { op, .. } => match op {
+            crate::decode::Sha1CpmOp::Ch => "sha1c".into(),
+            crate::decode::Sha1CpmOp::Parity => "sha1p".into(),
+            crate::decode::Sha1CpmOp::Maj => "sha1m".into(),
+        },
+        Insn::VSha1Su0 { .. } => "sha1su0".into(),
+        Insn::VSha256H { h2, .. } => if *h2 { "sha256h2" } else { "sha256h" }.into(),
+        Insn::VSha256Su1 { .. } => "sha256su1".into(),
+        Insn::FpCmp { e, .. } => if *e { "fcmpe" } else { "fcmp" }.into(),
+        Insn::Fccmp { e, .. } => if *e { "fccmpe" } else { "fccmp" }.into(),
+        Insn::Fcsel { .. } => "fcsel".into(),
+        Insn::FmovReg { .. } => "fmov".into(),
+        Insn::FmovImm { .. } => "fmov".into(),
+        Insn::FpIntCvt { kind, .. } => match kind {
+            crate::decode::FpIntCvtKind::FcvtGpr { round } => match round {
+                0 => "fcvtns".into(),
+                1 => "fcvtnu".into(),
+                2 => "fcvtas".into(),
+                3 => "fcvtau".into(),
+                4 => "fcvtzs".into(),
+                5 => "fcvtzu".into(),
+                6 => "fcvtps".into(),
+                7 => "fcvtpu".into(),
+                8 => "fcvtms".into(),
+                9 => "fcvtmu".into(),
+                _ => "fcvtzs".into(),
+            },
+            crate::decode::FpIntCvtKind::Cvtf { unsigned } => {
+                if *unsigned { "ucvtf" } else { "scvtf" }.into()
+            }
+            crate::decode::FpIntCvtKind::MovFromFp | crate::decode::FpIntCvtKind::MovToFp => {
+                "fmov".into()
+            }
+        },
+        Insn::AddpScalar { .. } => "addp".into(),
+        Insn::Adc { setflags, subtract, .. } => match (setflags, subtract) {
+            (false, false) => "adc".into(),
+            (true, false) => "adcs".into(),
+            (false, true) => "sbc".into(),
+            (true, true) => "sbcs".into(),
+        },
+        Insn::LdrLitVec { .. } => "ldr".into(),
+        Insn::LdrLitSw { .. } => "ldrsw".into(),
+        Insn::FmovVecImm { .. } => "fmov".into(),
+        Insn::MoviVec { op, .. } => match op {
+            crate::decode::VecImmOp::Movi => "movi".into(),
+            crate::decode::VecImmOp::Mvni => "mvni".into(),
+            crate::decode::VecImmOp::Orr => "orr".into(),
+            crate::decode::VecImmOp::Bic => "bic".into(),
+        },
+        Insn::MoviVec64 { .. } => "movi".into(),
+        Insn::FmovGprVec { .. } => "fmov".into(),
+        Insn::FpCvtFixed { .. } | Insn::FpCvtInt { .. } => "fcvt".into(),
         Insn::Fjcvtzs { .. } => "fjcvtzs".into(),
         Insn::Fcvt { .. } => "fcvt".into(),
         Insn::Fp2 { op, .. } => match op {

@@ -337,8 +337,8 @@ device accesses pre-stop (M5 census); PAR/AT S1E1R + PAR_EL1 still
 absent; permission/AF/XN enforcement still gated. cargo test --workspace:
 **403 passed / 0 failed** (IOS_RUST_DRAM_MB=768 on the 3 GiB host —
 honest workaround, unchanged behavior on 4+ GiB hosts). **S3 snapshot
-NOT taken:** sandbox reset wiped ~/.config/ios-rust/s3.env — vault is
-stale at ≤ 1f9ec59 until credentials are re-posted.
+TAKEN at session closeout** (390 files + full-history bundle →
+ios-research-vault; the vault's stale-at-1f9ec59 gap is closed).
 
 1. Model `apple-aic` v1 (devices crate has a stub): event reg, IPI regs,
    pending-set/clear, mask; wire to `vm-core::irq::IrqController`.

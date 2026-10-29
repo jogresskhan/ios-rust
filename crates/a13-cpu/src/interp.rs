@@ -645,6 +645,22 @@ impl Interpreter {
                 if self.data_stores.len() < 256 {
                     self.data_stores.push_back((self.pc, va, val));
                 }
+                // M4-c Fix #1 (tools/re/notes/m4-text-zeroing-re.md): the
+                // first cpu_stack_alloc fingerprint IS cpu_data_init's own
+                // intstack_top write (measured pc=0x7b80844 → [0x9a4afc0]=
+                // 0x98e4658) — at that moment the RE-validated discovery
+                // scan can find cpu_data[0] from the guest's own bytes.
+                // Seed TPIDR_EL1 with the discovered KVA ONLY while the
+                // kernel has not written TPIDR itself (never overwrite a
+                // guest-written value). xnu leaves TPIDR=0 between
+                // cpu_data_init and its percpu switch, and the panic path
+                // derefs [tpidr+0x4f0] in that window — the exact 21,270-
+                // cycle storm origin.
+                if self.sys.tpidr_el1 == 0 && self.cpu_data0_addr.is_none() {
+                    if let Some(base_pa) = self.discover_cpu_data0() {
+                        self.sys.tpidr_el1 = base_pa.wrapping_add(self.kva_base);
+                    }
+                }
             }
             // M4-b: 48-bit-truncated kernel-VA poison probe (bits 63:48
             // zeroed, 47:32 == 0xFFF0 — impossible as a canonical VA).
@@ -4564,6 +4580,13 @@ mod tests {
             let mut m = self.0.lock().unwrap();
             m[base..base + code.len()].copy_from_slice(code);
         }
+        fn poke64(&self, addr: u64, val: u64) {
+            let mut m = self.0.lock().unwrap();
+            let off = addr as usize;
+            for i in 0..8 {
+                m[off + i] = ((val >> (i * 8)) & 0xFF) as u8;
+            }
+        }
     }
     impl MemAccess for FakeRam {
         fn load(&mut self, addr: u64, size: u8) -> u64 {
@@ -4587,6 +4610,47 @@ mod tests {
         fn fetch32(&mut self, addr: u64) -> u32 {
             self.load(addr, 4) as u32
         }
+    }
+
+    /// M4-c Fix #1 golden: the cpu_stack_alloc fingerprint store — the
+    /// guest's OWN intstack_top write (measured pc=0x7b80844 →
+    /// [0x9a4afc0]=0x98e4658) — triggers the RE-validated cpu_data[0]
+    /// discovery and seeds TPIDR_EL1 with the guest-built KVA, so the panic
+    /// path's `ldr [tpidr,#0x4f0]` deref resolves instead of opening the
+    /// 21,270-cycle exception storm (text-zeroing RE §fix-1).
+    #[test]
+    fn cpu_data0_fingerprint_seeds_tpidr() {
+        let ram = FakeRam::new(0x4000);
+        // cpu_data[0] candidate at PA 0x1000: intstack_top @+0x4f8 holds a
+        // stack-range kernel VA (the discovery filter), depth @+0x500 small.
+        ram.poke64(0x1000 + 0x4f8, 0xFFFF_FFF0_098E_4658);
+        ram.poke64(0x1000 + 0x500, 0);
+        let mut cpu = Interpreter::new(Box::new(ram));
+        cpu.cpu_data_scan = Some((0x1000, 0x2000));
+        cpu.kva_base = 0x1000; // test identity: KVA = PA + 0x1000
+        assert_eq!(cpu.sys.tpidr_el1, 0, "pre-seed: kernel has not set TPIDR");
+        // The fingerprint store: va = base+0x4f8 KVA inside the __DATA
+        // window, val = the stack VA. (MMU off → PA passthrough; the store
+        // itself lands out of FakeRam range and is dropped — the trigger is
+        // what matters.)
+        let va = 0xFFFF_FFF0_09A4_AFC0;
+        cpu.st(va, 8, 0xFFFF_FFF0_098E_4658).expect("store ok");
+        assert_eq!(cpu.data_store_count, 1, "fingerprint captured");
+        assert_eq!(
+            cpu.cpu_data0_addr,
+            Some(0x1000),
+            "scan found the guest-written struct"
+        );
+        assert_eq!(
+            cpu.sys.tpidr_el1,
+            0x2000,
+            "TPIDR_EL1 seeded with discovered KVA (PA + kva_base)"
+        );
+        // A second fingerprint store must NOT re-scan or re-seed: the
+        // kernel's own percpu switch stays the only later writer.
+        cpu.st(va, 8, 0xFFFF_FFF0_098E_4658).expect("store ok 2");
+        assert_eq!(cpu.sys.tpidr_el1, 0x2000, "seed is one-shot");
+        assert_eq!(cpu.cpu_data0_addr, Some(0x1000));
     }
 
     // Hand-assembled program:

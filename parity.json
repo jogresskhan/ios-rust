@@ -3,7 +3,7 @@
  "target_soc": "Apple T8030 (A13 Bionic)",
  "machine": "apple-t8030",
  "cpu": "apple-a13 (Lightning x2 + Thunder x4, ARMv8.4-A, AArch64-only)",
- "generated": "2026-10-30 (session I: TPIDR seed + undefined-vectoring + bugs #25/#26; boot-first 8,194,993 insns, panic-free; 403 tests 0 failed; S3 snapshot blocked \u2014 s3.env lost in sandbox reset #4)",
+ "generated": "2026-10-30 (session I: TPIDR seed + undefined-vectoring + bugs #25/#26; boot-first 8,194,993 insns, panic-free; 403 tests 0 failed; S3 snapshot taken at closeout: 390 files + full-history bundle \u2192 ios-research-vault)",
  "rubric": {
   "100": "proven by CI/test artifact",
   "90": "implemented + verified",

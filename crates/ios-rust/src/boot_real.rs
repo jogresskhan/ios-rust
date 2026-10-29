@@ -62,6 +62,22 @@ const LINK_BASE: u64 = 0xFFFF_FFF0_0700_4000; // kernel __TEXT link VA
 /// which only lands correctly if the blob is INSIDE [end_kern,
 /// topOfKernelData). So: kernel image → page-aligned end_kern → DT blob →
 /// boot_args page → topOfKernelData = the page after boot_args.
+///
+/// REAL-DATA BUG #25 (tools/re/notes/m4-dt-rebase-re.md): end_kern is NOT
+/// round_page(file bytes) — the kernel computes it from its own VA image
+/// span: `end_kern = round_page(getlastaddr())` = round_page(max
+/// (vmaddr+vmsize)), writer `str` @0x7b83758 into [0x7702568], measured
+/// value 0xFFFFFFF009C60000 (0xB3000 above the file-backed end 0x9BAD000
+/// KVA). Staging the DT at page(file-end) put the blob BELOW end_kern, so
+/// arm_vm_physmap_init built tail entry e[DT].len = phystokv(top)−end_kern
+/// = −0x7C000 (wraps 0xFFFFFFFFFFF84000) and the SecureDTIsLockedDown==
+/// false rebase (PE_slide_devicetree, site 0x7b83f54) slid the DT head onto
+/// e[4].va−0xB3000 — the __PRELINK_INFO window — so SecureDT parsed non-DT
+/// bytes and panicked "Device tree pointer outside of device tree region"
+/// (the 21,270-cycle exception storm followed, zeroing 24 MB of image).
+/// Fix: stage at the VA-span end under the bootstrap identity
+/// PA = VA − LINK_BASE + LOAD_PA ⇒ dt_pa 0x803C60000, e[DT].len positive,
+/// head' = deviceTreeP = 0xFFFFFFF009C60000, rebase lands on the real blob.
 struct StagedLayout {
     /// PA the kernel image is loaded at (= LOAD_PA).
     load_pa: u64,
@@ -78,9 +94,18 @@ struct StagedLayout {
 }
 
 impl StagedLayout {
-    fn compute(image_bytes: usize, dt_bytes: usize) -> StagedLayout {
-        let page = |x: u64| (x + 0xFFF) & !0xFFF;
-        let end_kern_pa = page(LOAD_PA + image_bytes as u64);
+    /// `va_image_end` = max(vmaddr+vmsize) over the kernel's LC_SEGMENT_64s
+    /// (what the kernel's getlastaddr() returns); `image_bytes` keeps the
+    /// floor so a hypothetical file-backed tail can never be overwritten.
+    /// ALL rounding is 16K: ARM64 xnu runs ARM_PGSHIFT=14, so the kernel's
+    /// `round_page(getlastaddr())` is a 16K round — measured end_kern
+    /// 0xFFFFFFF009C60000 = round16K(0x9C5C488); a 4K round (0x9C5D000)
+    /// would stage the DT BELOW end_kern again (bug #25 re-spawned) and
+    /// leaves the physmap tail entry un-pageable (len not a 16K multiple).
+    fn compute(image_bytes: usize, va_image_end: u64, dt_bytes: usize) -> StagedLayout {
+        let page = |x: u64| (x + 0x3FFF) & !0x3FFF;
+        let kern_end_va = page(va_image_end.max(LINK_BASE + image_bytes as u64));
+        let end_kern_pa = LOAD_PA + (kern_end_va - LINK_BASE);
         let dt_pa = end_kern_pa;
         let ba_pa = page(dt_pa + dt_bytes as u64);
         let top_of_kernel_data = page(ba_pa + 0x2E0);
@@ -423,7 +448,14 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
     // Staging layout computed from the REAL sizes (BUG #22 — see
     // StagedLayout): image → end_kern → DT blob → boot_args page →
     // topOfKernelData.
-    let layout = StagedLayout::compute(img.len(), dt_blob.len());
+    // REAL-DATA BUG #25: end_kern from the kernel's own VA span, not the
+    // file size (see StagedLayout::compute doc).
+    let va_image_end = segs
+        .iter()
+        .map(|s| s.1 + s.2)
+        .max()
+        .unwrap_or(LINK_BASE + img.len() as u64);
+    let layout = StagedLayout::compute(img.len(), va_image_end, dt_blob.len());
     println!(
         "[stage] end_kern {:#x} · DT @ {:#x} ({} B, bootstrap-KVA {:#x}) · boot_args @ {:#x} · topOfKernelData {:#x}",
         layout.end_kern_pa,
@@ -901,4 +933,42 @@ pub fn print_report(r: &BootRealReport) {
         if !r.serial.is_empty() { "kernel bytes on the wire" } else { "no kernel output yet" }
     );
     println!("  stop: {stop} · clean: {clean}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// REAL-DATA BUG #25 golden, pinned to the REAL 18C66 n104ap numbers:
+    /// file 45,778,056 B; VA span end (getlastaddr) = 0xFFFFFFF009C5C488
+    /// (round_page → 0xFFFFFFF009C60000); DT blob 0x35C2C B. The old
+    /// file-size staging gave dt_pa 0x803BAD000 — BELOW the kernel's own
+    /// end_kern ⇒ e[DT].len wrapped negative ⇒ DT head slid onto
+    /// __PRELINK_INFO ⇒ the "Device tree pointer outside of device tree
+    /// region" panic + 21,270-cycle exception storm (24 MB zeroed).
+    #[test]
+    fn staged_layout_uses_va_span_end_kern() {
+        const IMG: usize = 45_778_056;
+        const VA_END: u64 = 0xFFFF_FFF0_09C5_C488; // __LINKEDIT end
+        const DT: usize = 0x35C2C; // 220,204 B real ADT
+        let l = StagedLayout::compute(IMG, VA_END, DT);
+        // end_kern_va = page(0xFFFFFFF009C5C488) = 0xFFFFFFF009C60000;
+        // PA = VA − LINK_BASE + LOAD_PA.
+        assert_eq!(l.end_kern_pa, 0x8_03C6_0000, "end_kern must follow the kernel's own VA span (bug #25)");
+        assert_eq!(l.dt_pa, 0x8_03C6_0000, "DT blob stages AT end_kern");
+        // e[DT].len = top − end_kern must be POSITIVE and 16K-multipled
+        // (old layout: −0x7C000 wrapped).
+        let e_dt_len = l.top_of_kernel_data - l.end_kern_pa;
+        assert!(e_dt_len > DT as u64, "physmap tail entry must cover the blob: len={e_dt_len:#x}");
+        assert_eq!(e_dt_len & 0x3FFF, 0, "physmap len must be a whole 16K page");
+        assert_eq!(l.top_of_kernel_data & 0x3FFF, 0, "topOfKernelData 16K-aligned");
+        // deviceTreeP (bootstrap KVA) = 0xFFFFFFF009C60000, the value the
+        // rebase must re-derive (head' = e[DT].va, no wrap).
+        assert_eq!(l.dt_va(), 0xFFFF_FFF0_09C6_0000);
+        // Image must not be clobbered: file end below end_kern.
+        assert!(LOAD_PA + IMG as u64 <= l.end_kern_pa);
+        // Old-behavior regression guard: the file-size round-up alone
+        // (0x803BAD000) must NOT be the staged base anymore.
+        assert_ne!(l.dt_pa, (LOAD_PA + IMG as u64 + 0xFFF) & !0xFFF);
+    }
 }

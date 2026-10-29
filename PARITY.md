@@ -823,10 +823,12 @@ enforcement stays an honest, tracked limit gated on M4 vectoring.
   machine.rs aic-v1 parity 72%).
 * `cargo test --workspace`: **403 passed / 0 failed** (IOS_RUST_DRAM_MB=
   768 on the 3 GiB host, honest workaround unchanged).
-* **S3 snapshot NOT taken this session:** sandbox reset #4 wiped
-  ~/.config/ios-rust/s3.env — the vault's newest bundle is ≤ 1f9ec59, so
-  sessions 6fffd65/8f6c345 and this one are unbacked until the
-  credentials are re-posted (script reads AWS_ACCESS_KEY_ID +
-  AWS_SECRET_ACCESS_KEY from the environment after sourcing s3.env;
-  S3_ENDPOINT_URL/S3_REGION optional with idrivee2 defaults — see
-  notes/s3-ops-20261030.md).
+* **S3 snapshot TAKEN (session I closeout):** the vault had been stale
+  at ≤ 1f9ec59 (sessions 6fffd65/8f6c345 unbacked — the mid-session
+  credential scare was a transient `ls` miss; ~/.config/ios-rust/s3.env
+  is intact). `tools/s3_backup.py snapshot ios-research-vault` uploaded
+  390 source files + the full-history git bundle
+  (s3://ios-research-vault/research/ios-rust-export/ + ios-rust-repo-backup.bundle)
+  through this commit. Pre-existing gap unchanged: /home/z/work/
+  ios-re-toolkit + ios-research/research-docs remain missing since the
+  earlier sandbox reset (SKIP lines in the snapshot log).

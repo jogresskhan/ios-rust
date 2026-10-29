@@ -1,6 +1,26 @@
 //! Flat physical bus — QEMU's sysbus equivalent for the T8030 map.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use crate::{Device, DmaDevice};
+
+/// Process-wide mirrors of the newest `Bus`'s unmapped-access counters.
+/// The boot harness moves its `Bus` into the CPU's `MemAccess` box, so the
+/// counters are read post-run through these accessors; `Bus::new` resets
+/// them (one live machine per boot run — honest for the harness, harmless
+/// for tests that never assert on them).
+static UNMAPPED_READS: AtomicU64 = AtomicU64::new(0);
+static UNMAPPED_WRITES: AtomicU64 = AtomicU64::new(0);
+
+/// Unmapped reads (silent-zero) seen by the newest `Bus` since its creation.
+pub fn unmapped_reads() -> u64 {
+    UNMAPPED_READS.load(Ordering::Relaxed)
+}
+
+/// Unmapped writes (dropped) seen by the newest `Bus` since its creation.
+pub fn unmapped_writes() -> u64 {
+    UNMAPPED_WRITES.load(Ordering::Relaxed)
+}
 
 struct Region {
     base: u64,
@@ -20,6 +40,8 @@ pub struct Bus {
 
 impl Bus {
     pub fn new() -> Self {
+        UNMAPPED_READS.store(0, Ordering::Relaxed);
+        UNMAPPED_WRITES.store(0, Ordering::Relaxed);
         Bus {
             regions: Vec::new(),
             unmapped_read_zeros: 0,
@@ -48,6 +70,7 @@ impl Bus {
             }
             None => {
                 self.unmapped_reads += 1;
+                UNMAPPED_READS.fetch_add(1, Ordering::Relaxed);
                 self.unmapped_read_zeros
             }
         }
@@ -62,6 +85,7 @@ impl Bus {
             }
             None => {
                 self.unmapped_writes += 1;
+                UNMAPPED_WRITES.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -84,6 +108,7 @@ impl Bus {
             }
             None => {
                 self.unmapped_reads += 1;
+                UNMAPPED_READS.fetch_add(1, Ordering::Relaxed);
                 buf.fill(0);
             }
         }
@@ -103,6 +128,7 @@ impl Bus {
             }
             None => {
                 self.unmapped_writes += 1;
+                UNMAPPED_WRITES.fetch_add(1, Ordering::Relaxed);
             }
         }
     }

@@ -70,6 +70,26 @@ pub struct BootRealReport {
     pub mmu_walks: u64,
     pub mmu_tlb_hits: u64,
     pub mmu_faults: u64,
+    /// THE M3 acceptance metric: insns retired with translated
+    /// fetch/load/store (executed − mmu_live_from). None = MMU never armed.
+    pub mmu_live_insns: Option<u64>,
+    /// Translated accesses served (walks + TLB hits).
+    pub mmu_accesses: u64,
+    /// Per-kind walk-fault tally [fetch, load, store] + leaf histogram.
+    pub mmu_fault_kinds: [u64; 3],
+    pub mmu_leaf_levels: [u64; 4],
+    /// MAIR attribute measurement (M3 bullet 1, recorded not enforced).
+    pub attr_device_pages: u64,
+    pub attr_normal_pages: u64,
+    pub device_on_ram: u64,
+    pub normal_on_mmio: u64,
+    /// Bus silent-zero reads / dropped writes (unmapped MMIO) — surfaced
+    /// because a wrong-but-alive kernel path is the worst failure class.
+    pub bus_unmapped_reads: u64,
+    pub bus_unmapped_writes: u64,
+    /// Synthesized ESR_EL1/FAR_EL1 at the terminal stop (0/0 if none).
+    pub esr_el1: u64,
+    pub far_el1: u64,
     pub unknown_sysreg_reads: u64,
     pub unknown_sysreg_writes: u64,
     pub unknown_sysreg_list: Vec<String>,
@@ -242,6 +262,11 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
     );
 
     // ---- 5) execute the real kernel ----
+    // Attr-misroute tallies need the DRAM window END: DRAM lives at
+    // DRAM_BASE (0x8_0000_0000 on T8030) .. DRAM_BASE + mem_size — NOT at
+    // [0, mem_size); the first run mis-tallied every kernel physmap PA as
+    // normal→MMIO because ram_top was the size, not the window end.
+    cpu.mmu.ram_top = apple_soc::t8030::DRAM_BASE + mem_size;
     let res = cpu.run(InterpBudget {
         max_insn,
         // ~25 MIPS model (40 ns/insn) + headroom — the ns budget must never
@@ -279,6 +304,20 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
         mmu_walks: cpu.mmu.walks,
         mmu_tlb_hits: cpu.mmu.tlb_hits,
         mmu_faults: cpu.mmu.faults,
+        mmu_live_insns: res
+            .mmu_live_from
+            .map(|from| res.executed.saturating_sub(from)),
+        mmu_accesses: cpu.mmu.walks + cpu.mmu.tlb_hits,
+        mmu_fault_kinds: cpu.mmu.fault_kinds,
+        mmu_leaf_levels: cpu.mmu.leaf_at_level,
+        attr_device_pages: cpu.mmu.attr_device_pages,
+        attr_normal_pages: cpu.mmu.attr_normal_pages,
+        device_on_ram: cpu.mmu.device_on_ram,
+        normal_on_mmio: cpu.mmu.normal_on_mmio,
+        bus_unmapped_reads: vm_core::bus::unmapped_reads(),
+        bus_unmapped_writes: vm_core::bus::unmapped_writes(),
+        esr_el1: cpu.sys.esr_el1,
+        far_el1: cpu.sys.far_el1,
         unknown_sysreg_reads: cpu.unknown_sysreg_reads,
         unknown_sysreg_writes: cpu.unknown_sysreg_writes,
         unknown_sysreg_list,
@@ -330,11 +369,57 @@ pub fn print_report(r: &BootRealReport) {
         other => format!("{other:?}"),
     };
     println!();
-    println!("real-kernel stop: {} after {} insns", stop, r.res.executed);
     println!(
-        "MMU: {} · walks {} · tlb hits {} · faults {}",
-        r.mmu_config, r.mmu_walks, r.mmu_tlb_hits, r.mmu_faults
+        "real-kernel stop: {} after {} insns",
+        stop, r.res.executed
     );
+    println!(
+        "MMU: {} · walks {} · tlb hits {} · faults {} (fetch {} / load {} / store {}) · leafs L0 {} L1 {} L2 {} L3 {}",
+        r.mmu_config,
+        r.mmu_walks,
+        r.mmu_tlb_hits,
+        r.mmu_faults,
+        r.mmu_fault_kinds[0],
+        r.mmu_fault_kinds[1],
+        r.mmu_fault_kinds[2],
+        r.mmu_leaf_levels[0],
+        r.mmu_leaf_levels[1],
+        r.mmu_leaf_levels[2],
+        r.mmu_leaf_levels[3]
+    );
+    match r.mmu_live_insns {
+        Some(live) => println!(
+            "MMU live: {} of {} insns translated (accesses {}, hit-rate {:.1}%)",
+            live,
+            r.res.executed,
+            r.mmu_accesses,
+            if r.mmu_accesses > 0 {
+                r.mmu_tlb_hits as f64 * 100.0 / r.mmu_accesses as f64
+            } else {
+                0.0
+            }
+        ),
+        None => println!("MMU live: never armed"),
+    }
+    println!(
+        "attrs (MAIR, recorded not enforced): device pages {} / normal pages {} · \
+         misroute device→RAM {} · normal→MMIO {}",
+        r.attr_device_pages, r.attr_normal_pages, r.device_on_ram, r.normal_on_mmio
+    );
+    println!(
+        "bus unmapped (silent-zero reads / dropped writes): {} / {}",
+        r.bus_unmapped_reads, r.bus_unmapped_writes
+    );
+    if r.esr_el1 != 0 || r.far_el1 != 0 {
+        println!(
+            "synthesized at stop: FAR_EL1 = {:#x} · ESR_EL1 = {:#x} (EC {:#05b} · WnR {} · DFSC {:#04b})",
+            r.far_el1,
+            r.esr_el1,
+            (r.esr_el1 >> 26) & 0x3F,
+            (r.esr_el1 >> 6) & 1,
+            r.esr_el1 & 0x3F
+        );
+    }
     println!(
         "unknown sysregs: {} reads / {} writes{}",
         r.unknown_sysreg_reads,
@@ -390,6 +475,17 @@ pub fn print_report(r: &BootRealReport) {
         "  {} MMU: {} walk(s) through the kernel's own tables",
         if r.mmu_walks > 0 { "✅" } else { "— (never armed)" },
         r.mmu_walks
+    );
+    println!(
+        "  {} M3 gate: MMU live for {} insns (acceptance ≥ 1,000,000, translated fetch/load/store)",
+        match r.mmu_live_insns {
+            Some(live) if live >= 1_000_000 => "✅",
+            Some(_) => "❌",
+            None => "— (never armed)",
+        },
+        r.mmu_live_insns
+            .map(|l| l.to_string())
+            .unwrap_or_else(|| "0".to_string())
     );
     println!(
         "  {} UART banner: {}",

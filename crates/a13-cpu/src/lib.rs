@@ -74,6 +74,10 @@ pub enum StopReason {
 pub struct RunResult {
     pub stop: StopReason,
     pub executed: u64,
+    /// Insn index at the SCTLR.M 0→1 arming edge. `mmu_live_insns =
+    /// executed − mmu_live_from` is THE M3 acceptance metric (None = MMU
+    /// never armed during the run).
+    pub mmu_live_from: Option<u64>,
 }
 
 impl RunResult {

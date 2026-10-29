@@ -614,3 +614,79 @@ empirical layout validation), notes trio
 (`m2-chained-fixups-census.md`, `m3-mmu-groundwork.md`,
 `s3-vault-manifest.md`). Vault: `s3://ios-research-vault/INDEX.md` now at
 the bucket root for instant discovery.
+
+### Layer 2.11e — session G: M3 gate cleared the honest way (walker goldens → bug #19 → measured 8.11M MMU-live insns)
+
+**2026-10-30, Job 482743 work block.** The first open milestone was M3
+(MMU/TLB). Session F had already wired a real 4K/16K stage-1 walker; the
+audit (task 2-b, `tools/re/reports/m3_mmu_audit.md`) ranked 9 gaps and
+provided the minimal work plan. Session G executed steps 1–5 of that plan
+plus the honesty cleanup:
+
+**REAL-DATA BUG #19 — TTBR masked to granule alignment truncates
+truncated start tables.** The walker computed the start-level table base
+as `ttbr & !page_mask & 0xFFFF_FFFF_F000`. Per DDI0487 the START-level
+table may be truncated (xnu's 8-entry L1' bootstrap table is exactly
+that), needing only 8-byte alignment; granule-masking silently walked
+table 0 for any legitimately-placed truncated table. Found by the NEW
+walker goldens (16K L1-start shape with L1' at 0x2000), NOT by the real
+run — the kernel's tables happen to be granule-aligned, so the measured
+boot was never affected (insns retired byte-identical before/after:
+8,135,842). Descriptor-encoded next-level table addresses KEEP the
+granule mask (their low bits are reserved by the encoding — arch-required
+alignment for full tables). The bug class the audit predicted (G6: "zero
+walker unit tests — any refactor can regress the walker unguarded")
+caught itself one session later.
+
+**M3 acceptance, measured** (`boot-first fixtures /tmp/bootfirst`,
+debug build, IOS_RUST_DRAM_MB=1024, log `/tmp/bootfirst-m3.log`):
+guest writes TCR/TTBR/MAIR (all consumed), flips SCTLR.M at insn
+25,033, and **8,110,809 of 8,135,842 retired insns run with translated
+fetch/load/store** (gate ≥ 1,000,000 — CLEARED). 460 walks / 9,125,225
+TLB hits / hit-rate 100.0% / 1 walk fault (load — the known DT stop).
+Leaf histogram L0 0 · L1 0 · **L2 459** · L3 0 — every bootstrap
+translation terminates at an L2 32 MiB block descriptor, exactly the
+start.s shape. TCR ground truth now live in the report:
+`granule 16K t0sz 25 t1sz 25 ttbr0 0x801704000 ttbr1 0x801708000
+tbi0 1 tbi1 0` — matches the statically-extracted
+0x0008_0022_6519_A519.
+
+**New instrumentation (report-only, zero behavior change):**
+`mmu_live_from` captured at the SCTLR.M 0→1 edge → `MMU live: N of M
+insns` line + the M3 verdict bullet in `print_report`; per-kind walk
+fault tally (fetch/load/store); leaf-level histogram; MAIR attr
+classification (device = byte bits[7:4]==0) with page + access counters
+and device→RAM / normal→MMIO misroute tallies (`ram_top` = DRAM window
+END — the first run mislabeled 459 kernel physmap PAs as normal→MMIO
+because ram_top was the SIZE, not window end; fixed same session, now
+0/0); `Bus` unmapped silent-zero reads / dropped writes surfaced (0/0 on
+the real run).
+
+**ESR/FAR synthesis (M4 groundwork, no vectoring yet):** every stage-1
+translation fault now records FAR_EL1 = fault VA and synthesizes ESR_EL1
+(EC 0b100100 instruction abort / 0b100101 data abort + WnR, IL=1, DFSC
+translation-fault 0b0001LL / address-size 0b010LL from the walk chain
+level). Live at the terminal stop: FAR_EL1=0x4, ESR_EL1=0x96000006
+(data abort, DFSC 0b110 = translation fault L2) — agrees with the dumped
+descriptor chain (L1 valid → L2 invalid). Guest-writable for M4
+vectoring tests.
+
+**Loud-fail hardening:** 64K granule / reserved TG encodings / TG0≠TG1
+mixes set `config_fault` and fault on first walk (64K previously
+silently walked as 4K); T0SZ/T1SZ=0 no longer remapped to 16; TBI0/TBI1
+decoded, masking flag-gated (`honor_tbi`, default off — identical to the
+measured baseline). **Honesty cleanup:** the dead `isa::SystemRegTable`
+(128 lines, zero callers) removed; its SCTLR reset-value doc-vs-code
+drift documented in place (live interpreter intentionally starts 0;
+changing it mid-campaign would perturb the measured baseline).
+
+**PARITY 2.11c reconciliation:** "MMU … 0 walk faults" was misleading —
+the terminal DT stop IS a walk fault (per-kind tally: fetch 0 / load 1 /
+store 0). The 2.11c run and the 2.11e run agree on 8,135,842 retired;
+the earlier PARITY/BOOT-PLAN number drift (8,136,610 vs 8,135,842) is
+resolved in favor of the re-measured 8,135,842.
+
+`cargo test --workspace`: **298 passed / 0 failed** (290 + 8 net new
+mmu goldens; report fields + isa cleanup produced no regressions).
+BOOT-PLAN M3 marked [x] with this run as evidence; permission/AF/XN
+enforcement stays an honest, tracked limit gated on M4 vectoring.

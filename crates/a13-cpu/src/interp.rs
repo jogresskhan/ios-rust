@@ -32,6 +32,11 @@ pub struct SystemRegs {
     pub vbar_el1: u64,
     pub elr_el1: u64,
     pub spsr_el1: u64,
+    /// Synthesized on stage-1 translation faults (EC/WnR/DFSC per
+    /// `mmu::synth_esr`); guest-writable for M4 vectoring tests.
+    pub esr_el1: u64,
+    /// Faulting virtual address of the most recent translation fault.
+    pub far_el1: u64,
     // ARMv8.3 PAC keys (modeled; real Apple schedule is not public)
     pub apiakeylo: u64,
     pub apiakeyhi: u64,
@@ -80,6 +85,10 @@ pub mod sysreg {
     pub const CNTVCT_EL0: u16 = enc(1, 3, 14, 0, 2);
     pub const ELR_EL1: u16 = enc(1, 0, 4, 0, 1);
     pub const SPSR_EL1: u16 = enc(1, 0, 4, 0, 0);
+    /// Exception syndrome register (op0=3 op1=0 CRn=5 CRm=0 op2=0).
+    pub const ESR_EL1: u16 = enc(1, 0, 5, 0, 0);
+    /// Fault address register (op0=3 op1=0 CRn=6 CRm=0 op2=0).
+    pub const FAR_EL1: u16 = enc(1, 0, 6, 0, 0);
     // --- early-boot window (verified against the real 18C66 start.s) ---
     pub const MAIR_EL1: u16 = enc(1, 0, 10, 2, 0);
     pub const MIDR_EL1: u16 = enc(1, 0, 0, 0, 0);
@@ -202,6 +211,9 @@ pub struct Interpreter {
     /// Post-mortem: last (pc, insn, new_sp) that changed SP — finds a lost
     /// stack pointer fast.
     pub last_sp_change: Option<(u64, u32, u64)>,
+    /// Insn index at the SCTLR.M 0→1 edge — THE M3 gate metric source:
+    /// `mmu_live_insns = executed − mmu_live_from` (RunResult carries it).
+    pub mmu_live_from: Option<u64>,
 }
 
 const N: u32 = 1 << 3;
@@ -268,6 +280,7 @@ impl Interpreter {
             trace_enabled: false,
             trace: std::collections::VecDeque::new(),
             last_sp_change: None,
+            mmu_live_from: None,
         }
     }
 
@@ -327,6 +340,8 @@ impl Interpreter {
     }
 
     /// Translate a VA through the stage-1 MMU (pass-through while off).
+    /// Every walk fault synthesizes FAR_EL1 = va and ESR_EL1 (EC/WnR/DFSC
+    /// per `mmu::synth_esr`) before surfacing the stop — no vectoring yet.
     #[inline]
     fn vaddr(&mut self, va: u64, kind: XlateKind) -> Result<u64, StopReason> {
         if !self.mmu.enabled {
@@ -334,11 +349,16 @@ impl Interpreter {
         }
         self.mmu
             .translate(&mut *self.mem, va, kind)
-            .map_err(|(v, detail)| StopReason::TranslationFault {
-                pc: self.pc,
-                va: v,
-                kind: kind.as_str(),
-                detail,
+            .map_err(|(v, detail)| {
+                let level = self.mmu.last_fault_chain.last().map(|c| c.0).unwrap_or(0);
+                self.sys.far_el1 = v;
+                self.sys.esr_el1 = crate::mmu::synth_esr(kind, detail, level);
+                StopReason::TranslationFault {
+                    pc: self.pc,
+                    va: v,
+                    kind: kind.as_str(),
+                    detail,
+                }
             })
     }
 
@@ -3735,6 +3755,8 @@ impl Interpreter {
             sysreg::VBAR_EL1 => self.sys.vbar_el1,
             sysreg::ELR_EL1 => self.sys.elr_el1,
             sysreg::SPSR_EL1 => self.sys.spsr_el1,
+            sysreg::ESR_EL1 => self.sys.esr_el1,
+            sysreg::FAR_EL1 => self.sys.far_el1,
             sysreg::GXF_CONFIG_EL1 => self.gxf_config,
             sysreg::GXF_STATUS_EL1 => self.gxf_status,
             sysreg::CNTVCT_EL0 => self.ns_budget_used / 40, // 40ns tick model
@@ -3815,6 +3837,12 @@ impl Interpreter {
         }
         match enc {
             sysreg::SCTLR_EL1 => {
+                // M3 gate metric: record the insn index at the 0→1 arming
+                // edge (before `set_enabled`, which flushes the TLB).
+                let arming = (v & 1 == 1) && !self.mmu.enabled;
+                if arming {
+                    self.mmu_live_from = Some(self.executed);
+                }
                 self.sys.sctlr_el1 = v;
                 self.mmu.set_enabled(v & 1 == 1);
             }
@@ -3835,6 +3863,8 @@ impl Interpreter {
             sysreg::VBAR_EL1 => self.sys.vbar_el1 = v,
             sysreg::ELR_EL1 => self.sys.elr_el1 = v,
             sysreg::SPSR_EL1 => self.sys.spsr_el1 = v,
+            sysreg::ESR_EL1 => self.sys.esr_el1 = v,
+            sysreg::FAR_EL1 => self.sys.far_el1 = v,
             sysreg::GXF_CONFIG_EL1 => self.gxf_config = v,
             sysreg::GXF_STATUS_EL1 => {}
             // PAC keys
@@ -3923,12 +3953,21 @@ impl CpuBackend for Interpreter {
     fn run(&mut self, budget: InterpBudget) -> RunResult {
         self.executed = 0;
         self.ns_budget_used = 0;
+        self.mmu_live_from = None;
         loop {
             if self.executed >= budget.max_insn {
-                return RunResult { stop: StopReason::Budget, executed: self.executed };
+                return RunResult {
+                    stop: StopReason::Budget,
+                    executed: self.executed,
+                    mmu_live_from: self.mmu_live_from,
+                };
             }
             if self.ns_budget_used >= budget.max_ns {
-                return RunResult { stop: StopReason::Budget, executed: self.executed };
+                return RunResult {
+                    stop: StopReason::Budget,
+                    executed: self.executed,
+                    mmu_live_from: self.mmu_live_from,
+                };
             }
             match self.step() {
                 Ok(()) => {
@@ -3937,10 +3976,18 @@ impl CpuBackend for Interpreter {
                 }
                 Err(StopReason::Halted) => {
                     self.executed += 1;
-                    return RunResult { stop: StopReason::Halted, executed: self.executed };
+                    return RunResult {
+                        stop: StopReason::Halted,
+                        executed: self.executed,
+                        mmu_live_from: self.mmu_live_from,
+                    };
                 }
                 Err(other) => {
-                    return RunResult { stop: other, executed: self.executed };
+                    return RunResult {
+                        stop: other,
+                        executed: self.executed,
+                        mmu_live_from: self.mmu_live_from,
+                    };
                 }
             }
         }

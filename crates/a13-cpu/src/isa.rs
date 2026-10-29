@@ -85,9 +85,10 @@
 //!
 //! ¹ Pragmatic addition: every real boot path emits `MOV Xd, Xn` (ORR
 //!   alias); without it the interpreter reports unknowns immediately.
-//! ² System registers routed through [`SystemRegTable`] and the GXF
-//!   register file ([`crate::gxf`]); unknown encodings are counted, never
-//!   silently ignored.
+//! ² System registers are routed through the live interpreter's
+//!   `interp::SystemRegs` + sysreg tables (the old `SystemRegTable` was
+//!   removed as dead code — audit G8, 2026-10-30); unknown encodings
+//!   are counted, never silently ignored.
 //! ³ `SVC` stops with [`crate::StopReason::Panic`] (kernel-panic hook);
 //!   HVC/SMC likewise (no EL2/EL3 exception model yet).
 //! ⁴ Pragmatic additions so tests and the machine crate get clean
@@ -97,8 +98,6 @@
 //! instruction classes** (enough for flat early boot / low-level bring-up
 //! where code is deliberately simple and AArch64-clean). Everything else
 //! stops loudly with the offending word instead of mis-executing.
-
-use core::fmt;
 
 // ---------------------------------------------------------------------------
 // System register encoding helpers (ARM DDI 0487 "MRS/MSR system register
@@ -144,10 +143,16 @@ pub const MPIDR_EL1: u16 = sysreg_enc(1, 0, 0, 0, 5);
 /// CurrentEL — current exception level (op0=3 op1=0 CRn=4 CRm=2 op2=2).
 pub const CURRENT_EL: u16 = sysreg_enc(1, 0, 4, 2, 2);
 
-/// Modeled SCTLR_EL1 reset value: RES1 bits 11/20/22/23 per the ARMv8 ARM
-/// (DDI 0487 SCTLR_EL1.RES1) — the value quoted for this port is
-/// `0x00C5_0800`. The MMU is off (M=0): the interpreter drives physical
-/// memory directly.
+/// Architectural SCTLR_EL1 reset value: RES1 bits 11/20/22/23 per the
+/// ARMv8 ARM (DDI 0487 SCTLR_EL1.RES1) — `0x00C5_0800`.
+///
+/// NOTE (honest ledger): the LIVE interpreter starts `SCTLR_EL1` at 0
+/// (`interp::SystemRegs::default`) — the kernel writes a full constant
+/// (0x3454_593D|0x4000_0000) before it matters, and changing the live
+/// reset mid-campaign would perturb the measured baseline for no
+/// measured gain. This constant documents the architectural reset for
+/// reference; the historical `SystemRegTable` that consumed it was
+/// removed as dead code (audit G8, 2026-10-30).
 pub const SCTLR_EL1_RESET: u64 = 0x00C5_0800;
 
 /// Modeled counter frequency: 25 MHz ⇒ CNTVCT advances one tick per 40 ns
@@ -156,101 +161,6 @@ pub const SCTLR_EL1_RESET: u64 = 0x00C5_0800;
 pub const CNTFRQ_HZ: u64 = 25_000_000;
 /// Nanoseconds per CNTVCT tick (1e9 / CNTFRQ_HZ).
 pub const NS_PER_TICK: u64 = 40;
-
-// ---------------------------------------------------------------------------
-// SystemRegTable
-// ---------------------------------------------------------------------------
-
-/// The small ARMv8 system-register table the interpreter models.
-///
-/// Plain RW storage for the EL1 MMU/control registers boot code touches
-/// first, plus read-only clock registers. Registers not present here are
-/// reported by the interpreter (`unknown_sysreg_reads` /
-/// `unknown_sysreg_writes`) — never silently dropped.
-///
-/// CNTVCT_EL0 is derived, not stored: it returns `now_ns / 40` where
-/// `now_ns` is the interpreter's monotonic instruction-cost counter.
-#[derive(Clone, Debug)]
-pub struct SystemRegTable {
-    pub sctlr_el1: u64,
-    pub ttbr0_el1: u64,
-    pub ttbr1_el1: u64,
-    pub tcr_el1: u64,
-    pub cpacr_el1: u64,
-    pub daif: u64,
-    /// Core index reported by MPIDR_EL1 (aff0); machine crate sets this.
-    pub mpidr_aff0: u64,
-}
-
-impl SystemRegTable {
-    pub fn new() -> Self {
-        SystemRegTable {
-            sctlr_el1: SCTLR_EL1_RESET,
-            ttbr0_el1: 0,
-            ttbr1_el1: 0,
-            tcr_el1: 0,
-            cpacr_el1: 0,
-            daif: 0b1111, // all masked at reset
-            mpidr_aff0: 0,
-        }
-    }
-
-    /// `true` if the encoding is one we model (readable and/or writable).
-    pub fn known(&self, sysreg: u16) -> bool {
-        matches!(
-            sysreg,
-            SCTLR_EL1
-                | TTBR0_EL1
-                | TTBR1_EL1
-                | TCR_EL1
-                | CPACR_EL1
-                | DAIF
-                | CNTVCT_EL0
-                | CNTFRQ_EL0
-                | MPIDR_EL1
-                | CURRENT_EL
-        )
-    }
-
-    /// System-register read; `None` = not modeled. `now_ns` feeds CNTVCT.
-    pub fn read(&self, sysreg: u16, now_ns: u64) -> Option<u64> {
-        match sysreg {
-            SCTLR_EL1 => Some(self.sctlr_el1),
-            TTBR0_EL1 => Some(self.ttbr0_el1),
-            TTBR1_EL1 => Some(self.ttbr1_el1),
-            TCR_EL1 => Some(self.tcr_el1),
-            CPACR_EL1 => Some(self.cpacr_el1),
-            DAIF => Some(self.daif),
-            CNTVCT_EL0 => Some(now_ns / NS_PER_TICK),
-            CNTFRQ_EL0 => Some(CNTFRQ_HZ),
-            MPIDR_EL1 => Some(self.mpidr_aff0 & 0xFF), // Bit31=0 (UP), others 0
-            CURRENT_EL => Some(1 << 2),                // EL1
-            _ => None,
-        }
-    }
-
-    /// System-register write; `false` = not modeled (caller counts it).
-    /// CNTVCT/CNTFRQ/MPIDR/CurrentEL are read-only per the ARM (writes
-    /// report as unmodeled).
-    pub fn write(&mut self, sysreg: u16, val: u64) -> bool {
-        match sysreg {
-            SCTLR_EL1 => self.sctlr_el1 = val,
-            TTBR0_EL1 => self.ttbr0_el1 = val,
-            TTBR1_EL1 => self.ttbr1_el1 = val,
-            TCR_EL1 => self.tcr_el1 = val,
-            CPACR_EL1 => self.cpacr_el1 = val,
-            DAIF => self.daif = val & 0x3C0,
-            _ => return false,
-        }
-        true
-    }
-}
-
-impl Default for SystemRegTable {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 // ---------------------------------------------------------------------------
 // VMSA_LOCK_EL1 bits (ported from Inferno target/arm/cpu.h) — used by the
@@ -290,17 +200,6 @@ pub fn sysreg_name(enc: u16) -> String {
     }
 }
 
-impl fmt::Display for SystemRegTable {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "sctlr_el1={:#x} ttbr0={:#x} ttbr1={:#x} tcr={:#x} cpacr={:#x} daif={:#x}",
-            self.sctlr_el1, self.ttbr0_el1, self.ttbr1_el1, self.tcr_el1, self.cpacr_el1,
-            self.daif
-        )
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,19 +221,5 @@ mod tests {
             let e = sysreg_enc(op0, op1, crn, crm, op2);
             assert_eq!(sysreg_fields(e), (op0, op1, crn, crm, op2));
         }
-    }
-
-    #[test]
-    fn table_rw_and_clock() {
-        let mut t = SystemRegTable::new();
-        assert_eq!(t.sctlr_el1, SCTLR_EL1_RESET);
-        assert!(t.write(TTBR0_EL1, 0xdead));
-        assert_eq!(t.read(TTBR0_EL1, 0), Some(0xdead));
-        // CNTVCT = now_ns / 40
-        assert_eq!(t.read(CNTVCT_EL0, 4000), Some(100));
-        assert_eq!(t.read(CNTFRQ_EL0, 0), Some(CNTFRQ_HZ));
-        // read-only regs report unmodeled writes
-        assert!(!t.write(CNTVCT_EL0, 5));
-        assert!(!t.known(0));
     }
 }

@@ -184,7 +184,62 @@ sysreg/DT trace to determine whether the 0x…7b83fa0 store site executes and
 what the gate returns in-emulator — i.e., why the kernel's DT globals are
 not populated on our path. Recorded in `tools/re/notes/m2-chained-fixups-census.md`.
 
-## M3 — MMU / TLB  [ ]
+## M3 — MMU / TLB  [x] (2026-10-30 session G: MMU live for 8,110,809 of 8,135,842 insns — gate ≥1,000,000 CLEARED)
+
+**Session G evidence (2026-10-30, debug build, IOS_RUST_DRAM_MB=1024,
+`boot-first fixtures /tmp/bootfirst`, log `/tmp/bootfirst-m3.log`):**
+the acceptance sentence is now measured, not asserted. The guest (real
+18C66 `start`) writes TCR/TTBR0/TTBR1/MAIR — all captured AND consumed —
+flips `SCTLR_EL1.M`, and execution continues translated:
+
+* **MMU live for 8,110,809 of 8,135,842 retired insns** (arming edge at
+  insn 25,033; gate ≥ 1,000,000 — CLEARED). Insns retired byte-identical
+  to the M2 session run (8,135,842) — zero behavioral drift from the M3
+  changes.
+* **460 walks / 9,125,225 TLB hits / hit-rate 100.0% / faults 1**
+  (load — the known DT stop). Leaf histogram **L0 0 · L1 0 · L2 459 ·
+  L3 0**: every bootstrap translation terminates at an L2 32 MiB block
+  descriptor, exactly the start.s shape.
+* **MAIR attr measurement (recorded, not enforced):** device pages 0 /
+  normal pages 459; misroute tallies device→RAM 0, normal→MMIO 0 (DRAM
+  window 0x8_0000_0000..+memSize; the first run's 459 false
+  normal→MMIO tallies were a ram_top semantics bug in the new report
+  code — size vs window end — fixed same session).
+* **ESR/FAR synthesis live at the stop:** FAR_EL1 = 0x4, ESR_EL1 =
+  0x96000006 (EC 0b100101 data abort, WnR 0, IL=1, DFSC 0b110 =
+  translation fault L2) — agrees with the dumped descriptor chain
+  (L1 @0x…704000 valid table → L2 @0x…70c000 invalid).
+* **Walker goldens (9 new mmu tests)**: 4K L3 page walk, 16K L1-start
+  truncated index + 32 MiB L2 block (the real kernel shape), invalid-desc
+  fault chain + per-kind tally, out-of-range VA, 64K/reserved/TG0≠TG1
+  TCR loud-fail, T0SZ=0 no-remap fault, attr device/normal + misroute,
+  flag-gated TBI masking, ESR shapes. **REAL-DATA BUG #19** found by
+  these goldens (not by the real run — the kernel's tables happen to be
+  granule-aligned): the walker masked TTBR to granule alignment, but the
+  START-level table may be truncated (xnu's 8-entry L1') and needs only
+  8-byte alignment — a truncated L1' at a non-granule-aligned base
+  silently walked table 0. Fixed; descriptor-encoded next-level table
+  addresses keep the granule mask (architecturally required).
+* **Loud-fail hardening:** 64K granule / reserved TG encodings /
+  TG0≠TG1 mixes now set `config_fault` and fault on first walk
+  (previously 64K silently walked as 4K); T0SZ/T1SZ=0 no longer remapped
+  to 16 (faults via the va-bits check); TBI0/TBI1 decoded (TCR shows
+  TBI0=1 on the real run), masking flag-gated `honor_tbi` (default off —
+  behavior identical to the measured baseline).
+* `cargo test --workspace`: **298 passed / 0 failed** (290 + 8 net new
+  goldens + report plumbing).
+
+**Honest limits carried forward (tracked, not hidden):** permission/AF/XN
+ENFORCEMENT is still absent (attrs recorded-not-enforced) — deliberately
+gated on M4 exception vectoring, because enforcement without vectoring
+just relocates the boot death into a terminal stop (audit
+`tools/re/reports/m3_mmu_audit.md` §8 step 6). TLB invalidation is
+wholesale (no ASID/VA-range targeting — correct, never stale, hit-rate
+collapses only under per-task ASID churn). Secure/EL2 stage-2, 52-bit PA,
+contiguous hints: fail loudly per module header. PAR/AT instructions
+absent (M4). PARITY 2.11c's "0 walk faults" wording is reconciled here:
+the terminal DT stop IS walk fault #1 (per-kind tally: fetch 0 / load 1 /
+store 0).
 
 **Progress (2026-10-29 session F, groundwork + first fix):** the M3 section
 text was stale — `crates/a13-cpu/src/mmu.rs` is already a real 4K/16K
@@ -202,13 +257,22 @@ xnu builds its own page tables during early boot; the interpreter must walk them
 1. `a13-cpu`: TTBR0/TTBR1_EL1, TCR_EL1 (TG0/TG1, T0SZ/T1SZ), 4 KiB + 16 KiB
    granule walks (L0→L3), AF/dbm/access-permission faults, attr indirection
    (MAIR: device-nGnRE vs normal — device attrs must hit the Bus, normal must
-   hit RAM cache).
+   hit RAM cache). **[session G: TTBR/TCR/MAIR captured+consumed, 4K/16K walks
+   golden-pinned, attr indirection measured; permission/AF enforcement
+   deliberately deferred to M4 (vectoring dependency) — honest limit above.]**
 2. Start with 2-stage-off (EL1 only), stage-1 translation on fetch+load+store.
-3. **Acceptance:** guest writes TTBR0/TCR (they are currently no-ops), sets
-   `SCTLR_EL1.M=1`, and execution CONTINUES with translated fetches; boot-first
-   retires ≥ 1,000,000 insns with the MMU live.
+   **[done — measured 8.11M translated insns.]**
+3. **Acceptance:** guest writes TTBR0/TCR, sets `SCTLR_EL1.M=1`, and
+   execution CONTINUES with translated fetches; boot-first retires
+   ≥ 1,000,000 insns with the MMU live. **[MEASURED 2026-10-30: MMU live
+   8,110,809 insns — CLEARED. The old "currently no-ops" parenthetical was
+   stale since session F and is corrected here.]**
 4. Tool: QEMU `-d trace:arm_ttbr_write` equivalents via `ios-re-toolkit` QEMU
    lane for ground truth on TCR values the real kernel writes.
+   **[ground truth obtained statically instead: TCR
+   0x0008_0022_6519_A519 read from `__DATA_CONST[0x77020c8]` (16K/16K,
+   T0SZ=T1SZ=25, TBI0=1, IPS=40-bit) and now surfaced live in the boot
+   report's MMU config line.]**
 
 ## M4 — IRQ / AIC / timers  [ ]
 

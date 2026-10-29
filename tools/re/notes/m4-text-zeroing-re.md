@@ -137,3 +137,33 @@ __TEXT censuses — reuse `/home/z/tmp-re/m4_sysreg_table.out` for those),
 `/tmp/m4b_sites_run.out` (the 0x81687a0/0x8168a1c/0x8168df8 per-cpu switch windows);
 live run `/tmp/bf-text-zero.log` (binary `/home/z/my-project/download/ios-rust/target/
 debug/ios-rust`, session-H build, zero drift: 10,921,780 insns / 21,270 aborts / same stop).
+
+## Session I addendum — the POST-#26 chain head (next block's target)
+
+Measured (IOS_RUST_WATCH=0x…7b8cd70, insn 8,181,649 — the run's FIRST abort):
+
+    [watch] insn=8181649 pc=0xfffffff007b8cd70 lr=…7b8cd2c x9=fffe00ee488b0058
+            x19=0 x21=fffe00ee488b0058 x22=…7744000 x24=…772478c x25=0x88 sp=…9b0fe70
+
+- aborting store: `str w19, [x9]` @0x…7b8cd70 — an array PUSH
+  (x9 = madd(x19, x25, x21); x19=0 → x9 = the ARRAY BASE = [x24+0x14]).
+- the array OBJECT sits at the STATIC address 0xfffffff00772478c;
+  stride x25=0x88.
+- shipped image bytes at [x24+0x14] (VA 0x…77247a0) = 0x0017fff007724458 —
+  a MANGLED-TOP-BITS kernel pointer (0xFFFFFFF007724458 class — the same
+  "48-bit" family as session H's 0x0000FFF008137198 = the panic call site).
+- RUNTIME value read = 0xfffe00ee488b0058 ≠ shipped ⇒ something WROTE it
+  during boot. NEXT PROBE (one run): IOS_RUST_WATCH_VA=0xfffffff0077247a0
+  (+PA alias auto-added) → the corrupting store's pc + value.
+- working hypothesis: __thread_starts / self-rebase fixup wrote a
+  wrong-section value (the shipped 0x0017… top bits suggest the image
+  ships fixup-encoded pointers, not plain ones — m2_fixup_census.md's
+  "kernel self-rebases via __thread_starts" is the machinery; its writer
+  for THIS slot is the question), or a PAC-keyed store path.
+
+Note: the array-push code (0x…7b8cd30-70) runs INSIDE the DT/registry
+lookup family (x1=0x…73ae00a/x20=0x…73adffc string literals — same page
+as the DT strings), i.e. the IOCatalogue/DT init reached deeper than
+every previous session. Progression this session: 8,135,842 → 8,149,172
+(#25) → 8,162,237 (87 flags) → 8,194,993 (#26) → first abort 8,181,649
+pre-loop; loop cut at 96 cycles by the guardrail.

@@ -4471,12 +4471,14 @@ impl CpuBackend for Interpreter {
                     if self.executed >= *hit + 1 {
                         *hit = self.executed;
                         eprintln!(
-                            "[watch] insn={} pc={:#x} lr={:x} x0={:x} x1={:x} x2={:x} x3={:x} x4={:x} x5={:x} x8={:x} x9={:x} x10={:x} x11={:x} x12={:x} x13={:x} x19={:x} x20={:x} x21={:x} x22={:x}",
+                            "[watch] insn={} pc={:#x} lr={:x} x0={:x} x1={:x} x2={:x} x3={:x} x4={:x} x5={:x} x8={:x} x9={:x} x10={:x} x11={:x} x12={:x} x13={:x} x19={:x} x20={:x} x21={:x} x22={:x} x23={:x} x24={:x} x25={:x} x26={:x} x27={:x} x28={:x} sp={:x}",
                             self.executed, self.pc, self.x[30],
                             self.x[0], self.x[1], self.x[2], self.x[3], self.x[4], self.x[5],
                             self.x[8], self.x[9], self.x[10], self.x[11],
                             self.x[12], self.x[13],
-                            self.x[19], self.x[20], self.x[21], self.x[22]
+                            self.x[19], self.x[20], self.x[21], self.x[22],
+                            self.x[23], self.x[24], self.x[25], self.x[26],
+                            self.x[27], self.x[28], self.sp
                         );
                     }
                 }

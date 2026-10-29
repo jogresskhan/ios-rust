@@ -494,3 +494,33 @@ STLUR ≈1k.
 Tooling added: `tools/re/macho/bootstop_probe.py` (segment-aware VA→file
 probe for boot-stop forensics), `kc dump` (decompressed Mach-O to disk),
 SP-change tracking + nzcv in the boot-real trace.
+
+**Session C second half (2026-10-29, three-same FP + unscaled AR):** the
+three-same FP family landed — 24 ops across fadd/fsub/fabd/faddp/fmul/
+fmulx/fdiv/fcmeq/fcmge/fcmgt/facge/facgt/fmax/fmin/fmaxnm/fminnm/fmaxp/
+fminp/fmaxnmp/fminnmp/fmla/fmls/frecps/frsqrts. The field map was pinned
+by keystone round-trips and is NOT the textbook layout: width = bit22
+(0=S-lanes, 1=D-lanes), opcode-pair half = bit23 (FADD/FSUB share opcode
+0x35 across bit23), bit10=1 keeps the crypto-3 siblings (bit10=0) out,
+element width ≠ bits[23:22] (fadd .2d = size bits 01, fsub .4s = 10).
+Integer three-same gained MLA/MLS (opcode 100101, U arm). FP exec is
+per-lane f32/f64 with IEEE maxNum/minNum NaN rules; pairwise ops fold
+pair(vn) then pair(vm). **REAL-DATA BUG #13:** BRAAZ/BLRAAZ (0xD6-space
+A-key Z-forms, ~428 words in xnu indirect tail calls) — the session-A PAC
+campaign pinned only the 0xD7 B-key arm; census masks
+(0xFFFFFC1F, 0xD61F_081F/0xD63F_081F) landed with goldens. **REAL-DATA
+BUG #14:** STLUR/LDAPUR/LDAPR (v8.1 unscaled release/acquire, ~1.1k words)
+— stlur/ldapur 0xFFEFFC00 arms, ldapr (W/X, NO imm9 field — bits 23:12 are
+a fixed pattern, size from bit30) mapped onto the LdSt9 Unscaled path
+(release/acquire ordering is a no-op in this single-threaded model).
+FCVTZS/FCVTZU fixed-point vector (opcode 11111 — real word 0x4F70FC00)
+added to VShiftImm. **Measured: decode 98.89% → 99.03%
+(7,889,208/7,966,342), exec probe 98.9% → 99.1%** (unknown 77,134, ~46k
+literal-pool runs). `cargo test --workspace`: 100 passed / 0 failed.
+boot-first re-run after the families landed: **9 insns retired, stop
+Halted** (unchanged — the M2 stop is the zeroed GOT entry, not ISA).
+Remaining honest gap to the 99.3% M1 acceptance: indexed-multiply family
+(bit10=0: smull/umlal/sqdmull/fmul/fmla/fcmla-by-element ≈4.5k words),
+SIMD ld/st multiple + register-offset ≈9.7k, scalar FP remainder
+(fcmp/fcsel/fmov-imm/scvtf-scalar ≈4.1k), EXT/DUP-gpr ≈3.4k,
+2-reg-misc narrowing (xtn/sqxtn/fcvtl/fcvtn/addp-scalar) ≈3k.

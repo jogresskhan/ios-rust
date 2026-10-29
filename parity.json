@@ -37,9 +37,9 @@
   },
   {
    "name": "a13-cpu decoder",
-   "pct": 98,
+   "pct": 99,
    "files": 3,
-   "note": "98.89% of real 18C66 __TEXT_EXEC.__text words decode (was 98.87%; session C: AdvSIMD shift-imm + modified-immediate 0x0F group landed, keystone-swept field rules)"
+   "note": "99.03% of real 18C66 __TEXT_EXEC.__text words decode (was 98.89%; session C second half: three-same FP 24 ops (keystone-pinned bit22=width/bit23=half layout), MLA/MLS, BRAAZ/BLRAAZ bug #13, STLUR/LDAPUR/LDAPR bug #14, FCVTZ fixed-point vector)"
   },
   {
    "name": "a13-cpu interpreter",

@@ -964,6 +964,23 @@ impl Interpreter {
                         }
                         V3Op::Umax => pair[l as usize].0.max(pair[l as usize].1) & mask,
                         V3Op::Mul => pair[l as usize].0.wrapping_mul(pair[l as usize].1) & mask,
+                        // session C: MLA/MLS — lane = a*b (+/- lane of Vd)
+                        V3Op::Mla => {
+                            let sh = l * eb * 8;
+                            let acc = (self.v.v[rd as usize] >> sh) & mask;
+                            pair[l as usize]
+                                .0
+                                .wrapping_mul(pair[l as usize].1)
+                                .wrapping_add(acc)
+                                & mask
+                        }
+                        V3Op::Mls => {
+                            let sh = l * eb * 8;
+                            let acc = (self.v.v[rd as usize] >> sh) & mask;
+                            acc.wrapping_sub(
+                                pair[l as usize].0.wrapping_mul(pair[l as usize].1),
+                            ) & mask
+                        }
                         // pairwise: lane l of the result folds elements
                         // 2l, 2l+1 of the SOURCE (per-lane pairing)
                         V3Op::Smaxp | V3Op::Umaxp | V3Op::Sminp | V3Op::Uminp => {
@@ -985,6 +1002,66 @@ impl Interpreter {
                     };
                     r |= out << sh;
                     let _ = lanes_h;
+                }
+                self.v.v[rd as usize] = r;
+            }
+            Insn::V3SameFp { rd, rn, rm, d, u, q, op } => {
+                self.group_exec[1] += 1;
+                // Three-same FP: per-lane f32 (d=false) or f64 (d=true).
+                // Pairwise ops (ADDP/MAXP/MINP/MAXNMP/MINNMP): result lanes
+                // = pair(vn) followed by pair(vm); .1d = the vn pair only.
+                use crate::decode::V3FpOp;
+                let pairwise = matches!(
+                    op,
+                    V3FpOp::Addp | V3FpOp::Maxp | V3FpOp::Minp | V3FpOp::Maxnmp | V3FpOp::Minnmp
+                );
+                let a = self.v.v[rn as usize];
+                let b = self.v.v[rm as usize];
+                let mut r: u128 = 0;
+                if d {
+                    if pairwise {
+                        let mut lane = |x: u64, y: u64, sh: u32, acc: f64, r: &mut u128| {
+                            let out = fp3_f64(op, f64::from_bits(x), f64::from_bits(y), acc);
+                            *r |= (out.to_bits() as u128) << sh;
+                        };
+                        // .2d: pair0 = vn[0] op vn[1]; pair1 = vm[0] op vm[1]
+                        let v0 = (a & u128::from(u64::MAX)) as u64;
+                        let v1 = ((a >> 64) & u128::from(u64::MAX)) as u64;
+                        let m0 = (b & u128::from(u64::MAX)) as u64;
+                        let m1 = ((b >> 64) & u128::from(u64::MAX)) as u64;
+                        lane(v0, v1, 0, 0.0, &mut r);
+                        if q {
+                            lane(m0, m1, 64, 0.0, &mut r);
+                        }
+                    } else {
+                        let n = if q { 2 } else { 1 };
+                        for i in 0..n {
+                            let x = ((a >> (64 * i)) & u128::from(u64::MAX)) as u64;
+                            let y = ((b >> (64 * i)) & u128::from(u64::MAX)) as u64;
+                            let out = fp3_f64(op, f64::from_bits(x), f64::from_bits(y), 0.0);
+                            r |= (out.to_bits() as u128) << (64 * i);
+                        }
+                    }
+                } else {
+                    let lanes = if q { 4 } else { 2 };
+                    for i in 0..lanes {
+                        let (x, y) = if pairwise {
+                            let half = i / (lanes / 2).max(1);
+                            let src = if half == 0 { a } else { b };
+                            let off = ((i % (lanes / 2).max(1)) * 2) as u32;
+                            (
+                                ((src >> (32 * off)) & u128::from(u32::MAX as u64)) as u32,
+                                ((src >> (32 * (off + 1))) & u128::from(u32::MAX as u64)) as u32,
+                            )
+                        } else {
+                            (
+                                ((a >> (32 * i)) & u128::from(u32::MAX as u64)) as u32,
+                                ((b >> (32 * i)) & u128::from(u32::MAX as u64)) as u32,
+                            )
+                        };
+                        let out = fp3_f32(op, f32::from_bits(x), f32::from_bits(y), 0.0);
+                        r |= (out.to_bits() as u128) << (32 * i);
+                    }
                 }
                 self.v.v[rd as usize] = r;
             }
@@ -1274,6 +1351,33 @@ impl Interpreter {
                                 _ => 16,
                             };
                             r |= ((bits as u128) & ((1u128 << wbits) - 1)) << sh;
+                        }
+                        self.v.v[rd as usize] = if q { r } else { r & 0xFFFF_FFFF_FFFF_FFFF };
+                    }
+                    // ---- fixed-point FP → int (FCVTZS/FCVTZU) ----
+                    VShiftOp::Fcvtz => {
+                        let eb = 1u64 << size;
+                        let total = if q { 16u64 } else { 8 };
+                        let lanes = (total / eb) as u8;
+                        let a = self.v.v[rn as usize];
+                        let mut r: u128 = 0;
+                        for l in 0..lanes {
+                            let sh = (l as u32) * lane_bits;
+                            let av = (a >> sh) & mask;
+                            // element FP width == lane width (S/D forms)
+                            let f = if size == 3 {
+                                f64::from_bits(av as u64)
+                            } else {
+                                f32::from_bits(av as u32) as f64
+                            };
+                            let scaled = f * (1u64 << shift) as f64;
+                            let int_val: i128 = if u {
+                                scaled.clamp(0.0, 9.223372036854776e18) as u64 as i128
+                            } else {
+                                scaled.clamp(-9.223372036854776e18, 9.223372036854776e18) as i64
+                                    as i128
+                            };
+                            r |= ((int_val as u128) & mask) << sh;
                         }
                         self.v.v[rd as usize] = if q { r } else { r & 0xFFFF_FFFF_FFFF_FFFF };
                     }
@@ -2631,5 +2735,166 @@ mod tests {
         cpu.set_reset_vector(0x100);
         let res = cpu.run(InterpBudget { max_insn: 10, max_ns: 1_000_000 });
         assert!(matches!(res.stop, StopReason::UnknownInsn { .. }));
+    }
+}
+
+/// Per-lane FP arithmetic for the three-same FP family (session C). The
+/// model targets xnu's FP usage: normal arithmetic, compares and pairwise
+/// reduce. FMAXNM/FMINNM implement the IEEE-754 maxNum/minNum NaN rule
+/// (a NaN operand yields the OTHER operand); FMAX/FMIN propagate NaN.
+/// FMULX: zero × inf yields +2.0 per the ARM pseudo-code special case.
+fn fp3_f32(op: crate::decode::V3FpOp, a: f32, b: f32, acc: f32) -> f32 {
+    use crate::decode::V3FpOp::*;
+    match op {
+        Add => a + b,
+        Sub => a - b,
+        Addp => a + b,
+        Abd => (a - b).abs(),
+        Mul => a * b,
+        Mulx => {
+            if (a == 0.0 && b.is_infinite()) || (b == 0.0 && a.is_infinite()) {
+                2.0
+            } else {
+                a * b
+            }
+        }
+        Div => a / b,
+        Cmeq => if a == b { f32::from_bits(u32::MAX) } else { 0.0 },
+        Cmge => if a >= b { f32::from_bits(u32::MAX) } else { 0.0 },
+        Cmgt => if a > b { f32::from_bits(u32::MAX) } else { 0.0 },
+        Acge => if a.abs() >= b.abs() { f32::from_bits(u32::MAX) } else { 0.0 },
+        Acgt => if a.abs() > b.abs() { f32::from_bits(u32::MAX) } else { 0.0 },
+        Max => {
+            if a.is_nan() || b.is_nan() {
+                f32::NAN
+            } else {
+                a.max(b)
+            }
+        }
+        Min => {
+            if a.is_nan() || b.is_nan() {
+                f32::NAN
+            } else {
+                a.min(b)
+            }
+        }
+        Maxp | Maxnmp => {
+            if a.is_nan() {
+                b
+            } else if b.is_nan() {
+                a
+            } else {
+                a.max(b)
+            }
+        }
+        Minp | Minnmp => {
+            if a.is_nan() {
+                b
+            } else if b.is_nan() {
+                a
+            } else {
+                a.min(b)
+            }
+        }
+        Maxnm => {
+            if a.is_nan() {
+                b
+            } else if b.is_nan() {
+                a
+            } else {
+                a.max(b)
+            }
+        }
+        Minnm => {
+            if a.is_nan() {
+                b
+            } else if b.is_nan() {
+                a
+            } else {
+                a.min(b)
+            }
+        }
+        Mla => a * b + acc,
+        Mls => acc - a * b,
+        Recps => 2.0 - a * b,
+        Rsqrts => (3.0 - a * b) / 2.0,
+    }
+}
+
+fn fp3_f64(op: crate::decode::V3FpOp, a: f64, b: f64, acc: f64) -> f64 {
+    use crate::decode::V3FpOp::*;
+    match op {
+        Add => a + b,
+        Sub => a - b,
+        Addp => a + b,
+        Abd => (a - b).abs(),
+        Mul => a * b,
+        Mulx => {
+            if (a == 0.0 && b.is_infinite()) || (b == 0.0 && a.is_infinite()) {
+                2.0
+            } else {
+                a * b
+            }
+        }
+        Div => a / b,
+        Cmeq => if a == b { f64::from_bits(u64::MAX) } else { 0.0 },
+        Cmge => if a >= b { f64::from_bits(u64::MAX) } else { 0.0 },
+        Cmgt => if a > b { f64::from_bits(u64::MAX) } else { 0.0 },
+        Acge => if a.abs() >= b.abs() { f64::from_bits(u64::MAX) } else { 0.0 },
+        Acgt => if a.abs() > b.abs() { f64::from_bits(u64::MAX) } else { 0.0 },
+        Max => {
+            if a.is_nan() || b.is_nan() {
+                f64::NAN
+            } else {
+                a.max(b)
+            }
+        }
+        Min => {
+            if a.is_nan() || b.is_nan() {
+                f64::NAN
+            } else {
+                a.min(b)
+            }
+        }
+        Maxp | Maxnmp => {
+            if a.is_nan() {
+                b
+            } else if b.is_nan() {
+                a
+            } else {
+                a.max(b)
+            }
+        }
+        Minp | Minnmp => {
+            if a.is_nan() {
+                b
+            } else if b.is_nan() {
+                a
+            } else {
+                a.min(b)
+            }
+        }
+        Maxnm => {
+            if a.is_nan() {
+                b
+            } else if b.is_nan() {
+                a
+            } else {
+                a.max(b)
+            }
+        }
+        Minnm => {
+            if a.is_nan() {
+                b
+            } else if b.is_nan() {
+                a
+            } else {
+                a.min(b)
+            }
+        }
+        Mla => a * b + acc,
+        Mls => acc - a * b,
+        Recps => 2.0 - a * b,
+        Rsqrts => (3.0 - a * b) / 2.0,
     }
 }

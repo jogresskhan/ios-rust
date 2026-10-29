@@ -19,26 +19,49 @@ evidence next to it). Update it at the END of every work block.
 
 ---
 
-## M1 — ISA closure: every instruction class decoded  [~] (98.89% decode / 98.9% exec)
+## M1 — ISA closure: every instruction class decoded  [~] (99.03% decode / 99.1% exec)
 
-**Progress (2026-10-29, session C — shift-imm + modified-immediate):** the
-0x0F group decoded+executed end to end: SSHR/USHR/SSRA/USRA/SRSHR/URSHR/
-SRSRA/URSRA/SHL/SLI/SRI/SQSHL/UQSHL/SQSHLU + narrowing (SHRN/RSHRN/SQSHRN/
-UQSHRN/SQSHRUN/SQRSHRN/UQRSHRN/SQRSHRUN) + widening (SSHLL/USHLL) +
-fixed-point (SCVTF/UCVTF vector) + MOVI/MVNI/ORR-imm/BIC-imm (cmode table
-capstone-verified) + FMOV vector immediate. **decode 98.87% → 98.89%**
-(7,878,033/7,966,342); exec probe 98.9%. Every field rule pinned by keystone
-sweeps (shift = (16<<size)−X right forms, X−(8<<size) left forms; SSRA=op2,
-RSHR=op4, SRSRA=op6 — NOT 1/2/3 as first guessed). Environment notes: the
-sandbox reset twice mid-session; the 18C66 IPSW constant in ipsw_range.py
-had drifted back to 14.0-beta once (re-fixed, CLI now matches README);
-guest DRAM is now IOS_RUST_DRAM_MB-overridable (sandbox has 3 GB, 1 GiB
-window verified end-to-end). Remaining buckets (hist, fresh):
-0x4e 11,497 · 0x4f-remainder 4,125 (indexed mul family: bit10=0, op4 ∉
-{C,D,E}) · 0x4c 3,785 · 0xbc 3,486 · 0x1e 2,988 · 0x6e 1,683 · 0x3c 1,466 ·
-0x0e 768 · 0x5e 583 · 0x7e 539 · 0xd9 460 · data/pools ≈52k. Next block:
-three-same FP (0x4e/0x6e/0x0e, biggest) + indexed mul (0x4f) + SIMD ld/st
-(0x4c/0x3c/0xbc) + scalar FP remainder (0x1e/0x5e/0x7e) + STLUR (0xd9).
+**Progress (2026-10-29, session C second half — three-same FP + unscaled
+AR):** three-same FP landed, 24 ops (fadd/fsub/fabd/faddp/fmul/fmulx/fdiv/
+fcmeq/fcmge/fcmgt/facge/facgt/fmax/fmin/fmaxnm/fminnm/fmaxp/fminp/
+fmaxnmp/fminnmp/fmla/fmls/frecps/frsqrts) — the field map is keystone-
+pinned and NOT the textbook layout: width = bit22, opcode-pair half =
+bit23, bit10=1 (crypto-3 is bit10=0). Integer three-same gained MLA/MLS
+(opcode 100101). **REAL-DATA BUG #13:** BRAAZ/BLRAAZ — the 0xD6-space
+A-key Z-forms (~428 words) the session-A PAC campaign missed; masks
+0xFFFFFC1F == 0xD61F_081F / 0xD63F_081F. **REAL-DATA BUG #14:**
+STLUR/LDAPUR/LDAPR (v8.1 unscaled release/acquire ≈1.1k words) mapped
+onto LdSt9 Unscaled (release/acquire = no-op here — honest); LDAPR has NO
+imm9 (bits 23:12 fixed pattern, size from bit30). FCVTZS/U fixed-point
+vector (opcode 11111; real 0x4F70FC00). **decode 98.89% → 99.03%
+(7,889,208/7,966,342), exec probe 98.9% → 99.1%**; `cargo test
+--workspace` 100 passed / 0 failed; boot-first after the families:
+9 insns retired, stop Halted (M2 stop = zeroed GOT entry, not ISA).
+Remaining buckets to the ≥99.3% acceptance (hist, fresh):
+
+| bucket | words | family | how |
+|---|---|---|---|
+| 0x4c+0xbc+0x3c+0xfc | ~9.7k | SIMD ld/st multiple + register-offset + LDR-literal | LdStRegOff V=1 + new LdStMult; masks from the full-space census |
+| 0x4f (rest) | ~3.5k | indexed-multiply (smull/umlal/sqdmull/fmul/fmla/fcmla-elem, bit10=0) | op4 map + L/M/H index; FIRST check the existing Vindexed (0xC,U=0) vs census sqdmulh collision |
+| 0x1e+0x5e+0x7e | ~4.1k | scalar FP remainder (fcmp/fcmpe, fcsel, fmov-imm, scvtf/ucvtf scalar) | op10 census windows 0x1E4/0x5E4/0x7E4 |
+| 0x4e+0x6e (rest) | ~3.4k | EXT, DUP-from-GPR | ext mask 0x9F600400/0x0E000000 (verify low bits); dup needs its real window (bits 15:10 = 000011) |
+| 0x0e+0x2e (rest) | ~2.5k | 2-reg-misc narrowing: xtn/sqxtn/uqxtn/sqxtun/fcvtl/fcvtn/addp-scalar/uaddlv | Rm=0 census rows |
+| data | ~52k | literal pools + ASCII (0xff/0x00/0x45/0xfe…) | NOT decodable — honest floor |
+
+**Progress (2026-10-29, session C first half — shift-imm + modified-
+immediate):** the 0x0F group decoded+executed end to end: SSHR/USHR/SSRA/
+USRA/SRSHR/URSHR/SRSRA/URSRA/SHL/SLI/SRI/SQSHL/UQSHL/SQSHLU + narrowing
+(SHRN/RSHRN/SQSHRN/UQSHRN/SQSHRUN/SQRSHRN/UQRSHRN/SQRSHRUN) + widening
+(SSHLL/USHLL) + fixed-point (SCVTF/UCVTF vector) + MOVI/MVNI/ORR-imm/
+BIC-imm (cmode table capstone-verified) + FMOV vector immediate. **decode
+98.87% → 98.89%** (7,878,033/7,966,342); exec probe 98.9%. Every field
+rule pinned by keystone sweeps (shift = (16<<size)−X right forms,
+X−(8<<size) left forms; SSRA=op2, RSHR=op4, SRSRA=op6 — NOT 1/2/3 as
+first guessed). Environment notes: the sandbox reset twice mid-session;
+the 18C66 IPSW constant in ipsw_range.py had drifted back to 14.0-beta
+once (re-fixed, CLI now matches README); guest DRAM is now
+IOS_RUST_DRAM_MB-overridable (sandbox has 3 GB, 1 GiB window verified
+end-to-end).
 
 **Progress (2026-10-29, session B — boot-driven):** the boot-real campaign
 pulled SIMD families forward: MOVI-64 (bit→byte imm expansion, measured

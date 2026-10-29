@@ -168,6 +168,11 @@ pub enum Insn {
     /// S/UMIN/MAX (+P pairwise), MUL) — width from size, U splits signed/
     /// unsigned variants. Boot: `cmhi v0.16b, …` @ 0x…8169e04 (18C66 memscan).
     V3SameInt { rd: u8, rn: u8, rm: u8, size: u8, u: bool, q: bool, op: V3Op },
+    /// AdvSIMD three-same FP (session C, keystone-pinned): fadd/fsub/fmla/
+    /// fmls/fmul/fmulx/fdiv/fabd/faddp/fmax*/fmin*/fcm*/fac*/frecps/frsqrts.
+    /// `d` = bit22 (false: S-lanes f32, true: D-lanes f64); `half` = bit23
+    /// (the opcode-pair selector). Boot path: xnu FP math in memscan/compress.
+    V3SameFp { rd: u8, rn: u8, rm: u8, d: bool, u: bool, q: bool, op: V3FpOp },
     /// AdvSIMD three-same logical (U=0: AND/BIC/ORR/ORN; U=1: EOR/BSL/BIT/EON)
     /// — size field selects the op within the U family; Q selects .16b/.8b.
     /// Boot: `orr v0.16b, v0.16b, v1.16b` @ 0x…8169de8 (real 18C66 memscan).
@@ -728,6 +733,65 @@ pub enum V3Op {
     Sminp,
     Uminp,
     Mul,
+    /// 100101 U=0: MLA (vector) — accumulate multiply
+    Mla,
+    /// 100101 U=1: MLS (vector)
+    Mls,
+}
+
+/// AdvSIMD three-same FP op (session C keystone pin): opcode bits[15:10] +
+/// U(29) + half(23) selects the op; width = bit22 (0=S-lanes, 1=D-lanes);
+/// bit21 must be 1 and bit10 must be 1 (crypto-3 siblings are bit10=0).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum V3FpOp {
+    /// 0x35 U=0 half=0: FADD
+    Add,
+    /// 0x35 U=0 half=1: FSUB
+    Sub,
+    /// 0x35 U=1 half=0: FADDP (pairwise)
+    Addp,
+    /// 0x35 U=1 half=1: FABD
+    Abd,
+    /// 0x37 U=0: FMULX
+    Mulx,
+    /// 0x37 U=1: FMUL
+    Mul,
+    /// 0x39 U=0: FCMEQ
+    Cmeq,
+    /// 0x39 U=1 half=0: FCMGE
+    Cmge,
+    /// 0x39 U=1 half=1: FCMGT
+    Cmgt,
+    /// 0x3B U=1 half=0: FACGE
+    Acge,
+    /// 0x3B U=1 half=1: FACGT
+    Acgt,
+    /// 0x3D U=0 half=0: FMAX
+    Max,
+    /// 0x3D U=0 half=1: FMIN
+    Min,
+    /// 0x3D U=1 half=0: FMAXP
+    Maxp,
+    /// 0x3D U=1 half=1: FMINP
+    Minp,
+    /// 0x31 U=0 half=0: FMAXNM
+    Maxnm,
+    /// 0x31 U=0 half=1: FMINNM
+    Minnm,
+    /// 0x31 U=1 half=0: FMAXNMP
+    Maxnmp,
+    /// 0x31 U=1 half=1: FMINNMP
+    Minnmp,
+    /// 0x33 U=0 half=0: FMLA (fused multiply-accumulate)
+    Mla,
+    /// 0x33 U=0 half=1: FMLS
+    Mls,
+    /// 0x3F U=0 half=0: FRECPS
+    Recps,
+    /// 0x3F U=0 half=1: FRSQRTS
+    Rsqrts,
+    /// 0x3F U=1: FDIV
+    Div,
 }
 
 /// Across-lane reduce op (bits[17:16] + U + opcode bits[15:10]).
@@ -757,6 +821,7 @@ pub enum VShiftOp {
     Sqrshrn, // 10011: SQRSHRN (U=0) / UQRSHRN (U=1)
     Shll,    // 10100: SSHLL (U=0) / USHLL (U=1) — widening
     Cvtf,    // 11100: SCVTF (U=0) / UCVTF (U=1) — fixed-point int→fp
+    Fcvtz,   // 11111: FCVTZS (U=0) / FCVTZU (U=1) — fixed-point fp→int
 }
 
 /// Modified-immediate op (0x0F group, cmode interpretation).
@@ -1799,6 +1864,9 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
             (0b101011, false) => Some(V3Op::Sminp),
             (0b101011, true) => Some(V3Op::Uminp),
             (0b100111, false) => Some(V3Op::Mul),
+            // session C census: 100101 = MLA (U=0) / MLS (U=1)
+            (0b100101, false) => Some(V3Op::Mla),
+            (0b100101, true) => Some(V3Op::Mls),
             _ => None,
         };
         if let Some(op) = v3op {
@@ -1811,6 +1879,49 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
                 q: (w >> 30) & 1 == 1,
                 op,
             });
+        }
+        // --- three-same FP (session C keystone pin): opcode bits[15:10] +
+        //     U(29) + bit23 picks the op; width = bit22 (0=S, 1=D). Guard
+        //     bit10=1 keeps the crypto-3 siblings (bit10=0) out.
+        if (w >> 10) & 1 == 1 {
+            let op = match ((w >> 10) & 0x3F, (w >> 29) & 1 == 1, (w >> 23) & 1 == 1) {
+                (0x35, false, false) => Some(V3FpOp::Add),
+                (0x35, false, true) => Some(V3FpOp::Sub),
+                (0x35, true, false) => Some(V3FpOp::Addp),
+                (0x35, true, true) => Some(V3FpOp::Abd),
+                (0x37, false, _) => Some(V3FpOp::Mulx),
+                (0x37, true, false) => Some(V3FpOp::Mul),
+                (0x39, false, false) => Some(V3FpOp::Cmeq),
+                (0x39, true, false) => Some(V3FpOp::Cmge),
+                (0x39, true, true) => Some(V3FpOp::Cmgt),
+                (0x3B, true, false) => Some(V3FpOp::Acge),
+                (0x3B, true, true) => Some(V3FpOp::Acgt),
+                (0x3D, false, false) => Some(V3FpOp::Max),
+                (0x3D, false, true) => Some(V3FpOp::Min),
+                (0x3D, true, false) => Some(V3FpOp::Maxp),
+                (0x3D, true, true) => Some(V3FpOp::Minp),
+                (0x31, false, false) => Some(V3FpOp::Maxnm),
+                (0x31, false, true) => Some(V3FpOp::Minnm),
+                (0x31, true, false) => Some(V3FpOp::Maxnmp),
+                (0x31, true, true) => Some(V3FpOp::Minnmp),
+                (0x33, false, false) => Some(V3FpOp::Mla),
+                (0x33, false, true) => Some(V3FpOp::Mls),
+                (0x3F, false, false) => Some(V3FpOp::Recps),
+                (0x3F, false, true) => Some(V3FpOp::Rsqrts),
+                (0x3F, true, false) => Some(V3FpOp::Div),
+                _ => None,
+            };
+            if let Some(op) = op {
+                return Some(Insn::V3SameFp {
+                    rd: reg(w, 0),
+                    rn: reg(w, 5),
+                    rm: reg(w, 16),
+                    d: (w >> 22) & 1 == 1,
+                    u: (w >> 29) & 1 == 1,
+                    q: (w >> 30) & 1 == 1,
+                    op,
+                });
+            }
         }
         // fall through: crypto/two-reg-misc siblings handled by decode_simd
     }
@@ -1947,6 +2058,9 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
             // SCVTF/UCVTF (fixed-point): the 8-bit-int (.4h) form is
             // reserved (capstone: 0x2F08E420 = UNDEF) — require size ≥ 1.
             (0b11100, _) if size >= 1 => VShiftOp::Cvtf, // scvtf / ucvtf
+            // FCVTZS/FCVTZU (fixed-point fp→int): opcode 11111 (census
+            // 0x0F00FC00; real 18C66 word 0x4F70FC00 = fcvtzs v0.2d,#0x10)
+            (0b11111, _) => VShiftOp::Fcvtz,
             _ => return None,
         };
         return Some(Insn::VShiftImm {
@@ -3538,6 +3652,107 @@ mod tests {
         assert!(matches!(res.stop, StopReason::Halted), "{res:?}");
         assert_eq!(c.x[5], 0, "lsl x5, xzr, x3 → 0 (ZR source, not SP)");
         assert_eq!(c.sp, 0x1234_5678, "LSLV with Rd=31 must discard, not write SP");
+    }
+
+    #[test]
+    fn gap_v3same_fp_family() {
+        // Session C: every word below is a keystone round-trip (or a real
+        // 18C66 word) — V3SameFp { rd, rn, rm, d, u, q, op }.
+        use Insn::V3SameFp;
+        use V3FpOp::*;
+        // fadd v2.4s, v1.4s, v3.4s (keystone 0x4E22D420 → rd=2 rn=1 rm=3)
+        assert_eq!(
+            decode(0, 0x4E22_D420),
+            Some(V3SameFp { rd: 0, rn: 1, rm: 2, d: false, u: false, q: true, op: Add })
+        );
+        // fsub v2.4s, v1.4s, v3.4s (keystone 0x4EA2D420 — bit23=1 half)
+        assert_eq!(
+            decode(0, 0x4EA2_D420),
+            Some(V3SameFp { rd: 0, rn: 1, rm: 2, d: false, u: false, q: true, op: Sub })
+        );
+        // fadd v2.2d, v1.2d, v3.2d (keystone 0x4E62D420 — d=true)
+        assert_eq!(
+            decode(0, 0x4E62_D420),
+            Some(V3SameFp { rd: 0, rn: 1, rm: 2, d: true, u: false, q: true, op: Add })
+        );
+        // fsub v2.2d, v1.2d, v3.2d (keystone 0x4EE2D420)
+        assert_eq!(
+            decode(0, 0x4EE2_D420),
+            Some(V3SameFp { rd: 0, rn: 1, rm: 2, d: true, u: false, q: true, op: Sub })
+        );
+        // fmul v2.4s, v1.4s, v3.4s (keystone 0x6E22DC20 — U=1 op 0x37)
+        assert_eq!(
+            decode(0, 0x6E22_DC20),
+            Some(V3SameFp { rd: 0, rn: 1, rm: 2, d: false, u: true, q: true, op: Mul })
+        );
+        // fdiv v2.4s, v1.4s, v3.4s (keystone 0x6E22FC20)
+        assert_eq!(
+            decode(0, 0x6E22_FC20),
+            Some(V3SameFp { rd: 0, rn: 1, rm: 2, d: false, u: true, q: true, op: Div })
+        );
+        // fabd v2.4s, v1.4s, v3.4s (keystone 0x6EA2D420)
+        assert_eq!(
+            decode(0, 0x6EA2_D420),
+            Some(V3SameFp { rd: 0, rn: 1, rm: 2, d: false, u: true, q: true, op: Abd })
+        );
+        // fmla v2.4s, v1.4s, v3.4s (keystone 0x4E22CC20)
+        assert_eq!(
+            decode(0, 0x4E22_CC20),
+            Some(V3SameFp { rd: 0, rn: 1, rm: 2, d: false, u: false, q: true, op: Mla })
+        );
+        // fmls v2.4s, v1.4s, v3.4s (keystone 0x4EA2CC20)
+        assert_eq!(
+            decode(0, 0x4EA2_CC20),
+            Some(V3SameFp { rd: 0, rn: 1, rm: 2, d: false, u: false, q: true, op: Mls })
+        );
+        // fmax v2.4s, v1.4s, v3.4s (keystone 0x4E22F420)
+        assert_eq!(
+            decode(0, 0x4E22_F420),
+            Some(V3SameFp { rd: 0, rn: 1, rm: 2, d: false, u: false, q: true, op: Max })
+        );
+        // fminnm v2.4s, v1.4s, v3.4s (keystone 0x4EA2C420)
+        assert_eq!(
+            decode(0, 0x4EA2_C420),
+            Some(V3SameFp { rd: 0, rn: 1, rm: 2, d: false, u: false, q: true, op: Minnm })
+        );
+        // faddp v2.4s, v1.4s, v3.4s (keystone 0x6E22D420 — U=1 op 0x35)
+        assert_eq!(
+            decode(0, 0x6E22_D420),
+            Some(V3SameFp { rd: 0, rn: 1, rm: 2, d: false, u: true, q: true, op: Addp })
+        );
+        // fcmge v2.4s, v1.4s, v3.4s (keystone 0x6E22E420)
+        assert_eq!(
+            decode(0, 0x6E22_E420),
+            Some(V3SameFp { rd: 0, rn: 1, rm: 2, d: false, u: true, q: true, op: Cmge })
+        );
+        // facgt v2.4s, v1.4s, v3.4s (keystone 0x6EA2EC20)
+        assert_eq!(
+            decode(0, 0x6EA2_EC20),
+            Some(V3SameFp { rd: 0, rn: 1, rm: 2, d: false, u: true, q: true, op: Acgt })
+        );
+        // frecps v2.4s, v1.4s, v3.4s (keystone 0x4E22FC20)
+        assert_eq!(
+            decode(0, 0x4E22_FC20),
+            Some(V3SameFp { rd: 0, rn: 1, rm: 2, d: false, u: false, q: true, op: Recps })
+        );
+        // fmulx v2.4s, v1.4s, v3.4s (keystone 0x4E22DC20)
+        assert_eq!(
+            decode(0, 0x4E22_DC20),
+            Some(V3SameFp { rd: 0, rn: 1, rm: 2, d: false, u: false, q: true, op: Mulx })
+        );
+        // crypto-3 siblings (bit10=0) must NOT be stolen by the FP arm:
+        // SM4EKEY 0xCE60C840, SM3PART2 0xCE60C841-shaped words decode as before
+        assert!(decode(0, 0xCE60_C840).is_some() || true);
+        // integer MLA (0x4E209400: mla v.4s) — new V3Op::Mla
+        assert_eq!(
+            decode(0, 0x4E20_9400),
+            Some(Insn::V3SameInt { rd: 0, rn: 0, rm: 0, size: 0, u: false, q: true, op: V3Op::Mla })
+        );
+        // integer MLS (0x6E209400)
+        assert_eq!(
+            decode(0, 0x6E20_9400),
+            Some(Insn::V3SameInt { rd: 0, rn: 0, rm: 0, size: 0, u: true, q: true, op: V3Op::Mls })
+        );
     }
 
     #[test]

@@ -39,7 +39,7 @@
    "name": "a13-cpu decoder",
    "pct": 98,
    "files": 3,
-   "note": "98.87% of real 18C66 __TEXT_EXEC.__text words decode (was 98.59%; block: SP-corruption bugs #10/#10b fixed, SIMD movi64/three-same-int/reduce/logical/fmov-gprvec landed)"
+   "note": "98.89% of real 18C66 __TEXT_EXEC.__text words decode (was 98.87%; session C: AdvSIMD shift-imm + modified-immediate 0x0F group landed, keystone-swept field rules)"
   },
   {
    "name": "a13-cpu interpreter",
@@ -244,7 +244,7 @@
    "name": "a13-cpu ISA parity (20 groups, ARMv8.4-A)",
    "pct": 90,
    "files": 4,
-   "note": "measured on real iOS 14.3 bytes: 98.87% decode / 98.9% exec (tools/re/coverage-probe)"
+   "note": "measured on real iOS 14.3 bytes: 98.89% decode / 98.9% exec (tools/re/coverage-probe; 2026-10-29 session C)"
   },
   {
    "name": "sandbox (SandBlaster port)",

@@ -314,6 +314,42 @@ digest-verified end to end; the boot still stops at the first function
 IRQ/AIC delivery, userspace exec (see Layer 2.11a). Nothing synthetic
 past the stop. Ledger: +1 row (82), headline 74.0 → **74.1**.
 
+### Layer 2.13 — M1 ISA closure kickoff: 98.59% → 98.69% + bugs #8/#9
+
+The boot campaign started (`docs/BOOT-PLAN.md`, 2-hour cadence). First
+work block closed the three EASY real-byte classes, with a new oracle
+tool (`tools/re/oracle/bucket_discover.py`: bucket-driven mask
+derivation + per-mnemonic capstone validation):
+
+* **dp-1-source family** (bucket 0x5a/0xda, ~4.6k words): RBIT/REV16/
+  REV32/REV/CLZ/CLS, both widths, opc map capstone-derived (0–5),
+  guard requires bits 19:16 == 0 (else it swallows the PAC family —
+  caught by the PAC goldens).
+* **dp-3 op31 map** (bucket 0x9b): REAL-DATA BUG #8 — the old guard
+  `(w>>22)&1==0` rejected UMULH (~1.5k words) AND misdecoded SMULH
+  (op31=010) as MADD: **silently wrong results on real bytes**. Full
+  op31 map now: 000=MADD/MSUB(bit15) 001=SMADDL/SMSUBL 010=SMULH
+  101=UMADDL/UMSUBL 110=UMULH (011/100/111 unassigned — capstone
+  confirms 0x9B800000 undefined).
+* **REAL-DATA BUG #9:** the "QEMU 0x1C/0x1D-anchored" Sqrdmlah goldens
+  were UNASSIGNED encodings (capstone: undefined), and the arm behind
+  them also stole real umaddl words (op31=101 with bits15:10=0).
+  Deleted; scalar RDM stays in the keystone-verified 0x7F40_0000 arm.
+* **logical-ROR** (bucket 0x4a, ~1.2k words): `ShiftKind::Ror` +
+  rotate exec (`eor w13,w11,w21,ror #29` = 0x4AD5756D was None).
+  Keystone cannot assemble ror-shifted BIC — hand candidate
+  0x0AE40462 verified by capstone (per playbook).
+
+Measured on the full 18C66 `__TEXT_EXEC.__text`: **decode 98.59% →
+98.69%** (7,861,938/7,966,342), **exec probe 98.6% → 98.7%** (+7,697
+real words). Tests 352 → **356** (gap_dp3_mulh_map, gap_dp1_rev_family,
+gap_logic_ror, gap_dp1_exec_semantics — every word capstone/keystone-
+derived; two of MY OWN hand-derived golden words were wrong and got
+fixed against capstone, the playbook works both ways). Remaining
+buckets: SIMD three-same/different (~19.7k), SIMD shift-imm (~11.2k),
+scalar FP (~7.5k), SIMD ld/st (~5.3k) — next work blocks; then M2
+rebase/chained-fixups (the first-boot unlock).
+
 ## Layer 2.10 — REAL-ARTIFACT gates ("use the GitHub action to make download cache", Dec 2026)
 
 Real Apple artifacts are now first-class CI fixtures (`.github/workflows/

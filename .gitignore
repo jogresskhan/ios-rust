@@ -4,3 +4,4 @@
 .DS_Store
 fixtures/
 boot-first-staged/
+tools/re/coverage-probe/target/

@@ -94,6 +94,22 @@ pub enum ShiftKind {
     Lsl,
     Lsr,
     Asr,
+    /// ROR — logical shifted register with rotate (real 14.3: ~1.2k words
+    /// e.g. `eor w13,w11,w21,ror #29` = 0x4AD5756D); amount taken mod size.
+    Ror,
+}
+
+/// Data-processing (1-source) opcode (opc bits 15:10; capstone-derived map
+/// on real 18C66 bytes: 0=RBIT 1=REV16 2=REV32(64)/REV(32) 3=REV(64)
+/// 4=CLZ 5=CLS).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dp1Op {
+    Rbit,
+    Rev16,
+    Rev32,
+    Rev,
+    Clz,
+    Cls,
 }
 
 /// LDP/STP addressing mode (ARM DDI 0487 "Load/store pair").
@@ -296,6 +312,8 @@ pub enum Insn {
     /// SMULH / UMULH (64-bit only).
     Smulh { rd: u8, rn: u8, rm: u8 },
     Umulh { rd: u8, rn: u8, rm: u8 },
+    /// Data-processing (1 source): RBIT/REV16/REV32/REV/CLZ/CLS.
+    Dp1 { rd: u8, rn: u8, op: Dp1Op, is64: bool },
     /// PACGA Xd, Xn, Xm (v8.3 generic-A PAC, 2-source form).
     Pacga { rd: u8, rn: u8, rm: u8 },
     /// SQRDMLAH/SQRDMLSH (v8.1 scalar; QEMU case 0x1c/0x1d anchored).
@@ -1245,45 +1263,69 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
         }
     }
 
-    // --- 2-source in the 0011011 group: scalar RDM (op10 0xDC/0xDD,
-    //     QEMU case 0x1c/0x1d anchoring, bits 15:10 = 0) and SMULH/UMULH
-    //     (op10 0xDA/0xDE, bit22=1, bit23 = signed/unsigned) ---
-    if (w & 0x7F00_0000) == 0x1B00_0000 && (w >> 10) & 0x3F == 0 {
-        let rd = reg(w, 0);
-        let rn = reg(w, 5);
-        let rm = reg(w, 16);
-        let is64 = w >> 31 == 1;
-        let op10 = (w >> 21) & 0x3FF;
-        match (op10, is64) {
-            (0x0DA, true) => return Some(Insn::Smulh { rd, rn, rm }),
-            (0x0DE, true) => return Some(Insn::Umulh { rd, rn, rm }),
-            (0x0DC, _) => return Some(Insn::Sqrdmlah { rd, rn, rm, is64, subtract: false }),
-            (0x0DD, _) => return Some(Insn::Sqrdmlah { rd, rn, rm, is64, subtract: true }),
-            _ => {}
-        }
-    }
+    // --- 2-source in the 0011011 group: REMOVED — the scalar-RDM forms
+    //     this arm claimed (op10 0xDC/0xDD) collide with real dp-3 words
+    //     (umaddl op31=101 with Ra=0, bits15:10=0): capstone decodes them
+    //     as umaddl, not Sqrdmlah. Scalar RDM is the keystone-verified
+    //     0x7F40_0000 arm above; SMULH/UMULH live in the dp-3 op31 map. ---
 
     // --- 3-source MADD family (capstone-verified map): bits 30:24 ==
-    //     0011011, bit23=0; bit21 = widening (0=MADD/MSUB, 1=*MADDL/
-    //     *MSUBL); bit23 = unsigned for widening; bit15 = subtract ---
-    if (w & 0x7F00_0000) == 0x1B00_0000 && (w >> 22) & 1 == 0 {
+    //     0011011. op31 (bits 23:21): 000=MADD/MSUB(bit15), 001=SMADDL/
+    //     SMSUBL(bit15), 010=SMULH, 101=UMADDL/UMSUBL, 110=UMULH.
+    //     REAL-DATA BUG #8: the old guard `(w>>22)&1==0` rejected UMULH
+    //     (~1.5k words) and — worse — misdecoded SMULH as MADD (wrong
+    //     results, not just coverage). Fixed to the full op31 map. ---
+    if (w & 0x7F00_0000) == 0x1B00_0000 {
         let rd = reg(w, 0);
         let rn = reg(w, 5);
         let rm = reg(w, 16);
         let ra = reg(w, 10);
         let is64 = w >> 31 == 1;
         let subtract = (w >> 15) & 1 == 1;
-        let widening = (w >> 21) & 1 == 1;
-        let unsigned = (w >> 23) & 1 == 1;
-        return if widening {
-            if !is64 {
-                None
-            } else {
-                Some(Insn::MaddW { rd, rn, rm, ra, subtract, unsigned })
+        // capstone-derived op31 map (real 18C66 words, 0 rejects):
+        // 000=MADD/MSUB(bit15) 001=SMADDL/SMSUBL(bit15) 010=SMULH
+        // 101=UMADDL/UMSUBL(bit15) 110=UMULH; 011/100/111 unassigned
+        // (capstone: 0x9B800000 → unknown).
+        let op31 = (w >> 21) & 7;
+        return match op31 {
+            0b000 => Some(Insn::Madd { rd, rn, rm, ra, subtract, is64 }),
+            0b001 if is64 => {
+                Some(Insn::MaddW { rd, rn, rm, ra, subtract, unsigned: false })
             }
-        } else {
-            Some(Insn::Madd { rd, rn, rm, ra, subtract, is64 })
+            0b010 if is64 && !subtract => Some(Insn::Smulh { rd, rn, rm }),
+            0b101 if is64 => {
+                Some(Insn::MaddW { rd, rn, rm, ra, subtract, unsigned: true })
+            }
+            0b110 if is64 && !subtract => Some(Insn::Umulh { rd, rn, rm }),
+            _ => None,
         };
+    }
+
+    // --- Data-processing (1 source): sf 0 11010 110 opc(6) Rn Rd —
+    //     capstone-derived on real bytes (bucket 0x5a/0xda):
+    //     opc 0=RBIT 1=REV16 2=REV32(64)/REV(32) 3=REV(64) 4=CLZ 5=CLS.
+    //     bits 30:20 == 0x5AC, opc = bits 15:10. ---
+    if (w >> 20) & 0x7FF == 0x5AC && (w >> 16) & 0xF == 0 {
+        // bits 19:16 must be 0 — the PAC forms (PACIA 0xDAC103E0 etc.)
+        // share bits 30:20 but set bits 19:16; without this the guard
+        // would swallow the whole PAC family (golden regression caught it).
+        let is64 = w >> 31 == 1;
+        let op = match (w >> 10) & 0x3F {
+            0 => Dp1Op::Rbit,
+            1 => Dp1Op::Rev16,
+            2 => {
+                if is64 {
+                    Dp1Op::Rev32
+                } else {
+                    Dp1Op::Rev
+                }
+            }
+            3 if is64 => Dp1Op::Rev,
+            4 => Dp1Op::Clz,
+            5 => Dp1Op::Cls,
+            _ => return None,
+        };
+        return Some(Insn::Dp1 { rd: reg(w, 0), rn: reg(w, 5), op, is64 });
     }
 
     // --- Add/sub extended register: sf op S 01011 0 1 Rm option imm3 Rn Rd
@@ -1310,7 +1352,7 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
             0 => ShiftKind::Lsl,
             1 => ShiftKind::Lsr,
             2 => ShiftKind::Asr,
-            _ => return None, // ROR = 1x? (op10=11 with shift=11) — not modeled
+            _ => ShiftKind::Ror, // real 14.3: ~1.2k words (0x4a bucket)
         };
         let op10 = (w >> 29) & 0x3;
         let invert = (w >> 21) & 1 == 1;
@@ -1996,6 +2038,173 @@ mod tests {
         );
         // plain RET still decodes as RET
         assert_eq!(decode(0, 0xD65F03C0), Some(Insn::Ret { rn: 30 }));
+    }
+
+    #[test]
+    fn gap_dp3_mulh_map() {
+        // REAL-DATA BUG #8 goldens (capstone-derived, real 14.3 words):
+        // umulh x8, x8, x9 = 0x9bc97d08 (was: rejected by the old guard)
+        assert_eq!(
+            decode(0, 0x9BC97D08),
+            Some(Insn::Umulh { rd: 8, rn: 8, rm: 9 })
+        );
+        // smulh (op31=010): was MISDECODED as MADD before the fix
+        assert_eq!(
+            decode(0, 0x9B400000),
+            Some(Insn::Smulh { rd: 0, rn: 0, rm: 0 })
+        );
+        // umaddl / smaddl still land in the widening form
+        assert_eq!(
+            decode(0, 0x9BA00000),
+            Some(Insn::MaddW { rd: 0, rn: 0, rm: 0, ra: 0, subtract: false, unsigned: true })
+        );
+        assert_eq!(
+            decode(0, 0x9B200000),
+            Some(Insn::MaddW { rd: 0, rn: 0, rm: 0, ra: 0, subtract: false, unsigned: false })
+        );
+        // madd/msub unchanged
+        assert_eq!(
+            decode(0, 0x9B007C00 | (8 << 16) | (9 << 5)),
+            Some(Insn::Madd { rd: 0, rn: 9, rm: 8, ra: 31, subtract: false, is64: true })
+        );
+        assert_eq!(
+            decode(0, 0x9B008000),
+            Some(Insn::Madd { rd: 0, rn: 0, rm: 0, ra: 0, subtract: true, is64: true })
+        );
+    }
+
+    #[test]
+    fn gap_dp1_rev_family() {
+        // rev w11, w10 = 0x5ac0094b (real 14.3 bucket 0x5a, ~2.9k words)
+        assert_eq!(
+            decode(0, 0x5AC0094B),
+            Some(Insn::Dp1 { rd: 11, rn: 10, op: Dp1Op::Rev, is64: false })
+        );
+        // rev x0, x0 (64-bit REV32): 0xdac00800 (capstone: rev32 x0, x0)
+        assert_eq!(
+            decode(0, 0xDAC00800),
+            Some(Insn::Dp1 { rd: 0, rn: 0, op: Dp1Op::Rev32, is64: true })
+        );
+        // rev x9, x11 (64-bit REV): 0xdac00d69 (capstone: rev x9, x11)
+        assert_eq!(
+            decode(0, 0xDAC00D69),
+            Some(Insn::Dp1 { rd: 9, rn: 11, op: Dp1Op::Rev, is64: true })
+        );
+        // clz w15, w9: 0x5ac0112f
+        assert_eq!(
+            decode(0, 0x5AC0112F),
+            Some(Insn::Dp1 { rd: 15, rn: 9, op: Dp1Op::Clz, is64: false })
+        );
+        // rev16 w0, w1: 0x5ac00420
+        assert_eq!(
+            decode(0, 0x5AC00420),
+            Some(Insn::Dp1 { rd: 0, rn: 1, op: Dp1Op::Rev16, is64: false })
+        );
+        // rbit x2, x3: 0xdac00062
+        assert_eq!(
+            decode(0, 0xDAC00062),
+            Some(Insn::Dp1 { rd: 2, rn: 3, op: Dp1Op::Rbit, is64: true })
+        );
+    }
+
+    #[test]
+    fn gap_logic_ror() {
+        // eor w13, w11, w21, ror #29 = 0x4ad5756d (real 14.3 bucket 0x4a)
+        assert_eq!(
+            decode(0, 0x4AD5756D),
+            Some(Insn::LogicReg {
+                rd: 13,
+                rn: 11,
+                rm: 21,
+                kind: ShiftKind::Ror,
+                imm6: 29,
+                op: LogicOp::Eor,
+                setflags: false,
+                invert: false,
+                is64: false
+            })
+        );
+        // bic w2, w3, w4, ror #1 = 0x0ae40462 (keystone can't assemble ror;
+        // hand-derived candidate then capstone-verified per the playbook)
+        assert_eq!(
+            decode(0, 0x0AE40462),
+            Some(Insn::LogicReg {
+                rd: 2,
+                rn: 3,
+                rm: 4,
+                kind: ShiftKind::Ror,
+                imm6: 1,
+                op: LogicOp::And,
+                setflags: false,
+                invert: true,
+                is64: false
+            })
+        );
+    }
+
+    #[test]
+    fn gap_dp1_exec_semantics() {
+        use crate::interp::Interpreter;
+        use crate::{CpuBackend, InterpBudget, MemAccess, StopReason};
+        use std::sync::{Arc, Mutex};
+        struct Tv(Arc<Mutex<Vec<u8>>>);
+        impl MemAccess for Tv {
+            fn load(&mut self, a: u64, s: u8) -> u64 {
+                let g = self.0.lock().unwrap();
+                let mut v = 0u64;
+                for i in 0..s as usize {
+                    v |= (*g.get(a as usize + i).unwrap_or(&0) as u64) << (i * 8);
+                }
+                v
+            }
+            fn store(&mut self, a: u64, s: u8, val: u64) {
+                let mut g = self.0.lock().unwrap();
+                for i in 0..s as usize {
+                    if (a as usize + i) < g.len() {
+                        g[a as usize + i] = (val >> (i * 8)) as u8;
+                    }
+                }
+            }
+            fn fetch32(&mut self, a: u64) -> u32 {
+                self.load(a, 4) as u32
+            }
+        }
+        let mem = Arc::new(Mutex::new(vec![0u8; 0x100]));
+        let write = |mem: &Arc<Mutex<Vec<u8>>>, words: &[u32]| {
+            let mut g = mem.lock().unwrap();
+            for (i, w) in words.iter().enumerate() {
+                g[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
+            }
+        };
+        // rev w0, w1 with w1 = 0x11223344 → 0x44332211
+        write(&mem, &[0x52866881, 0x72A22441, 0x5AC00820, 0xD440_0000]);
+        let mut c = Interpreter::new(Box::new(Tv(mem.clone())));
+        c.set_reset_vector(0);
+        c.x[1] = 0x1122_3344;
+        let res = c.run(InterpBudget { max_insn: 8, max_ns: 1_000_000_000 });
+        assert!(matches!(res.stop, StopReason::Halted), "{res:?}");
+        assert_eq!(c.x[0] & 0xFFFF_FFFF, 0x4433_2211, "rev w0,w1");
+
+        // clz w0, w1 with w1 = 0x00010000 → 15
+        write(&mem, &[0x5AC01020, 0xD440_0000]);
+        let mut c = Interpreter::new(Box::new(Tv(mem.clone())));
+        c.set_reset_vector(0);
+        c.x[1] = 0x0001_0000;
+        let res = c.run(InterpBudget { max_insn: 8, max_ns: 1_000_000_000 });
+        assert!(matches!(res.stop, StopReason::Halted), "{res:?}");
+        assert_eq!(c.x[0], 15, "clz w0,w1");
+
+        // umulh x0, x1, x2 = 0x9bc27c20 (capstone: umulh x0, x1, x2;
+        // Rm=bits20:16, 11111=bits15:10, Rn=bits9:5):
+        // (0xFFFF_FFFF_FFFF_FFFF)^2 >> 64 = 0xFFFF_FFFF_FFFF_FFFE
+        write(&mem, &[0x9BC2_7C20, 0xD440_0000]);
+        let mut c = Interpreter::new(Box::new(Tv(mem.clone())));
+        c.set_reset_vector(0);
+        c.x[1] = u64::MAX;
+        c.x[2] = u64::MAX;
+        let res = c.run(InterpBudget { max_insn: 8, max_ns: 1_000_000_000 });
+        assert!(matches!(res.stop, StopReason::Halted), "{res:?}");
+        assert_eq!(c.x[0], 0xFFFF_FFFF_FFFF_FFFE, "umulh x0,x1,x2");
     }
 
     #[test]

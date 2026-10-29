@@ -382,6 +382,7 @@ impl Interpreter {
                 let s = if is64 { signed >> amt } else { ((signed as i32) >> amt) as i64 };
                 (s as u64) & mask
             }
+            ShiftKind::Ror => v.rotate_right(amt % bits),
         }
         .wrapping_shr(0) // pacify
         & mask | (if amt >= bits { 0 } else { 0 })
@@ -889,6 +890,54 @@ impl Interpreter {
             Insn::Umulh { rd, rn, rm } => {
                 let p = (self.r(rn) as u128) * (self.r(rm) as u128);
                 self.set_r(rd, (p >> 64) as u64);
+            }
+            // ============ data-processing (1 source) ============
+            Insn::Dp1 { rd, rn, op, is64 } => {
+                let mask = if is64 { u64::MAX } else { 0xFFFF_FFFF };
+                let v = self.r(rn) & mask;
+                let out: u64 = match op {
+                    Dp1Op::Rbit => v.reverse_bits(),
+                    Dp1Op::Rev16 => {
+                        let s = ((v & 0x00FF_00FF_00FF_00FF) << 8)
+                            | ((v >> 8) & 0x00FF_00FF_00FF_00FF);
+                        s & mask
+                    }
+                    Dp1Op::Rev32 => {
+                        let s = ((v & 0x0000_FFFF_0000_FFFF) << 16)
+                            | ((v >> 16) & 0x0000_FFFF_0000_FFFF);
+                        s & mask
+                    }
+                    Dp1Op::Rev => {
+                        if is64 {
+                            v.swap_bytes()
+                        } else {
+                            (v as u32).swap_bytes() as u64
+                        }
+                    }
+                    Dp1Op::Clz => {
+                        if is64 {
+                            v.leading_zeros() as u64
+                        } else {
+                            (v as u32).leading_zeros() as u64
+                        }
+                    }
+                    Dp1Op::Cls => {
+                        // count leading bits equal to the sign bit
+                        let x = if is64 {
+                            v ^ (v >> 63)
+                        } else {
+                            let sign = ((v >> 31) & 1) * 0xFFFF_FFFF;
+                            v ^ sign
+                        };
+                        let lz = if is64 {
+                            x.leading_zeros()
+                        } else {
+                            (x as u32).leading_zeros()
+                        };
+                        lz.saturating_sub(1) as u64
+                    }
+                };
+                self.set_r(rd, out & mask);
             }
             // ==================== PAC (group 12) ====================
             Insn::Pacga { rd, rn, rm } => {

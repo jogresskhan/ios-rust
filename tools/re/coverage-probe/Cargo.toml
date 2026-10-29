@@ -4,7 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "Standalone honest-coverage probe: decode sweep + single-insn exec probe of the a13-cpu decoder against a real kernelcache"
 
+# standalone: deliberately NOT a member of the main workspace (kept hermetic)
+[workspace]
+
 [dependencies]
-a13-cpu = { path = "../../crates/a13-cpu" }
-kernelcache = { path = "../../crates/kernelcache" }
-vm-core = { path = "../../crates/vm-core" }
+a13-cpu = { path = "../../../crates/a13-cpu" }
+kernelcache = { path = "../../../crates/kernelcache" }
+vm-core = { path = "../../../crates/vm-core" }

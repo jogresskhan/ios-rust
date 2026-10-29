@@ -191,20 +191,21 @@ fn two_source_goldens() {
     assert_eq!(d(0x9BC2_0020), Some(Insn::Umulh { rd: 0, rn: 1, rm: 2 }));
     // Capstone: 9AC53002 = "pacga x2, x0, x5"
     assert_eq!(d(0x9AC5_3002), Some(Insn::Pacga { rd: 2, rn: 0, rm: 5 }));
-    // Scalar RDM (QEMU 0x1C/0x1D case anchoring): op10 = 0xDC/0xDD,
-    // bits 15:10 = 0 (no Ra field)
-    assert_eq!(
-        d(0x9B82_0020),
-        Some(Insn::Sqrdmlah { rd: 0, rn: 1, rm: 2, is64: true, subtract: false })
-    );
+    // Scalar RDM — REAL-DATA BUG #9: the old QEMU-anchored golden claimed
+    // 0x9B820020 (op31=100, bits15:10=0) decodes as SQRDMLAH; capstone says
+    // that encoding is UNDEFINED (QEMU's 0x1C/0x1D are table case numbers,
+    // not instruction words). Real scalar RDM lives in the keystone-verified
+    // 0x7F40_0000 arm. Decode = None (capstone ground truth).
+    assert_eq!(d(0x9B82_0020), None);
+    // 0x9BA2_0020: capstone = "umaddl x0, w1, w2, x0" — op31=101 widening
+    // unsigned, bit15=0 (the deleted thief arm wrongly called this Sqrdmlah).
     assert_eq!(
         d(0x9BA2_0020),
-        Some(Insn::Sqrdmlah { rd: 0, rn: 1, rm: 2, is64: true, subtract: true })
+        Some(Insn::MaddW { rd: 0, rn: 1, rm: 2, ra: 0, subtract: false, unsigned: true })
     );
-    assert_eq!(
-        d(0x1B82_0020),
-        Some(Insn::Sqrdmlah { rd: 0, rn: 1, rm: 2, is64: false, subtract: false })
-    );
+    // 0x1B820020 (32-bit op31=100): capstone = UNDEFINED — same thief
+    // artifact as 0x9B820020 above (bug #9).
+    assert_eq!(d(0x1B82_0020), None);
 }
 
 // ---------------------------------------------------------------------------

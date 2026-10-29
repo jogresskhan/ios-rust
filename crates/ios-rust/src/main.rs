@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use devices::bus::MMIODevice;
 use a13_cpu::interp::Interpreter;
 use a13_cpu::{CpuBackend, InterpBudget, MemAccess, StopReason};
-use apple_soc::t8030::{T8030Machine, DEFAULT_DRAM_MB};
+use apple_soc::t8030::{effective_dram_mb, T8030Machine};
 use vm_core::Bus;
 use ipsw::im4p::Im4p;
 use ipsw::ramdisk_variants::{BISECTION_VERDICT_74, RamdiskVariant};
@@ -200,7 +200,7 @@ fn cmd_boot(args: &[String]) -> i32 {
 
     // ---- engine smoke: real machine + real CPU over the real bus ----
     println!("engine smoke: T8030 machine + a13 interpreter");
-    let mut machine = T8030Machine::new(DEFAULT_DRAM_MB);
+    let mut machine = T8030Machine::new(effective_dram_mb());
     machine.attach_fallback();
     let serial = machine.serial.clone();
     let mut bus = std::mem::replace(&mut machine.bus, Bus::new());

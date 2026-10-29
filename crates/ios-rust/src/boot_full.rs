@@ -21,7 +21,7 @@ use std::str;
 
 use a13_cpu::interp::{Interpreter, GROUP_NAMES, N_GROUPS};
 use a13_cpu::{CpuBackend, InterpBudget, MemAccess, RunResult, StopReason};
-use apple_soc::t8030::{T8030Machine, DEFAULT_DRAM_MB};
+use apple_soc::t8030::{effective_dram_mb, T8030Machine};
 use img4::im4p::Im4p;
 use kernelcache::sections;
 use restore::bootargs::{boot_args, chosen_properties, BootMode, USER_BOOT_LADDER};
@@ -224,7 +224,7 @@ impl MemAccess for BusMem {
 /// CPU prologue over the real bus, then the userspace ladder checkpoints
 /// up to SpringBoard, painting the homescreen into the framebuffer.
 pub fn boot_restored_install(out_dir: &Path) -> Result<BootReport, String> {
-    let mut machine = T8030Machine::new(DEFAULT_DRAM_MB);
+    let mut machine = T8030Machine::new(effective_dram_mb());
     machine.attach_fallback();
     let serial = machine.serial.clone();
     let mut bus = std::mem::replace(&mut machine.bus, Bus::new());
@@ -387,7 +387,7 @@ pub fn real_kernel_run(dir: &Path) -> Result<RealKernelReport, String> {
         .map(|n| n.children.len())
         .unwrap_or(0);
 
-    let mut machine = T8030Machine::new(DEFAULT_DRAM_MB);
+    let mut machine = T8030Machine::new(effective_dram_mb());
     let devices_attached = machine.attach_from_adt(&adt);
     let unmatched: Vec<String> = machine
         .unimplemented_devices

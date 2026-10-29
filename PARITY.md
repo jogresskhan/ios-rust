@@ -466,6 +466,31 @@ B/H/S/D), across-lane reduces ({S,U}MINV/{S,U}MAXV/ADDV), scalar↔GPR
 (`tools/re/coverage-probe`; unknown 89,707 words, ~46k of them literal-pool
 runs). Workspace test count 352 → 363, all green.
 
+**Session C (2026-10-29, shift-imm + modified-immediate):** the 0x0F group
+decoded+executed end to end. Field rules pinned by keystone sweeps —
+X = immh:immb = bits[22:16]; shift = (16<<size)−X for right forms, X−(8<<size)
+for left forms (SHL/SLI/SQSHL/UQSHL/SQSHLU/SSHLL/USHLL); element size from
+X's MSB; SSRA=op2, SRSHR=op4, SRSRA=op6. Modified immediates: cmode table
+verified against capstone (U=0: even cmode MOVI-32/16, odd ORR-32/16;
+U=1: even MVNI, odd BIC; cmode E U=0 = 8-bit byte-replication — the
+MoviVec64 guard now requires U=1; cmode E U=1 = 64-bit bit-expansion;
+imm8 = (X&7)<<5 | bits[9:5]). FMOV vector imm: VFP-ExpandImm exponent rule
+pinned from the real kernel's `fmov d8, #1.0` (0x1E6E1008, imm8=0x70 →
+NOT(b6)b6b5b4<<4 | 0xF). cvtf .4h (8-bit int) form reserved per capstone.
+**Measured: decode 98.87% → 98.89% (7,878,033/7,966,342), exec probe 98.9%**
+(`tools/re/coverage-probe`; unknown 88,309, ~46k literal-pool runs).
+Environment: sandbox reset twice mid-block (repo restored from the S3 git
+bundle both times); ipsw_range.py had drifted back to the 14.0-beta IPSW
+constant once (re-fixed; CLI now matches tools/re/README.md); guest DRAM is
+IOS_RUST_DRAM_MB-overridable (3 GB sandbox runs boot-real/boot-first in a
+1 GiB window; bootargs memSize follows). boot-real reproduced the M2 stop
+evidence: **8,135,842 insns retired, TranslationFault(load) va=0x4 @
+0xfffffff0081377b4** — the un-rebased chained-fixup pointer. boot-first:
+9 insns retired (irestore lane ✅, stop Halted) — the M2 baseline.
+Remaining honest gap: indexed-multiply (bit10=0, op4 ∉ {C,D,E}) ≈4.5k
+words, three-same FP 0x4e ≈11.5k, SIMD ld/st ≈8.7k, scalar FP ≈4.1k,
+STLUR ≈1k.
+
 Tooling added: `tools/re/macho/bootstop_probe.py` (segment-aware VA→file
 probe for boot-stop forensics), `kc dump` (decompressed Mach-O to disk),
 SP-change tracking + nzcv in the boot-real trace.

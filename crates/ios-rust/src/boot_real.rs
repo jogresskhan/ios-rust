@@ -27,7 +27,7 @@ use std::path::Path;
 
 use a13_cpu::interp::Interpreter;
 use a13_cpu::{CpuBackend, InterpBudget, MemAccess, RunResult, StopReason};
-use apple_soc::t8030::{T8030Machine, DEFAULT_DRAM_MB};
+use apple_soc::t8030::{effective_dram_mb, T8030Machine};
 use img4::im4p::Im4p;
 use macho::header::MachHeader;
 use restore::lzfse;
@@ -45,7 +45,11 @@ const LINK_BASE: u64 = 0xFFFF_FFF0_0700_4000; // kernel __TEXT link VA
 const TOP_OF_KERNEL_DATA: u64 = 0x8_0400_0000;
 const DT_PA: u64 = 0x8_0400_0000;
 const BA_PA: u64 = 0x8_0410_0000;
-const MEM_SIZE: u64 = 0x1_0000_0000; // 4 GiB (iPhone12,1)
+fn mem_size() -> u64 {
+    // 4 GiB (iPhone12,1) by default; IOS_RUST_DRAM_MB shrinks the window
+    // for small sandboxes (bootargs memSize follows, see put(ba, 0x18)).
+    effective_dram_mb() * 1024 * 1024
+}
 const PAUSE_PA: u64 = 0x8_0900_0000; // HLT canary page
 /// LC_SEGMENT_64 / LC_UNIXTHREAD.
 const LC_SEGMENT_64: u32 = 0x19;
@@ -138,7 +142,7 @@ fn build_boot_args(virt_base: u64, phys_base: u64, dt_pa: u64, dt_len: u32) -> V
     ba[2..4].copy_from_slice(&2u16.to_le_bytes()); // Version
     put(&mut ba, 0x08, virt_base);
     put(&mut ba, 0x10, phys_base);
-    put(&mut ba, 0x18, MEM_SIZE);
+    put(&mut ba, 0x18, mem_size());
     put(&mut ba, 0x20, TOP_OF_KERNEL_DATA);
     put(&mut ba, 0x28, dt_pa);
     ba[0x30..0x34].copy_from_slice(&dt_len.to_le_bytes());
@@ -203,7 +207,7 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
     let adt_peripherals = adt.find("arm-io").map(|n| n.children.len()).unwrap_or(0);
 
     // ---- 3) machine assembly (iBoot equivalent) ----
-    let mut machine = T8030Machine::new(DEFAULT_DRAM_MB);
+    let mut machine = T8030Machine::new(effective_dram_mb());
     let devices_attached = machine.attach_from_adt(&adt);
     let serial = machine.serial.clone();
     let mut bus = std::mem::replace(&mut machine.bus, Bus::new());
@@ -231,8 +235,9 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
         "[handoff] PC = {entry_pa:#x} (load PA) · x0 = {BA_PA:#x} (boot_args) · MMU off · \
          EL1 · DAIF masked by the kernel itself"
     );
+    let mem_size = mem_size();
     println!(
-        "[contract] virtBase = {LINK_BASE:#x} · physBase = {LOAD_PA:#x} · memSize = {MEM_SIZE:#x} · \
+        "[contract] virtBase = {LINK_BASE:#x} · physBase = {LOAD_PA:#x} · memSize = {mem_size:#x} · \
          DeviceTree @ {DT_PA:#x} · MIDR = 0x611f0120"
     );
 

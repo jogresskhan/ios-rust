@@ -807,6 +807,17 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
     if (w & 0xFFFF_FC00) == 0xD73F_0C00 {
         return Some(Insn::BrAuth { rn: reg(w, 5), link: true, ab: true });
     }
+    // Z-forms in the 0xD6 space (REAL-DATA BUG #13): BRAAZ/BLRAAZ ship
+    // xnu's indirect-branch tail calls, but the session-A PAC campaign
+    // only pinned the 0xD7 (B-key) arm — the 0xD6 (A-key, Rm=11111) arm
+    // stayed unknown. Masks: census over 0xD61F/0xD63F windows, step=1
+    // (capstone: 0xd61f083f=braaz x1, 0xd63f0a1f=blraaz x16).
+    if (w & 0xFFFF_FC1F) == 0xD61F_081F {
+        return Some(Insn::BrAuth { rn: reg(w, 5), link: false, ab: false });
+    }
+    if (w & 0xFFFF_FC1F) == 0xD63F_081F {
+        return Some(Insn::BrAuth { rn: reg(w, 5), link: true, ab: false });
+    }
     if (w & 0xFFFF_FFE0) == 0xD69F_03E0 {
         return Some(Insn::Eret);
     }
@@ -1122,6 +1133,39 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
                 }
             }
             _ => return None, // opc 01 store = unallocated
+        });
+    }
+
+    // --- v8.1 unscaled release/acquire (REAL-DATA BUG #14): STLUR/LDAPUR
+    //     (top bytes 0x19/0x59/0x99/0xD9 — bits 28:24 = 11001, size from
+    //     bits 31:30, L=bit22 picks store/load) and LDAPR (0xB8/0xF8 with
+    //     bit21=1, bits 23:22=10, Rm=11111). xnu's locking paths ship both;
+    //     session-C census masks (step=1, capstone ground truth:
+    //     0xd900827f=stlur xzr,[x19,#8], 0x9947805f=ldapur wzr,[x2,#0x78],
+    //     0x19038328=stlurb w8,[x25,#0x38], 0xb8bfc27f=ldapr wzr,[x19]).
+    //     Release/acquire ordering is a no-op in this single-threaded
+    //     model — exec rides the plain unscaled LdSt9 path. ---
+    if (w >> 24) & 0x3F == 0x19 && (w >> 21) & 1 == 0 && (w >> 10) & 0x3 == 0 {
+        let size_log2 = ((w >> 30) & 3) as u8;
+        return Some(Insn::LdSt9 {
+            rt: reg(w, 0),
+            rn: reg(w, 5),
+            imm9: sext(((w >> 12) & 0x1FF) as i64, 9),
+            size_log2,
+            load: (w >> 22) & 1 == 1,
+            mode: LsMode::Unscaled,
+        });
+    }
+    // LDAPR (W/X forms — NO imm9; bits 23:12 are a fixed opcode pattern,
+    // size: bit30=0 → 32-bit Wt, bit30=1 → 64-bit Xt).
+    if (w & 0xBFFF_FC00) == 0xB8BF_C000 {
+        return Some(Insn::LdSt9 {
+            rt: reg(w, 0),
+            rn: reg(w, 5),
+            imm9: 0,
+            size_log2: 2 + ((w >> 30) & 1) as u8,
+            load: true,
+            mode: LsMode::Unscaled,
         });
     }
 
@@ -3500,6 +3544,86 @@ mod tests {
     fn unknown_stays_unknown() {
         assert_eq!(decode(0, 0x00000000), None);
         assert_eq!(decode(0, 0xFFFF_FFFF), None);
+    }
+
+    #[test]
+    fn gap_pac_z_forms() {
+        // REAL-DATA BUG #13 — the 0xD6-space A-key Z-forms the session-A
+        // PAC campaign missed. Real 18C66 words (hist 0xd6 bucket).
+        use Insn::BrAuth;
+        assert_eq!(
+            decode(0, 0xD61F_083F), // braaz x1 (real)
+            Some(BrAuth { rn: 1, link: false, ab: false })
+        );
+        assert_eq!(
+            decode(0, 0xD63F_0A1F), // blraaz x16 (real)
+            Some(BrAuth { rn: 16, link: true, ab: false })
+        );
+        assert_eq!(
+            decode(0, 0xD63F_081F), // blraaz xzr
+            Some(BrAuth { rn: 0, link: true, ab: false })
+        );
+        // the B-key 0xD7 arm still decodes (no regression)
+        assert_eq!(
+            decode(0, 0xD71F_0801),
+            Some(BrAuth { rn: 0, link: false, ab: false })
+        );
+        // non-Z 0xD6 words (Rm != 31) stay unknown — not in the census
+        assert_eq!(decode(0, 0xD61F_0800), None);
+    }
+
+    #[test]
+    fn gap_stlur_ldapur_family() {
+        // REAL-DATA BUG #14 — v8.1 unscaled release/acquire. Masks from the
+        // session-C census; exec rides LdSt9 Unscaled.
+        use Insn::LdSt9;
+        use LsMode;
+        let unscaled = LsMode::Unscaled;
+        // REAL: stlur xzr, [x19, #8] (0xD900827F)
+        assert_eq!(
+            decode(0, 0xD900_827F),
+            Some(LdSt9 { rt: 31, rn: 19, imm9: 8, size_log2: 3, load: false, mode: unscaled })
+        );
+        // REAL: ldapur wzr, [x2, #0x78] (0x9947805F)
+        assert_eq!(
+            decode(0, 0x9947_805F),
+            Some(LdSt9 { rt: 31, rn: 2, imm9: 0x78, size_log2: 2, load: true, mode: unscaled })
+        );
+        // REAL: stlurb w8, [x25, #0x38] (0x19038328)
+        assert_eq!(
+            decode(0, 0x1903_8328),
+            Some(LdSt9 { rt: 8, rn: 25, imm9: 0x38, size_log2: 0, load: false, mode: unscaled })
+        );
+        // REAL: ldapr wzr, [x19] (0xB8BFC27F — W-form, no offset field)
+        assert_eq!(
+            decode(0, 0xB8BF_C27F),
+            Some(LdSt9 { rt: 31, rn: 19, imm9: 0, size_log2: 2, load: true, mode: unscaled })
+        );
+        // REAL: ldapr x11, [x11] (0xF8BFC16B — X-form)
+        assert_eq!(
+            decode(0, 0xF8BF_C16B),
+            Some(LdSt9 { rt: 11, rn: 11, imm9: 0, size_log2: 3, load: true, mode: unscaled })
+        );
+        // keystone: ldapur x11, [x11, #-1] (negative imm9 — bit20 arm)
+        assert_eq!(
+            decode(0, 0xD95F_F16B),
+            Some(LdSt9 { rt: 11, rn: 11, imm9: -1, size_log2: 3, load: true, mode: unscaled })
+        );
+        // capstone: stlur w3, [x4, #8] (0x99008083 — 32-bit store arm)
+        assert_eq!(
+            decode(0, 0x9900_8083),
+            Some(LdSt9 { rt: 3, rn: 4, imm9: 8, size_log2: 2, load: false, mode: unscaled })
+        );
+        // capstone: stlurh w3, [x4, #8] (0x59008083 — halfword store arm)
+        assert_eq!(
+            decode(0, 0x5900_8083),
+            Some(LdSt9 { rt: 3, rn: 4, imm9: 8, size_log2: 1, load: false, mode: unscaled })
+        );
+        // LDUR (plain, 0x38 arm) still decodes — no regression
+        assert_eq!(
+            decode(0, 0xF840_000B),
+            Some(LdSt9 { rt: 11, rn: 0, imm9: 0, size_log2: 3, load: true, mode: unscaled })
+        );
     }
 }
 

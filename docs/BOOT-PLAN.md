@@ -19,7 +19,26 @@ evidence next to it). Update it at the END of every work block.
 
 ---
 
-## M1 — ISA closure: every instruction class decoded  [~] (98.87% decode / 98.9% exec)
+## M1 — ISA closure: every instruction class decoded  [~] (98.89% decode / 98.9% exec)
+
+**Progress (2026-10-29, session C — shift-imm + modified-immediate):** the
+0x0F group decoded+executed end to end: SSHR/USHR/SSRA/USRA/SRSHR/URSHR/
+SRSRA/URSRA/SHL/SLI/SRI/SQSHL/UQSHL/SQSHLU + narrowing (SHRN/RSHRN/SQSHRN/
+UQSHRN/SQSHRUN/SQRSHRN/UQRSHRN/SQRSHRUN) + widening (SSHLL/USHLL) +
+fixed-point (SCVTF/UCVTF vector) + MOVI/MVNI/ORR-imm/BIC-imm (cmode table
+capstone-verified) + FMOV vector immediate. **decode 98.87% → 98.89%**
+(7,878,033/7,966,342); exec probe 98.9%. Every field rule pinned by keystone
+sweeps (shift = (16<<size)−X right forms, X−(8<<size) left forms; SSRA=op2,
+RSHR=op4, SRSRA=op6 — NOT 1/2/3 as first guessed). Environment notes: the
+sandbox reset twice mid-session; the 18C66 IPSW constant in ipsw_range.py
+had drifted back to 14.0-beta once (re-fixed, CLI now matches README);
+guest DRAM is now IOS_RUST_DRAM_MB-overridable (sandbox has 3 GB, 1 GiB
+window verified end-to-end). Remaining buckets (hist, fresh):
+0x4e 11,497 · 0x4f-remainder 4,125 (indexed mul family: bit10=0, op4 ∉
+{C,D,E}) · 0x4c 3,785 · 0xbc 3,486 · 0x1e 2,988 · 0x6e 1,683 · 0x3c 1,466 ·
+0x0e 768 · 0x5e 583 · 0x7e 539 · 0xd9 460 · data/pools ≈52k. Next block:
+three-same FP (0x4e/0x6e/0x0e, biggest) + indexed mul (0x4f) + SIMD ld/st
+(0x4c/0x3c/0xbc) + scalar FP remainder (0x1e/0x5e/0x7e) + STLUR (0xd9).
 
 **Progress (2026-10-29, session B — boot-driven):** the boot-real campaign
 pulled SIMD families forward: MOVI-64 (bit→byte imm expansion, measured

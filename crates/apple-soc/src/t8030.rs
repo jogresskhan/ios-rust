@@ -48,6 +48,17 @@ pub const AMCC_BASE: u64 = 0x200000000; // line 147
 /// Default guest visible DRAM (iPhone 11: 4 GB).
 pub const DEFAULT_DRAM_MB: u64 = 4096;
 
+/// Guest-visible DRAM size, overridable for small sandboxes via
+/// IOS_RUST_DRAM_MB (256..=4096 MiB). The bootargs memSize field follows
+/// this value so the guest's physical allocator stays inside the window.
+pub fn effective_dram_mb() -> u64 {
+    std::env::var("IOS_RUST_DRAM_MB")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&m| (256..=4096).contains(&m))
+        .unwrap_or(DEFAULT_DRAM_MB)
+}
+
 /// Headless test map. Bases are the well-known T8030/D79AP values;
 /// `attach_from_adt` overrides at runtime with the IPSW's real map.
 pub const FALLBACK_MAP: &[(&str, u64, u64)] = &[

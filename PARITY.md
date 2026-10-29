@@ -194,6 +194,49 @@ page).
 | real-kernel boot stage | 39,204,080 B decode · patches 6/20 on real bytes · interpreter `executed 8 insns from 0xfffffff007bb0000, stop: Halted` (first function RETs clean) | **75** |
 | **next honest gate (0)** | **kernel image rebase/fixup load** — the prelinked cache ships GOT pointers zeroed (iBoot applies rebase/chained-fixups with the boot slide); without it the first indirect call goes to 0. This is the same fixup machinery as the "KEXT extraction w/ chained fixups" row. | **0** |
 
+### Layer 2.11a — the iOS 14.3 boot attempt (18C66, real T8030 bytes)
+
+Tried to boot a **full iOS 14** on the engine: pulled
+`kernelcache.release.iphone12b` + `DeviceTree.n104ap.im4p` +
+`BuildManifest.plist` out of the 5.4 GB
+`iPhone11,8,iPhone12,1_14.3_18C66_Restore.ipsw` via HTTP range requests and
+ran the pipeline against them. Results, honestly:
+
+1. **iOS 14.3 kernelcache decodes end-to-end**: 45,778,056 B LZFSE →
+   `xnu-7195.62.1~4 (RELEASE ARM64 T8030)`, Darwin 20.2.0, **245 kexts**
+   (`ios-rust kc info`). Patch table on 14.3 real bytes: **8/17 applied**.
+2. **Real-data bug #7 found and fixed**: the iOS 14-era DeviceTree is a
+   DER IM4P carrying an **LZFSE-compressed** flat tree (`bvx2` magic); the
+   13.7-era blob was plain. `boot_full` now LZFSE-decompresses the ADT
+   before the flat parse (`restore::lzfse::is_lzfse` sniff). After the fix
+   the 14.3 ADT parses: **105 peripherals under /arm-io, 59 modeled**.
+3. **The real kernel executes exactly one function**: interpreter ran
+   **9 real instructions** from `__TEXT_EXEC` `0xfffffff007a18000`
+   (BTI retired) to a clean RET→HLT. That is the whole honest extent of
+   real-iOS execution today.
+4. **Measured instruction coverage on the real 14.3 text** (linear decode
+   sweep + single-insn exec probe over all 7,966,342 `__TEXT_EXEC.__text`
+   words): **90.5% decode / 90.4% execute** — ~755 k words unimplemented.
+   Top missing classes (all ordinary code, not exotic ISA): the
+   **PAC-branch family** (`RETAA/RETAB/BRAA/BRAAB/BLRAA/BLRAB` — the
+   kernel is PAC-ified, so every protected return is unexecutable),
+   **pre/post-indexed load-store** (`LDUR/STUR !` and `#-imm` forms),
+   **STP/LDP pair variants** (incl. 128-bit Q forms), the **exception
+   class** (`BRK/HLT/DCPS/DRPS`), plus literal-pool data (~50 k words).
+5. **Ledger honesty fix**: `boot-full`'s gate verdict used to print
+   "full system COMPLETE" off the synthetic ladder. It now reports
+   `G4 synthetic-✅` and names the open gates (rebase/chained-fixups,
+   MMU/TLB, SMP, IRQ delivery, userspace exec) instead of implying a boot.
+6. The userspace ladder (launchd→SpringBoard) and the painted homescreen
+   are **synthetic by construction**: no launchd/SpringBoard binary is
+   fetched from the IPSW or executed; the BMP is drawn by `restore::paint`.
+
+**Verdict of the attempt: iOS 14 does not boot.** The engine reaches the
+first real kernel function and nothing further. The next real gate remains
+the rebase/chained-fixup image load, then MMU + the ~10% missing ISA
+(led by the PAC-branch family), then the IRQ/peripheral completeness
+(46/105 unmodeled) before a userland attempt is even meaningful.
+
 ## Layer 2.10 — REAL-ARTIFACT gates ("use the GitHub action to make download cache", Dec 2026)
 
 Real Apple artifacts are now first-class CI fixtures (`.github/workflows/

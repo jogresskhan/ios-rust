@@ -369,7 +369,16 @@ fn real_kernel_run(dir: &Path) -> Result<RealKernelReport, String> {
     let dt_raw = std::fs::read(dir.join("DeviceTree.n104ap.im4p"))
         .map_err(|e| format!("read devicetree: {e}"))?;
     let im4p = img4::im4p::Im4p::parse(&dt_raw).map_err(|e| format!("devicetree IM4P: {e}"))?;
-    let adt = adt::AdtNode::parse(&im4p.data).map_err(|e| format!("ADT: {e}"))?;
+    // iOS 14+ ships the ADT LZFSE-compressed inside the DER IM4P (real-data
+    // finding on 18C66 n104ap: payload starts with the `bvx2` block magic).
+    // Decompress before the flat-DT parse — the 13.7-era blobs were plain.
+    let dt_blob = if restore::lzfse::is_lzfse(&im4p.data) {
+        restore::lzfse::decompress(&im4p.data, None)
+            .map_err(|e| format!("devicetree LZFSE: {e}"))?
+    } else {
+        im4p.data.clone()
+    };
+    let adt = adt::AdtNode::parse(&dt_blob).map_err(|e| format!("ADT: {e}"))?;
     let adt_peripherals = adt
         .find("arm-io")
         .map(|n| n.children.len())
@@ -551,6 +560,10 @@ pub fn run(ipsw: Option<&Path>, out_dir: &Path) -> i32 {
                 "[3/4] G4 boot: cpu executed={} stop={} prologue={} (IOSR over UART)",
                 r.cpu_executed, r.cpu_stop, if r.prologue_ok { "✅" } else { "❌" }
             );
+            println!(
+                "       (userspace ladder is SYNTHETIC: {} named daemons ticked as counters —\n                no launchd/SpringBoard binary is fetched or executed)",
+                r.ladder_total
+            );
             for (i, (name, desc)) in USER_BOOT_LADDER.iter().enumerate() {
                 println!("       ladder {}/{}: {} — {}", i + 1, r.ladder_total, name, desc);
             }
@@ -563,9 +576,11 @@ pub fn run(ipsw: Option<&Path>, out_dir: &Path) -> i32 {
             );
             println!("boot-args: {}", r.boot_args);
             println!(
-                "gate verdict: G1 ✅ G2 ✅ G3 ✅ G4 {} — full system {}",
-                if r.springboard && r.prologue_ok { "✅" } else { "❌" },
-                if r.springboard && r.prologue_ok { "COMPLETE" } else { "INCOMPLETE" }
+                "gate verdict: G1 ✅ G2 ✅ G3 ✅ G4 {} — pipeline run COMPLETE for the SYNTHETIC
+                ladder; real-kernel execution is stage [2.5/4] only (first-function RET; see
+                ledger). A real iOS boot remains open: rebase/chained-fixups, MMU/TLB, SMP,
+                IRQ delivery, userspace exec — see parity.json permanent_gaps + next gates.",
+                if r.springboard && r.prologue_ok { "synthetic-✅" } else { "❌" }
             );
             if r.springboard && r.prologue_ok {
                 0

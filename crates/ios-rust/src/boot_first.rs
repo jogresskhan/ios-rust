@@ -13,10 +13,12 @@
 //!            real __TEXT_EXEC through the pure-Rust A13 interpreter
 //! ```
 //!
-//! Honest scope (mirrors the ledger): the boot executes the real kernel's
-//! first function and stops where the engine's known gaps stop it
-//! (rebase/chained-fixups, MMU/TLB, IRQ/AIC, userspace). Nothing synthetic
-//! is added past the stop — see PARITY.md Layer 2.11a/b.
+//! Honest scope (mirrors the ledger): the first boot executes the REAL
+//! iBoot→xnu handoff contract (boot_args at physBase in x0, LC_UNIXTHREAD
+//! entry at load PA, MMU off — the measured 8.14M-insn boot-real path) and
+//! stops where the engine's known gaps stop it. The old behavior here —
+//! executing `__TEXT_EXEC.__text[0]` with no handoff state and a 20k cap
+//! (9 insns → Halted) — was not a boot; see PARITY.md Layer 2.11a/d.
 
 use std::path::{Path, PathBuf};
 
@@ -24,6 +26,12 @@ use plist::Value;
 use sha2::{Digest as _, Sha384};
 
 use crate::boot_full;
+use crate::boot_real;
+
+/// Instruction budget for the first boot. The measured honest stop (the
+/// kernel's DeviceTree-dependent CPU-enumeration path) lands at ~8.14M
+/// insns; 12M leaves headroom without running away.
+const BOOT_FIRST_MAX_INSN: u64 = 12_000_000;
 
 pub const BOOT_FIRST_ID: &str = "boot-first v1 (irestore staging → first boot, real bytes)";
 
@@ -236,39 +244,36 @@ pub fn run(fixtures_in: Option<&Path>, out_dir: &Path) -> i32 {
         staged.display()
     );
 
-    // ---- FIRST BOOT: machine assembly + real kernel exec from the staged dir ----
+    // ---- FIRST BOOT: the real iBoot→xnu handoff on the staged bytes ----
     println!("[first boot] iBoot-equivalent: ADT from STAGED DeviceTree → STAGED KernelCache on the Rust backend");
-    match boot_full::real_kernel_run(&staged) {
+    match boot_real::run(&staged, BOOT_FIRST_MAX_INSN) {
         Ok(r) => {
             println!(
-                "[boot 1/3] machine: {} B kernel LZFSE-decoded · patch table {}/{} applied on real bytes",
-                r.image_bytes, r.patches_applied, r.patches_applied + r.patches_missed
+                "[boot 1/3] machine: {} B kernel LZFSE-decoded · link base {:#x} · entry PA {:#x}",
+                r.image_bytes, r.link_base, r.entry_pa
             );
             println!(
-                "[boot 2/3] devices: {}/{} /arm-io peripherals modeled · {} unmatched (see ledger)",
-                r.devices_attached, r.adt_peripherals, r.unmatched.len()
+                "[boot 2/3] devices: {}/{} /arm-io peripherals modeled · boot_args @ {:#x} · DT @ {:#x} ({} B)",
+                r.devices_attached, r.adt_peripherals, r.bootargs_pa, r.dt_pa, r.dt_bytes
             );
             println!(
-                "[boot 3/3] REAL exec: {} instructions retired from {:#x} · stop: {}",
-                r.insns_executed, r.text_exec_va, r.stop
+                "[boot 3/3] REAL exec: {} instructions retired from {:#x} · stop: {:?}",
+                r.res.executed, r.entry_pa, r.res.stop
             );
-            if !r.groups_hit.is_empty() {
-                let g: Vec<String> = r.groups_hit.iter().map(|(n, c)| format!("{n}×{c}")).collect();
-                println!("           ISA groups retired: {}", g.join(", "));
-            }
+            boot_real::print_report(&r);
             println!();
             println!("first-boot verdict (honest):");
             println!("  ✅ irestore lane: BuildManifest identity + SHA-384 component verification + staging");
-            println!("  ✅ iBoot lane:    ADT-driven machine assembly + patch table + kernel mapped at real VA");
+            println!("  ✅ iBoot lane:    real handoff contract (boot_args, LC_UNIXTHREAD entry, MMU-off start)");
             println!(
-                "  {} real xnu execution: {} instructions retired (real Apple 18C66 bytes), stopped at {}",
-                if r.insns_executed > 0 { "✅" } else { "❌" },
-                r.insns_executed,
-                r.stop
+                "  {} real xnu execution: {} instructions retired (real Apple 18C66 bytes)",
+                if r.res.executed > 0 { "✅" } else { "❌" },
+                r.res.executed
             );
-            println!("  ❌ full boot: NOT reached — open gaps (PARITY.md): rebase/chained-fixups image loading,");
-            println!("     MMU/TLB, IRQ/AIC delivery, userspace exec. Nothing synthetic past the stop.");
-            if r.insns_executed > 0 {
+            println!("  ❌ full boot: NOT reached — the honest stop is the kernel's DeviceTree-dependent");
+            println!("     CPU-enumeration path (DT globals ship zero; see PARITY.md Layer 2.11d + M2 notes).");
+            println!("     Nothing synthetic past the stop.");
+            if r.res.executed > 0 {
                 0
             } else {
                 1

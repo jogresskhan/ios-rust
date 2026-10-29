@@ -16,7 +16,7 @@
  },
  "engine_smoke": {
   "status": "PASS",
-  "detail": "boot-full v2: full APFS container build (System/Data/Preboot) → REAL-KERNEL STAGE (the actual T8030 iOS 13.7 kernelcache from Apple's CDN: 39 MB LZFSE decode, 6/20 T8030 patches applied to real bytes, real ADT drives device attach 59/105 peripherals, and the pure-Rust A13 interpreter executes the kernel's first real function to a clean RET→HLT from __TEXT_EXEC 0xfffffff007bb0000) → launchd→SpringBoard ladder → 2436x1125 homescreen; PLUS 20 CPU groups with the 189-entry golden table; PLUS real TSS response parse (gs.apple.com capture). Next honest gate: kernel image rebase/fixup load (GOT pointers ship zeroed) to boot past the first indirect call. RE-toolkit session: measured 90.52%→98.59% decode / 90.4%→98.6% exec on the real 18C66 kernel text after porting PAC-branches, 9-bit addressing, STP/LDP pairs+SIMD, exception class, register-offset LS, add-sub-extended, LSLV family; 3 decoder bugs fixed (MOV-alias swallow, LDP/STP opc map, SIMD LS width rule). boot-first lane (2026-10-29): BuildManifest identity select + SHA-384 component verification (DeviceTree == all 4 n104ap identities; KernelCache == release identities [1]/[4]) → staged install (staging-manifest.txt, status 0) → iBoot-equivalent machine assembly from the STAGED bytes → real 18C66 kernel first function: 9 insns retired from 0xfffffff007a18000, clean RET→HLT. M1-ISA session (2026-10-29): bug #8 (dp-3 guard rejected UMULH AND misdecoded SMULH as MADD — wrong results on real bytes) + bug #9 (QEMU-anchored Sqrdmlah goldens were unassigned encodings) fixed; dp-1 family (RBIT/REV16/REV32/REV/CLZ/CLS both widths), dp-3 op31 map, logical-ROR landed with capstone-derived gap goldens; measured 98.59%→98.69% decode (7861938/7966342) / 98.6%→98.7% exec on real 18C66; new oracle tool bucket_discover.py; BOOT-PLAN.md (docs/) now drives the 2h-cadence campaign to homescreen. M1-ISA session D+E (2026-10-29): five remaining families landed with capstone-oracle field maps — SIMD ld/st reg-off+multiple+single structures, indexed by-element FP/INT/FP16FML, scalar FP (fcmp/fcsel/fmov-imm/FCVT family), 2-reg-misc (rev/xtn/fcvtln/fcvtzs-vec/accross-lane-add), permute/dup/ins/ext/tbl, SHA1/SHA256 crypto, PMULL.1q, SIMD literals. REAL-DATA bugs #15 (reduce guard swallowed three-same Vm=16/17), #16 (FCVTL decoded as AESIMC), #17 (ADC family decoded as CSEL — bit23 divider). Measured decode 99.03%→99.31% (7911692/7966342) / exec 99.3% — M1 gate ≥99.3% CLEARED; cargo test --workspace 288 passed / 0 failed; boot-first 9 insns / Halted (M2 zeroed-GOT stop, not ISA)."
+  "detail": "boot-full v2: full APFS container build (System/Data/Preboot) → REAL-KERNEL STAGE (the actual T8030 iOS 13.7 kernelcache from Apple's CDN: 39 MB LZFSE decode, 6/20 T8030 patches applied to real bytes, real ADT drives device attach 59/105 peripherals, and the pure-Rust A13 interpreter executes the kernel's first real function to a clean RET→HLT from __TEXT_EXEC 0xfffffff007bb0000) → launchd→SpringBoard ladder → 2436x1125 homescreen; PLUS 20 CPU groups with the 189-entry golden table; PLUS real TSS response parse (gs.apple.com capture). Next honest gate: kernel image rebase/fixup load (GOT pointers ship zeroed) to boot past the first indirect call. RE-toolkit session: measured 90.52%→98.59% decode / 90.4%→98.6% exec on the real 18C66 kernel text after porting PAC-branches, 9-bit addressing, STP/LDP pairs+SIMD, exception class, register-offset LS, add-sub-extended, LSLV family; 3 decoder bugs fixed (MOV-alias swallow, LDP/STP opc map, SIMD LS width rule). boot-first lane (2026-10-29): BuildManifest identity select + SHA-384 component verification (DeviceTree == all 4 n104ap identities; KernelCache == release identities [1]/[4]) → staged install (staging-manifest.txt, status 0) → iBoot-equivalent machine assembly from the STAGED bytes → real 18C66 kernel first function: 9 insns retired from 0xfffffff007a18000, clean RET→HLT. M1-ISA session (2026-10-29): bug #8 (dp-3 guard rejected UMULH AND misdecoded SMULH as MADD — wrong results on real bytes) + bug #9 (QEMU-anchored Sqrdmlah goldens were unassigned encodings) fixed; dp-1 family (RBIT/REV16/REV32/REV/CLZ/CLS both widths), dp-3 op31 map, logical-ROR landed with capstone-derived gap goldens; measured 98.59%→98.69% decode (7861938/7966342) / 98.6%→98.7% exec on real 18C66; new oracle tool bucket_discover.py; BOOT-PLAN.md (docs/) now drives the 2h-cadence campaign to homescreen. M1-ISA session D+E (2026-10-29): five remaining families landed with capstone-oracle field maps — SIMD ld/st reg-off+multiple+single structures, indexed by-element FP/INT/FP16FML, scalar FP (fcmp/fcsel/fmov-imm/FCVT family), 2-reg-misc (rev/xtn/fcvtln/fcvtzs-vec/accross-lane-add), permute/dup/ins/ext/tbl, SHA1/SHA256 crypto, PMULL.1q, SIMD literals. REAL-DATA bugs #15 (reduce guard swallowed three-same Vm=16/17), #16 (FCVTL decoded as AESIMC), #17 (ADC family decoded as CSEL — bit23 divider). Measured decode 99.03%→99.31% (7911692/7966342) / exec 99.3% — M1 gate ≥99.3% CLEARED; cargo test --workspace 288 passed / 0 failed. M2 session F (2026-10-29): byte census proved the real 18C66 kernelcache has NO LC_DYLD_CHAINED_FIXUPS/LC_DYLD_INFO (old-style bare kernel; kernel self-rebases via __thread_starts; __auth_ptr ships pre-signed offsets — valid at slide-0 handoff); the 9-insn boot-first stop was a harness artifact (no handoff state, 20k cap) — rewired to the real iBoot contract (boot_real::run, 12M budget); MEASURED boot-first: 8,135,842 real insns retired (gate ≥10,000 CLEARED), MMU 460 walks / 0 faults, new named stop TranslationFault va=0x4 @ 0xfffffff0081377b4 (kernel /cpus DeviceTree enumeration reading DT globals that ship zero, behind the memory-init gate at 0x…b83f54; live lr=0x…7b8cc0c confirms); REAL-DATA BUG #18 (MAIR_EL1 write dropped → MRS read 0) fixed with gap_mair goldens; sandbox reset #3 mid-session — recovered from S3 vault bundle (HEAD 9130a73); cargo test --workspace 290 passed / 0 failed."
  },
  "overall_pct": 74.1,
  "modules": [
@@ -39,13 +39,13 @@
    "name": "a13-cpu decoder",
    "pct": 99,
    "files": 3,
-   "note": "99.03% of real 18C66 __TEXT_EXEC.__text words decode (was 98.89%; session C second half: three-same FP 24 ops (keystone-pinned bit22=width/bit23=half layout), MLA/MLS, BRAAZ/BLRAAZ bug #13, STLUR/LDAPUR/LDAPR bug #14, FCVTZ fixed-point vector)"
+   "note": "99.31% of real 18C66 __TEXT_EXEC.__text words decode (7,911,692/7,966,342; M1 gate ≥99.3% CLEARED — sessions D+E)"
   },
   {
    "name": "a13-cpu interpreter",
    "pct": 85,
    "files": 1,
-   "note": "boot-real: 8.14M real XNU 18C66 instructions executed with MMU live (0 walk faults); stop = first unrebased chained-fixup deref (M2 unlock)"
+   "note": "boot-real AND boot-first (wired to the same real handoff): 8.14M real XNU 18C66 instructions executed with MMU live (460 walks, 0 faults); honest stop = kernel /cpus DeviceTree enumeration reading DT globals that ship zero (see BOOT-PLAN M2) — NOT a fixup stop (census retired that premise)"
   },
   {
    "name": "a13-cpu gxf",
@@ -244,7 +244,7 @@
    "name": "a13-cpu ISA parity (20 groups, ARMv8.4-A)",
    "pct": 90,
    "files": 4,
-   "note": "measured on real iOS 14.3 bytes: 98.89% decode / 98.9% exec (tools/re/coverage-probe; 2026-10-29 session C)"
+   "note": "measured on real iOS 14.3 bytes: 99.31% decode / 99.3% exec (tools/re/coverage-probe; 2026-10-29 sessions D+E)"
   },
   {
    "name": "sandbox (SandBlaster port)",
@@ -367,8 +367,9 @@
   },
   {
    "name": "boot-first lane (irestore SHA-384 staging → FIRST BOOT on real 18C66 bytes)",
-   "pct": 75,
-   "files": 1
+   "pct": 90,
+   "files": 1,
+   "note": "session F: runs the REAL iBoot handoff (boot_args, LC_UNIXTHREAD entry, MMU off) — measured 8,135,842 insns retired, new named stop; was 9 insns/no-state"
   }
  ],
  "permanent_gaps": [
@@ -394,8 +395,8 @@
   }
  ],
  "tests": {
-  "total": 352,
-  "passing": 352
+  "total": 290,
+  "passing": 290
  },
  "sources": [
   "ChefKiss Inferno @cc4302a (hw/ device models, AGPL-3.0/GPL-2.0)",
@@ -405,5 +406,5 @@
   "restored_external 18A5351d decompilation (RE-FINDINGS.md, checkpoint 0x0104/0x065B/0x067E contract)",
   "ARM DDI 0487 (A64 encodings)"
  ],
- "tests_passed": 363
+ "tests_passed": 290
 }

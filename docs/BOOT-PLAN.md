@@ -138,30 +138,64 @@ decode 98.59% / exec 98.6%; unknown 112,101 words of which ~51k are literal pool
 every new family pinned by capstone/keystone-derived `gap_*` goldens;
 `cargo test -p a13-cpu` green.
 
-## M2 — rebase / chained-fixups image loading  [ ]  ← THE first-boot unlock
+## M2 — rebase / chained-fixups image loading  [x] (2026-10-29 session F: boot-first 9 → 8,135,842 insns, new named stop)
 
-**Evidence this is the unlock (2026-10-29):** boot-real now retires
-**8,136,610 real instructions** (kernel's own thread_starts chained walk
-completes, MMU walks its own tables with 0 faults) and stops at
-`ldr w9,[x0,#4]` with `x0 = [x20+8] = NULL` @ 0x…81377b4 — the kernel
-dereferencing an **un-rebased chained-fixup pointer from `__DATA`** while
-parsing "LSSeaico…" launch-services data. The kernel's OWN thread_starts
-walk works because it rebases with its own loop; the general `__DATA`
-pointers are still OUR (iBoot's) job.
+**Premise corrected by byte-level census** (`tools/re/extraction/m2_fixup_census.py`,
+notes in `tools/re/notes/m2-chained-fixups-census.md`): the real 18C66
+`kernelcache.release.iphone12b` is an **old-style bare-kernel Mach-O** —
+25 load commands, **no LC_DYLD_CHAINED_FIXUPS, no LC_DYLD_INFO, no fileset
+entries**; all `__PRELINK_*` segments are zero-size. There is no iBoot-side
+fixup walk to implement. What the file really ships:
 
-The kernel's first function RETs; the first indirect call jumps through a GOT
-entry that ships ZEROED — iBoot rebases it. We must do what iBoot does:
+* `__TEXT,__thread_starts` — u32 (start,end) range list; the **kernel
+  itself** scans those ranges at boot for chained entries and rebases them
+  (loop at 0x…7b802b8 — already executes correctly in the emulator).
+* `__DATA_CONST,__auth_ptr` — 544/544 entries ship NON-zero as
+  pre-signed PAC slots holding offsets from the preferred base (measured:
+  entry[1] = 0x80100000_00a14000; 0xa14000 = `__TEXT_EXEC` − link base).
+  Our handoff loads at the preferred layout (slide 0), so they are valid
+  as shipped.
+* `__DATA,__data` ships mostly zero — filled by the kernel's own boot.
 
-1. Parse the prelinked kernel collection's Mach-O headers (`crates/macho`,
-   `crates/kernelcache::prelink`): segments, LC_DYLD_INFO/DYLD_CHAINED_FIXUPS.
-2. Implement `DYLD_CHAINED_PTR_64` walk: stride, ordinals, rebase targets
-   (slide = image_base − preferred_base), bind fixups.
-3. Apply into the kernel RAM before exec.
-4. **Acceptance:** `boot-first` retires ≥ 10,000 real instructions (vs 9 today)
-   and stops at a NEW named point — never again at the first indirect call.
-5. Record: instructions retired, stop reason/pc, next missing device.
+**The real first-boot unlock was the harness**: `boot-first` was executing
+`__TEXT_EXEC.__text[0]` with no handoff state and a 20k cap (hence "9 insns,
+Halted"). Session F wired it to the real iBoot→xnu handoff contract
+(`boot_real::run`: boot_args at physBase in x0, LC_UNIXTHREAD entry at load
+PA, MMU off) with a 12M budget.
+
+**Acceptance (measured 2026-10-29, debug build, IOS_RUST_DRAM_MB=1024):**
+`boot-first fixtures /tmp/bootfirst` retires **8,135,842 real instructions**
+(gate ≥ 10,000 — CLEARED; was 9), SHA-384 component verification ✅
+(KernelCache == Customer Erase/Upgrade identities), MMU 460 walks / 0
+faults, and stops at a NEW named point — never again at the first indirect
+call:
+
+```
+stop: TranslationFault(load, invalid descriptor) va=0x4 pc=0xfffffff0081377b4
+lr=0xfffffff007b8cc10 (the /cpus caller) · x9="LSSealio" (AppleSPU ALS
+Sealion driver string) · x0 = [x20+8] = NULL — kernel CPU enumeration
+reading DeviceTree globals that ship zero (x[0x…7744988] DT-ptr,
+w[0x…7744998] DT-flag; both 0 in __DATA_CONST,__const) behind the
+memory-init gate at 0x…b83f54 (`bl 0x…8136f10; tbnz w0,#0 → skip stores`).
+```
+
+**Next missing device/evidence (handed to the next work block):** a live
+sysreg/DT trace to determine whether the 0x…7b83fa0 store site executes and
+what the gate returns in-emulator — i.e., why the kernel's DT globals are
+not populated on our path. Recorded in `tools/re/notes/m2-chained-fixups-census.md`.
 
 ## M3 — MMU / TLB  [ ]
+
+**Progress (2026-10-29 session F, groundwork + first fix):** the M3 section
+text was stale — `crates/a13-cpu/src/mmu.rs` is already a real 4K/16K
+stage-1 walker wired to TTBR/TCR/SCTLR (460 walks, 9.1M TLB hits, 0 faults
+on the kernel's own tables — see PARITY 2.11c). REAL-DATA BUG #18 found and
+fixed: the MAIR_EL1 write arm dropped the value (`=> {}`), so every MRS
+read 0 — now round-trips AND feeds `Mmu::set_mair`/`attr_byte` (attr
+indirection source); goldens `gap_mair_*`. Honest gaps remaining: no
+permission/AF/XN enforcement, no ESR/FAR/PAR, no exception vectoring,
+MAIR/TTBR ground values never captured from a real run. Full inventory +
+plan: `tools/re/notes/m3-mmu-groundwork.md`.
 
 xnu builds its own page tables during early boot; the interpreter must walk them.
 

@@ -47,6 +47,11 @@ pub struct Mmu {
     tcr: u64,
     ttbr0: u64,
     ttbr1: u64,
+    /// `MAIR_EL1` — attribute indirection source. Stored on write (the
+    /// interpreter's MRS round-trip reads it back); per-AttrIndex decoding
+    /// is available via `attr_byte`. Enforcement (device-nGnRE must hit the
+    /// Bus, normal must hit RAM) remains the tracked M3 gap.
+    pub mair: u64,
     granule_log2: u8,
     t0sz: u8,
     t1sz: u8,
@@ -73,6 +78,7 @@ impl Mmu {
             tcr: 0,
             ttbr0: 0,
             ttbr1: 0,
+            mair: 0,
             granule_log2: 12, // 4K until TCR says otherwise
             t0sz: 16,         // 48-bit
             t1sz: 16,
@@ -112,6 +118,19 @@ impl Mmu {
     pub fn set_ttbr1(&mut self, v: u64) {
         self.ttbr1 = v & 0x0000_FFFF_FFFF_FFFF;
         self.flush();
+    }
+
+    /// Sync from `MAIR_EL1`. Attribute bytes do not affect existing
+    /// translations, so (unlike TCR/TTBR writes) the TLB is NOT dropped.
+    pub fn set_mair(&mut self, v: u64) {
+        self.mair = v;
+    }
+
+    /// MAIR attribute byte for a descriptor's AttrIndx field (bits[4:2] of
+    /// a stage-1 descriptor's lower attributes). Real decoding per
+    /// DDI0487: AttrIndx indexes 8-bit MAIR fields `mair >> (n*8) & 0xFF`.
+    pub fn attr_byte(&self, attrindx: u8) -> u8 {
+        ((self.mair >> ((attrindx & 7) * 8)) & 0xFF) as u8
     }
 
     pub fn set_enabled(&mut self, on: bool) {

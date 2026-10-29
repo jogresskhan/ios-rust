@@ -553,3 +553,64 @@ the 100-row generated capstone-named table (goldens_m1.rs).
 (UnknownInsn 136); unknown 54,650 of which 36,792 are ≥16-word
 literal-pool runs (data).** `cargo test --workspace` 288 passed / 0 failed.
 boot-first: 9 insns retired, stop Halted (M2 zeroed-GOT stop — not ISA).
+
+### Layer 2.11d — session F: the M2 gate cleared the honest way (census → rewire → measure)
+
+**The sandbox reset a third time mid-session** (repo + ~/.config + /tmp
+wiped at ~16:0x). The S3 vault paid off exactly as designed: the
+vault-index subagent had uploaded a fresh bundle from HEAD 9130a73 at
+15:37, and recovery was `git clone` from
+`research/ios-rust-repo-backup.bundle` + rewritten s3.env — back to a
+verified-clean 9130a73 in minutes. (Also lost and re-pulled: fixtures
+BuildManifest + DeviceTree via `ipsw_range.py`.) A census note records the
+incident (`tools/re/notes/m2-chained-fixups-census.md`).
+
+**M2 census — the BOOT-PLAN premise was wrong, and the bytes said so.**
+`tools/re/extraction/m2_fixup_census.py` (re-runnable) proves the real
+18C66 `kernelcache.release.iphone12b` carries **no fixup metadata at all**:
+25 load commands, no LC_DYLD_CHAINED_FIXUPS / LC_DYLD_INFO, no fileset
+entries, zero-size `__PRELINK_*`. What actually ships: `__TEXT,
+__thread_starts` (u32 range list the kernel itself walks at boot — that
+loop already runs correctly in-emulator), `__DATA_CONST,__auth_ptr`
+(544/544 entries ship NON-zero, pre-signed PAC slots holding preferred-base
+offsets — valid at our slide-0 handoff), and a mostly-zero `__DATA` the
+kernel fills itself. The "un-rebased chained-fixup pointer" story is
+retired; the real stop is **DeviceTree-dependent CPU enumeration**.
+
+**Named-stop root cause (static RE + live trace agree).** The 8.14M stop
+`ldr w9,[x0,#4]` with `x0=[x20+8]=NULL` @ 0x…81377b4: six BL callers, the
+live `lr` lands on 0x…7b8cc0c — code that parses boot-arg `"cpus"` and
+looks up DeviceTree **`"/cpus"`**, then fills a stack struct from globals
+`x[0x…7744988]` (DT ptr) / `w[0x…7744998]` (DT flag) — **both ship 0x0**
+in `__DATA_CONST,__const` — guarded by the memory-init gate
+`bl 0x…8136f10; tbnz w0,#0 → skip stores` (store sites 0x…7b80d24 /
+0x…7b81fd8 / 0x…7b83fa0). The live trace's `x9="LSSealio"` decodes the old
+"LSSeaico" mystery: it's the AppleSPU ALS **Sealion** driver string, not a
+pointer. Next evidence step: a live trace of the gate/store sites.
+
+**REAL-DATA BUG #18 — MAIR_EL1 write dropped.** The M3 groundwork inventory
+(`tools/re/notes/m3-mmu-groundwork.md`, regenerated after the reset from
+the subagent report) found the MAIR write arm was `=> {}` while the read
+arm read the never-filled store — every `mrs mair_el1` returned 0. Fixed:
+write arm round-trips through `sysreg_store` AND feeds
+`Mmu::set_mair(v)`; new `Mmu::attr_byte(attrindx)` decodes AttrIndx → MAIR
+byte (DDI0487). Goldens: `gap_mair_roundtrip`, `gap_mair_mmu_attr_byte`.
+`cargo test --workspace`: **290 passed / 0 failed** (288 + 2).
+
+**boot-first rewired to the real handoff (the actual M2 unlock).** The old
+lane executed `__TEXT_EXEC.__text[0]` with no x0/boot_args and a 20k cap —
+"9 insns, Halted" was a harness artifact, not a kernel wall. It now runs
+`boot_real::run` (boot_args at physBase, LC_UNIXTHREAD entry, MMU off,
+12M budget). **Measured (debug build, IOS_RUST_DRAM_MB=1024):
+8,135,842 real instructions retired** (gate ≥10,000 CLEARED), SHA-384
+component verification ✅, MMU 460 walks / 0 faults, stop
+`TranslationFault(load, invalid descriptor) va=0x4 pc=0xfffffff0081377b4 ·
+clean: true` — the new named M2 stop. BOOT-PLAN M2 marked [x] with the
+corrected mechanism and this run as evidence. parity.json notes updated to
+match (decoder 99.31%, interpreter stop wording, boot-first lane 90%).
+
+Tooling added: `tools/re/extraction/m2_fixup_census.py` (byte census +
+empirical layout validation), notes trio
+(`m2-chained-fixups-census.md`, `m3-mmu-groundwork.md`,
+`s3-vault-manifest.md`). Vault: `s3://ios-research-vault/INDEX.md` now at
+the bucket root for instant discovery.

@@ -3857,8 +3857,13 @@ impl Interpreter {
             // MPAM
             sysreg::MPAM0_EL1 => self.sys.mpam0_el1 = v,
             sysreg::MPAM1_EL1 => self.sys.mpam1_el1 = v,
-            // MAIR: stored, attributes not enforced (honest gap)
-            sysreg::MAIR_EL1 => {}
+            // MAIR: round-trips through sysreg_store (MRS must read back
+            // what MSR wrote — the old arm dropped it, a real round-trip
+            // bug) AND feeds the MMU as the attr-indirection source.
+            sysreg::MAIR_EL1 => {
+                self.sysreg_store.insert(enc, v);
+                self.mmu.set_mair(v);
+            }
             // OSLAR (debug OS lock): unlock write, no effect
             sysreg::OSLAR_EL1 => {}
             // TLBI (op0=1, CRn=8): full software-TLB invalidate. The
@@ -4359,5 +4364,67 @@ fn vindex_fp(
             _ => c - x * y,
         };
         o.to_bits() as u128
+    }
+}
+
+// ---------------------------------------------------------------------------
+// gap_mair_* goldens — REAL-DATA BUG #18: the MAIR_EL1 write arm dropped the
+// value (`=> {}`), so any `msr mair_el1` + later `mrs mair_el1` read 0.
+// Found by the M3 groundwork inventory (tools/re/notes, 2026-10-29 session);
+// the kernel programs MAIR before the SCTLR_EL1.M flip, so every later
+// attribute read came back zero. Fixed: write arm round-trips through
+// sysreg_store AND feeds Mmu::set_mair (attr-indirection source).
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod gap_mair_tests {
+    use super::*;
+
+    struct NullMem;
+    impl MemAccess for NullMem {
+        fn load(&mut self, _addr: u64, _size: u8) -> u64 {
+            0
+        }
+        fn store(&mut self, _addr: u64, _size: u8, _val: u64) {}
+        fn fetch32(&mut self, _addr: u64) -> u32 {
+            0
+        }
+    }
+
+    fn cpu() -> Interpreter {
+        Interpreter::new(Box::new(NullMem))
+    }
+
+    /// MRS must read back exactly what MSR wrote (the bug: always 0).
+    #[test]
+    fn gap_mair_roundtrip() {
+        let mut c = cpu();
+        // synthesized MAIR (the kernel's real value is not yet captured —
+        // honest limit): n=0 normal wb, n=1 device-nGnRE, n=2 normal nc
+        let v: u64 = 0x0000_0000_4400_04FF;
+        c.write_sysreg(sysreg::MAIR_EL1, v);
+        assert_eq!(c.read_sysreg(sysreg::MAIR_EL1), v, "MAIR_EL1 MRS round-trip");
+        // a second write replaces (not ORs) — PMA semantics
+        c.write_sysreg(sysreg::MAIR_EL1, 0x0100_0000_0000_00FF);
+        assert_eq!(c.read_sysreg(sysreg::MAIR_EL1), 0x0100_0000_0000_00FF);
+    }
+
+    /// The MMU mirror receives the write: AttrIndx → MAIR byte decode.
+    #[test]
+    fn gap_mair_mmu_attr_byte() {
+        let mut c = cpu();
+        let v: u64 = 0x0000_0000_4400_04FF;
+        c.write_sysreg(sysreg::MAIR_EL1, v);
+        assert_eq!(c.mmu.mair, v, "Mmu must see the MAIR write");
+        assert_eq!(c.mmu.attr_byte(0), 0xFF, "attr[0] = normal write-back");
+        assert_eq!(c.mmu.attr_byte(1), 0x04, "attr[1] = device-nGnRE");
+        assert_eq!(c.mmu.attr_byte(2), 0x00, "attr[2] unset");
+        assert_eq!(c.mmu.attr_byte(3), 0x44, "attr[3]");
+        assert_eq!(c.mmu.attr_byte(7), 0x00, "attr[7] unset");
+        // direct mmu path too (no interp involved)
+        let mut m = crate::mmu::Mmu::new();
+        m.set_mair(v);
+        assert_eq!(m.attr_byte(1), 0x04);
+        assert_eq!(m.attr_byte(3), 0x44);
+        assert_eq!(m.attr_byte(7), 0x00);
     }
 }

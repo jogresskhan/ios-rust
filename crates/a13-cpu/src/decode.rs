@@ -208,8 +208,9 @@ pub enum Insn {
     /// pattern; `width_log2` = the encoded element width (0=8b,1=16b,2=32b,
     /// 3=64b bit-expansion). Exec replicates the unit across the register.
     MoviVec { rd: u8, op: VecImmOp, value: u64, width_log2: u8, q: bool },
-    /// FMOV (vector, immediate) — cmode 1111, U=0: VFP-ExpandImm of imm8.
-    FmovVecImm { rd: u8, q: bool, imm8: u8 },
+    /// FMOV (vector, immediate) — cmode 1111: VFP-ExpandImm of imm8;
+    /// double = U(29) (0x6F00F400 fmov v0.2d,#2.0 is U=1 = D-lane form).
+    FmovVecImm { rd: u8, q: bool, imm8: u8, double: bool },
     /// CMN (register/immediate) — `adds wzr/xzr, xn, …` (add-flags test).
     CmnImm { rn: u8, imm12: u32, shift: bool, is64: bool },
     CmnReg { rn: u8, rm: u8, kind: ShiftKind, imm6: u32, is64: bool },
@@ -246,6 +247,10 @@ pub enum Insn {
     StrImmU { rt: u8, rn: u8, imm12: u32, size_log2: u8 },
     /// LDR (literal) — `imm` is the sign-extended byte offset from PC.
     LdrLit { rt: u8, imm: i64, is64: bool },
+    /// LDRSW (literal) — sign-extended 32-bit load into X.
+    LdrLitSw { rt: u8, imm: i64 },
+    /// SIMD LDR (literal): S/D/Q register from PC-relative address.
+    LdrLitVec { rt: u8, imm: i64, width_log2: u8 },
     /// LDP — `imm` is the pre-scaled signed byte offset.
     Ldp { rt: u8, rt2: u8, rn: u8, imm: i64, mode: PairMode, is64: bool },
     /// STP.
@@ -278,6 +283,46 @@ pub enum Insn {
     LdStSimd9 { vt: u8, rn: u8, imm9: i64, width_log2: u8, load: bool, mode: LsMode },
     /// SIMD single register, unsigned offset (B/H/S/D/Q); Q = width_log2 4.
     LdStSimdU { vt: u8, rn: u8, imm12: u32, width_log2: u8, load: bool },
+    /// SIMD load/store register offset (session D): LDR/STR Qt/St/Dt, [Xn, Rm
+    /// {, extend {, #s}}] — V=1 arm of the reg-offset group (bit21=1,
+    /// bits 11:10=10). width_log2: 4=Q, 2=S, 3=D.
+    LdStSimdRegOff {
+        vt: u8,
+        rn: u8,
+        rm: u8,
+        option: ExtOp,
+        scaled: bool,
+        width_log2: u8,
+        load: bool,
+    },
+    /// AdvSIMD load/store MULTIPLE structures (LD1/ST1/LD2/ST2/LD3/ST3/LD4/
+    /// ST4 — no-offset + post-index): op4 = bits 15:12, type2 = bits 11:10.
+    LdStMult {
+        q: bool,
+        load: bool,
+        op4: u8,
+        type2: u8,
+        post: bool,
+        rm: u8,
+        rn: u8,
+        rt: u8,
+    },
+    /// AdvSIMD load/store SINGLE structure (one lane) + LD1R/LD2R/LD3R/LD4R.
+    /// s = bit12 (the S index bit); h = bit11 (H index bit); r = bit21
+    /// (LD2R/LD4R select); size2 = bits 11:10.
+    LdStSingle {
+        q: bool,
+        load: bool,
+        op4: u8,
+        s: bool,
+        h: bool,
+        r: bool,
+        size2: u8,
+        post: bool,
+        rm: u8,
+        rn: u8,
+        rt: u8,
+    },
     /// RETAA / RETAB (auth-return; QARMA-model auth is a no-op strip).
     RetA { ab: bool },
     /// BRAA/BRAB/BLRAA/BLRAB — authenticated branch (register).
@@ -394,6 +439,9 @@ pub enum Insn {
     Extr { rd: u8, rn: u8, rm: u8, lsb: u32, is64: bool },
     /// CSEL/CSINC/CSINV/CSNEG (conditional select).
     Csel { rd: u8, rn: u8, rm: u8, cond: Cond, op: CselOp, is64: bool },
+    /// ADC/ADCS/SBC/SBCS (session D, bug #17 companion): carry-select add
+    /// with C from NZCV; S writes flags.
+    Adc { rd: u8, rn: u8, rm: u8, setflags: bool, subtract: bool, is64: bool },
     /// CCMP/CCMN (immediate `#imm5` or register form).
     Ccmp { rn: u8, rm_imm: u8, nzcv: u8, cond: Cond, ccmn: bool, is64: bool },
     /// MSR (immediate): DAIFSet/DAIFClr.
@@ -460,6 +508,57 @@ pub enum Insn {
     },
     /// AESE/AESD/AESMC/AESIMC.
     Vaes { vd: u8, vn: u8, op: AesOp },
+    /// Session-D standard indexed (by-element) families: FP fmul/fmla/fmls/
+    /// fmulx and integer mla/mls/mul/smlal/umlal/smlsl/umlsl/sqdmull/
+    /// sqdmlal/sqdmlsl/sqdmulh/sqrdmulh.
+    VindexStd { vd: u8, vn: u8, vm: u8, op: VindexStdOp, index: u8, size_log2: u8, q: bool },
+    /// Two-register miscellaneous (session D): rev/abs/neg/xtx/cnt/cls/clz/
+    /// compares-against-zero, across-lane adds, int<->float conversions,
+    /// narrowing/widening FCVT, ADDP-scalar. rm field validated in decode.
+    V2Misc { rd: u8, rn: u8, q: bool, size: u8, op: V2MiscOp },
+    /// Permute class (session D): ZIP1/ZIP2/UZP1/UZP2/TRN1/TRN2.
+    VPerm { rd: u8, rn: u8, rm: u8, size: u8, op: PermOp },
+    /// EXT (vector byte extract), imm4 = bits 15:11.
+    VExt { rd: u8, rn: u8, rm: u8, imm4: u8, q: bool },
+    /// TBL/TBX with 1..4 table registers (len = regs, from bits 15:12).
+    VTbl { rd: u8, rn: u8, rm: u8, len: u8, tbx: bool, q: bool },
+    /// DUP (element) — vector <- vector[lane].
+    VDupElem { rd: u8, rn: u8, index: u8, size_log2: u8, q: bool },
+    /// DUP (scalar) — vector <- Xn/Wn.
+    VDupGpr { rd: u8, rn: u8, size_log2: u8, q: bool },
+    /// INS (general) — vector[lane] <- Wn/Xn.
+    VInsGpr { rd: u8, rn: u8, index: u8, size_log2: u8, src64: bool },
+    /// INS (element) — vector[lane] <- vector[lane].
+    VInsLane { rd: u8, rn: u8, dst_index: u8, src_index: u8, size_log2: u8, q: bool },
+    /// UMOV/SMOV — Wd/Xd <- vector[lane] (zero/sign-extended).
+    VVecToGpr { rd: u8, rn: u8, index: u8, size_log2: u8, signed: bool, dest64: bool },
+    /// Widening (long) class: S/UADDL, S/UADDW, S/USUBL, S/USUBW, S/UMLAL,
+    /// S/UMLSL (Q=1 selects the "2" high-half forms).
+    VLong { vd: u8, vn: u8, vm: u8, size: u8, u: bool, q: bool, op: VLongOp },
+    /// SHA1 scalar rotate + 2-reg schedule helpers.
+    VSha1H { rd: u8, rn: u8 },
+    VSha1Su1 { vd: u8, vn: u8 },
+    VSha256Su0 { vd: u8, vn: u8 },
+    /// SHA1C/SHA1P/SHA1M (3-reg round function), SHA1SU0, SHA256H/H2,
+    /// SHA256SU1.
+    VSha1Cpm { vd: u8, vn: u8, vm: u8, op: Sha1CpmOp },
+    VSha1Su0 { vd: u8, vn: u8, vm: u8 },
+    VSha256H { vd: u8, vn: u8, vm: u8, h2: bool },
+    VSha256Su1 { vd: u8, vn: u8, vm: u8 },
+    /// Scalar FP compare (FCMP/FCMPE, register or #0.0 form).
+    FpCmp { rn: u8, rm: u8, zero: bool, e: bool, double: bool },
+    /// Scalar FP conditional compare (FCCMP/FCCMPE).
+    Fccmp { rn: u8, rm: u8, nzcv: u8, cond: u8, e: bool, double: bool },
+    /// Scalar FP conditional select (FCSEL).
+    Fcsel { rd: u8, rn: u8, rm: u8, cond: u8, double: bool },
+    /// Scalar FP register move (FMOV Sd,Sn / Dd,Dn).
+    FmovReg { rd: u8, rn: u8, double: bool },
+    /// Scalar FP immediate move (FMOV Sd/Dd, #imm8 — VFPExpandImm).
+    FmovImm { rd: u8, imm8: u8, double: bool },
+    /// Scalar integer<->FP conversions (plain + fixed-point + FMOV gpr<->fp).
+    FpIntCvt { rd: u8, rn: u8, kind: FpIntCvtKind, double: bool, gpr64: bool, fbits: u8 },
+    /// Scalar pairwise adds (ADDP Dd, Vn.2D / FADDP scalar family).
+    AddpScalar { rd: u8, rn: u8, double: bool },
     /// SHA512SU0 / SM4E (two-register misc crypto).
     Vsha512su0 { vd: u8, vn: u8 },
     Vsm4e { vd: u8, vn: u8 },
@@ -473,7 +572,9 @@ pub enum Insn {
     /// FCVT between half/single/double.
     Fcvt { rd: u8, rn: u8, from: FpType, to: FpType },
     /// Scalar FP16 2-source arithmetic.
-    Fp2 { rd: u8, rn: u8, rm: u8, op: VfpOp },
+    /// Scalar 2-source FP (Fp2): S/D/H via the type field (session D routes
+    /// scalar fadd/fsub/fmul/fdiv/fmax/fmin/fmaxnm/fminnm here).
+    Fp2 { rd: u8, rn: u8, rm: u8, op: VfpOp, ty: FpType },
     /// Scalar FP16 1-source (FABS/FNEG/FSQRT).
     Fp1 { rd: u8, rn: u8, op: Vfp1Op },
     /// SCVTF/UCVTF into half (W/X source) or out of half (S/D dest).
@@ -664,6 +765,9 @@ pub enum VfpOp {
     Div,
     Max,
     Min,
+    /// Session D: scalar 2-source FMAXNM/FMINNM (census ~250 words).
+    Maxnm,
+    Minnm,
 }
 
 /// Scalar/vector FP16 1-source op.
@@ -710,9 +814,6 @@ pub enum FpType {
     H,
 }
 
-/// Decode one 32-bit A64 word. `pc` is the address of the instruction
-/// (kept in the signature for API symmetry and future literal-pool work;
-/// all PC-relative immediates are stored relative to it).
 /// AdvSIMD three-same integer op (opcode bits[15:10] + U).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum V3Op {
@@ -737,6 +838,133 @@ pub enum V3Op {
     Mla,
     /// 100101 U=1: MLS (vector)
     Mls,
+    /// 010001 (U: 0=SSHL signed / 1=USHL logical) — shift by signed register
+    Shl,
+    /// 010011: SQSHL / UQSHL (saturating)
+    Sqshl,
+    /// 010101: SRSHL / URSHL (saturating reverse)
+    Rshl,
+    /// 010111: SQRSHL / UQRSHL
+    Rsqshl,
+    /// 101111: ADDP (pairwise add, three-register form)
+    Addp3,
+}
+
+/// Session-D standard indexed (by-element) ops (opcode bits 15:12 + U(29)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VindexStdOp {
+    Fmla,
+    Fmls,
+    Fmul,
+    Fmulx,
+    Mla,
+    Mul,
+    Mls,
+    Smlal,
+    Umlal,
+    Smlsl,
+    Umlsl,
+    Smull,
+    Umull,
+    Sqdmull,
+    Sqdmlal,
+    Sqdmlsl,
+    Sqdmulh,
+    Sqrdmulh,
+    /// FP16FML widening (FMLAL/FMLSL/FMLAL2/FMLSL2 by element, size==10):
+    /// sub = FMLSx, two = the high-half form. pin_m1d3.py (capstone):
+    /// U=0 0000 FMLAL, U=0 0100 FMLSL, U=1 1000 FMLAL2, U=1 1100 FMLSL2.
+    Fp16Fml { sub: bool, two: bool },
+}
+
+/// Two-register miscellaneous op (session D; opcode bits 15:10 + U(29) +
+/// rm selector {0, 1, 16}).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum V2MiscOp {
+    Rev64,
+    Rev32,
+    Rev16,
+    Saddlp,
+    Uaddlp,
+    Suqadd,
+    Usqadd,
+    Cls,
+    Clz,
+    Cnt,
+    Cmgt0,
+    Cmge0,
+    Cmeq0,
+    Cmle0,
+    Cmlt0,
+    Abs,
+    Neg,
+    Fabs,
+    Fneg,
+    Xtn,
+    Sqxtn,
+    Uqxtn,
+    Fcvtn,
+    Fcvtxn,
+    Fcvtl,
+    Fcvtzs,
+    Fcvtzu,
+    Scvtf,
+    Ucvtf,
+    Fsqrt,
+    Saddlv,
+    Uaddlv,
+    /// Pairwise add accumulate (rm=10000, opcode 011010).
+    Sadalp,
+    Uadalp,
+    /// Across-lane add non-widening (rm=10001, opcode 101110, U=0).
+    Addv,
+}
+
+/// Permute op (bits 15:12).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PermOp {
+    Uzp1,
+    Trn1,
+    Zip1,
+    Uzp2,
+    Trn2,
+    Zip2,
+}
+
+/// Widening (long) op (opcode bits 15:10, U(29) picks S/U).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VLongOp {
+    Addl,
+    Addw,
+    Subl,
+    Subw,
+    Mlal,
+    Mlsl,
+    /// SMULL/UMULL (opcode 110000, capstone 0x2E22C020 umull).
+    Mull,
+}
+
+/// SHA1C/P/M round-function selector (bits 23:22 = 00/01/10 per capstone on
+/// real kernel words).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sha1CpmOp {
+    Ch,
+    Parity,
+    Maj,
+}
+
+/// Scalar integer<->FP conversion kind (opcode5 = bits 20:16, keystone
+/// grid-pinned: rmode(2) : op(3)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FpIntCvtKind {
+    /// FCVTNS/NU/AS/AU/PS/PU/MS/MU/ZS/ZU (FP -> signed/unsigned GPR)
+    FcvtGpr { round: u8 },
+    /// SCVTF / UCVTF (GPR -> FP)
+    Cvtf { unsigned: bool },
+    /// FMOV Wd,Sn / Xd,Dn (gpr <- fp)
+    MovFromFp,
+    /// FMOV Sd,Wn / Dd,Xn (fp <- gpr)
+    MovToFp,
 }
 
 /// AdvSIMD three-same FP op (session C keystone pin): opcode bits[15:10] +
@@ -1128,19 +1356,34 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
 
     // --- Load literal: bits29:24 == 011000 ---
     if (w >> 24) & 0x3F == 0x18 {
+        let imm = sext(((w >> 5) & 0x7_FFFF) as i64, 19) * 4;
         return match (w >> 30) & 0x3 {
-            0 => Some(Insn::LdrLit {
-                rt: reg(w, 0),
-                imm: sext(((w >> 5) & 0x7_FFFF) as i64, 19) * 4,
-                is64: false,
-            }),
-            1 => Some(Insn::LdrLit {
-                rt: reg(w, 0),
-                imm: sext(((w >> 5) & 0x7_FFFF) as i64, 19) * 4,
-                is64: true,
-            }),
-            _ => None, // SIMD literal / LDRSW
+            0 => Some(Insn::LdrLit { rt: reg(w, 0), imm, is64: false }),
+            1 => Some(Insn::LdrLit { rt: reg(w, 0), imm, is64: true }),
+            2 => Some(Insn::LdrLitSw { rt: reg(w, 0), imm }),
+            _ => None,
         };
+    }
+
+    // --- Session D: SIMD LDR (literal) + PRFM (literal): bits 29:24 =
+    //     11100 with bit31=0 (top bytes 0x1C/0x5C/0x9C/0xDC). opc bits
+    //     31:30 {00: S(4B), 01: D(8B), 10: Q(16B)}; PRFM (0xD8, bit31=1)
+    //     is a Nop in this model. (keystone: 1C000020/5C000040/9C000080.) ---
+    if (w >> 24) & 0x3F == 0x1C {
+        if (w >> 31) & 1 == 1 {
+            return Some(Insn::Nop); // PRFM (literal) — no prefetch effect
+        }
+        let width_log2 = match (w >> 30) & 0x3 {
+            0 => 2u8,
+            1 => 3u8,
+            2 => 4u8,
+            _ => return None,
+        };
+        return Some(Insn::LdrLitVec {
+            rt: reg(w, 0),
+            imm: sext(((w >> 5) & 0x7_FFFF) as i64, 19) * 4,
+            width_log2,
+        });
     }
 
     // --- LDP/STP: group bits[29:25] = 10100 (V=0) / 10110 (V=1);
@@ -1350,6 +1593,91 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
             imm12: (w >> 10) & 0xFFF,
             width_log2,
             load: opc & 1 == 1,
+        });
+    }
+
+    // --- Session D: SIMD load/store REGISTER OFFSET (V=1 arm of the
+    //     reg-offset group): 0x3C/0x7C/0xBC/0xFC with bit21=1 and
+    //     bits 11:10 = 10. Field map (keystone grid): opc bits 23:22
+    //     {10 = STR, 11 = LDR}; size bits 31:30 {00 = Q(16B), 01 = S,
+    //     10 = D}; option = bits 15:13 (same ExtOp table as the GPR arm),
+    //     S = bit12 (scaled: shift = log2(width)). Real census words:
+    //     0xBC697822 ldr s2,[x1,x9,lsl #2]; 0x3CE86920 ldr q0,[x9,x8];
+    //     0xFC2D6A60 str d0,[x19,x13]. ---
+    if (w >> 24) & 0x3F == 0x3C && (w >> 21) & 1 == 1 && (w >> 10) & 0x3 == 0b10 {
+        let size = ((w >> 30) & 0x3) as u8;
+        let opc = (w >> 22) & 0x3;
+        // Field map (keystone + capstone on real words): opc<0> (bit22) = L
+        // (load); opc<1> (bit23) = 1 → Q form, else size {01: S, 10: D}.
+        let load = opc & 1 == 1;
+        let width_log2 = if opc & 0b10 != 0 {
+            4u8
+        } else {
+            match size {
+                1 => 2u8, // S
+                2 => 3u8, // D
+                _ => return None,
+            }
+        };
+        return Some(Insn::LdStSimdRegOff {
+            vt: reg(w, 0),
+            rn: reg(w, 5),
+            rm: reg(w, 16),
+            option: ExtOp::from_bits((w >> 13) & 0x7)?,
+            scaled: (w >> 12) & 1 == 1,
+            width_log2,
+            load,
+        });
+    }
+
+    // --- Session D: AdvSIMD load/store MULTIPLE structures (0x0C/0x4C).
+    //     Field map (keystone grid): bit23 = post-index, bit22 = L,
+    //     Rm = bits 20:16 (11111 = immediate post), opcode = bits 15:12
+    //     {0x0: ST4/LD4, 0x2: ST1/LD1 (4 regs), 0x4: ST3/LD3, 0x6: ST1/LD1
+    //     (3 regs), 0x7: ST1/LD1 (1 reg), 0x8: ST2/LD2, 0xA: ST1/LD1
+    //     (2 regs)}, type = bits 11:10 (00=B/8B, 01=H, 10=S, 11=D).
+    //     Real census words: 0x4C40A880 ld1 {v0.4s,v1.4s},[x4];
+    //     0x4CDF6BE0 ld1 3reg post #48; 0x4C008D43 st2 {v3.2d,v4.2d}. ---
+    if (w >> 31) & 1 == 0 && (w >> 24) & 0x3F == 0x0C {
+        let op4 = ((w >> 12) & 0xF) as u8;
+        match op4 {
+            0x0 | 0x2 | 0x4 | 0x6 | 0x7 | 0x8 | 0xA => {}
+            _ => return None,
+        }
+        return Some(Insn::LdStMult {
+            q: (w >> 30) & 1 == 1,
+            load: (w >> 22) & 1 == 1,
+            op4,
+            type2: ((w >> 10) & 0x3) as u8,
+            post: (w >> 23) & 1 == 1,
+            rm: reg(w, 16),
+            rn: reg(w, 5),
+            rt: reg(w, 0),
+        });
+    }
+
+    // --- Session D: AdvSIMD load/store SINGLE structure (one lane) +
+    //     LD1R/LD2R/LD3R/LD4R (0x0D/0x4D). Field map (keystone grid):
+    //     bit23 = post-index, bit22 = L, Rm = bits 20:16, opcode4 =
+    //     bits 15:12 {0x0/0x1: B (index = Q:S:size2), 0x4/0x5: H
+    //     (index = Q:S:bit11), 0x8/0x9: S if size2==00 (index = Q:S)
+    //     else D if size2==01 (index = Q); 0xC/0xD/0xE/0xF = LD1R/LD2R/
+    //     LD3R/LD4R (repeat count from bit21, element = size2)}. ---
+    if (w >> 31) & 1 == 0 && (w >> 24) & 0x3F == 0x0D {
+        let op4 = ((w >> 12) & 0xF) as u8;
+        let size2 = ((w >> 10) & 0x3) as u8;
+        return Some(Insn::LdStSingle {
+            q: (w >> 30) & 1 == 1,
+            load: (w >> 22) & 1 == 1,
+            op4,
+            s: (w >> 12) & 1 == 1,
+            h: (w >> 11) & 1 == 1,
+            r: (w >> 21) & 1 == 1,
+            size2,
+            post: (w >> 23) & 1 == 1,
+            rm: reg(w, 16),
+            rn: reg(w, 5),
+            rt: reg(w, 0),
         });
     }
 
@@ -1645,8 +1973,13 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
     }
 
     // --- CSEL/CSINC/CSINV/CSNEG: bits 28:24 == 11010; bit30 = INV/NEG;
-    //     op2 = bits 11:10 (00/01); cond = bits 15:12 ---
-    if (w >> 24) & 0x1F == 0x1A && (w >> 29) & 1 == 0 && (w >> 22) & 1 == 0 {
+    //     op2 = bits 11:10 (00/01); cond = bits 15:12. REAL-DATA BUG #17
+    //     fix: bit23 = 1 here — ADC/ADCS/SBC/SBCS share the 11010 group
+    //     with bit23=0 and opcode bits 15:10 = 000000, and without the
+    //     bit23 check `adc x0, x1, x2` (0x1A020020) decoded as CSEL x0,
+    //     x1, x2, eq (keystone cross-check: 1A020020 adc vs 1A820020
+    //     csel — the divider is bit23, NOT bit21: both have bit21=0). ---
+    if (w >> 24) & 0x1F == 0x1A && (w >> 29) & 1 == 0 && (w >> 22) & 1 == 0 && (w >> 23) & 1 == 1 {
         // CSEL/CSINC (bit30=0) vs CSINV/CSNEG (bit30=1); op2 = bits 11:10
         let inv = (w >> 30) & 1 == 1;
         let op2 = (w >> 10) & 3;
@@ -1664,6 +1997,21 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
             rm: reg(w, 16),
             cond,
             op,
+            is64: w >> 31 == 1,
+        });
+    }
+
+    // --- Session D (bug #17 companion): ADC/ADCS/SBC/SBCS — bits 28:24 ==
+    //     11010, bit23=0, opcode bits 15:10 = 000000; op(30)=subtract,
+    //     S(29)=setflags. (keystone: 1A020020 adc, 3A020020 adcs,
+    //     5A020020 sbc, BA020020 adcs x.) ---
+    if (w >> 24) & 0x1F == 0x1A && (w >> 23) & 1 == 0 && (w >> 10) & 0x3F == 0 {
+        return Some(Insn::Adc {
+            rd: reg(w, 0),
+            rn: reg(w, 5),
+            rm: reg(w, 16),
+            setflags: (w >> 29) & 1 == 1,
+            subtract: (w >> 30) & 1 == 1,
             is64: w >> 31 == 1,
         });
     }
@@ -1791,6 +2139,249 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
         });
     }
 
+    // --- Session D: bit21=0 copy/permute block (0x0E-space, bit23=0) +
+    //     permute class (bit23=1). Opcode = bits 15:10; keystone grid:
+    //     000001 DUP-elem (U=0, bits11:10=01, index = imm5>>(pos+1)),
+    //     000011 DUP-gpr (U=0, bits11:10=11, esize from trailing-one),
+    //     000111 INS-general (U=0, bits11:10=11), 001001 INS-lane (U=1,
+    //     bits11:10=01), 001011 SMOV (U=0, bits11:10=11), 001111 UMOV
+    //     (U=0, bits11:10=11), even 0x10..0x1E U=1 bit10=0 = EXT
+    //     (imm4 = bits 15:11), bits11:10=00 + U=0 = TBL/TBX (len = bits
+    //     15:12 {0:tbl1, 1:tbx1, 2:tbl2, 3:tbx2, 4:tbl3, 5:tbx3, 6:tbl4,
+    //     7:tbx4}); bit23=1 + bits11:10=10 = permute (zip1=001110,
+    //     zip2=011110, uzp1=000110, uzp2=010110, trn1=001010, trn2=011010,
+    //     size = bits 23:22). ---
+    if (w & 0x9F00_0000) == 0x0E00_0000 && (w >> 21) & 1 == 0 {
+        let u = (w >> 29) & 1 == 1;
+        if (w >> 23) & 1 == 1 {
+            // permute: bits 11:10 = 10
+            if (w >> 10) & 0x3 == 0b10 {
+                use PermOp::*;
+                let op = match (w >> 12) & 0xF {
+                    0b0001 => Uzp1,
+                    0b0010 => Trn1,
+                    0b0011 => Zip1,
+                    0b0101 => Uzp2,
+                    0b0110 => Trn2,
+                    0b0111 => Zip2,
+                    _ => return None,
+                };
+                return Some(Insn::VPerm {
+                    rd: reg(w, 0),
+                    rn: reg(w, 5),
+                    rm: reg(w, 16),
+                    size: ((w >> 22) & 3) as u8,
+                    op,
+                });
+            }
+        } else {
+            let opcode = (w >> 10) & 0x3F;
+            let rm = reg(w, 16);
+            if (w >> 10) & 0x3 == 0b00 && !u {
+                // TBL/TBX (U=0)
+                let sel = (w >> 12) & 0x7;
+                if sel <= 0b110 {
+                    return Some(Insn::VTbl {
+                        rd: reg(w, 0),
+                        rn: reg(w, 5),
+                        rm,
+                        len: (1 + (sel >> 1)) as u8,
+                        tbx: sel & 1 == 1,
+                        q: (w >> 30) & 1 == 1,
+                    });
+                }
+                return None;
+            }
+            match (u, opcode) {
+                // DUP element (U=0, bits 11:10 = 01)
+                (false, 0b000001) if (w >> 10) & 0x3 == 0b01 => {
+                    let imm5 = reg(w, 16) as u32;
+                    let tz = imm5.trailing_zeros();
+                    if imm5 == 0 || imm5 & (1 << tz) == 0 || tz > 3 {
+                        return None;
+                    }
+                    let size_log2 = tz as u8;
+                    return Some(Insn::VDupElem {
+                        rd: reg(w, 0),
+                        rn: reg(w, 5),
+                        index: (imm5 >> (tz + 1)) as u8,
+                        size_log2,
+                        q: (w >> 30) & 1 == 1,
+                    });
+                }
+                // DUP general (U=0, bits 11:10 = 11): esize marker = bits 20:16
+                (false, 0b000011) if (w >> 10) & 0x3 == 0b11 => {
+                    let tz = (rm as u32).trailing_zeros();
+                    if rm == 0 || (rm as u32 >> tz) != 1 || tz > 3 {
+                        return None;
+                    }
+                    return Some(Insn::VDupGpr {
+                        rd: reg(w, 0),
+                        rn: reg(w, 5),
+                        size_log2: tz as u8,
+                        q: (w >> 30) & 1 == 1,
+                    });
+                }
+                // INS general (U=0, bits 11:10 = 11)
+                (false, 0b000111) if (w >> 10) & 0x3 == 0b11 => {
+                    let imm5 = rm as u32;
+                    let tz = imm5.trailing_zeros();
+                    if imm5 == 0 || imm5 & (1 << tz) == 0 || tz > 3 {
+                        return None;
+                    }
+                    return Some(Insn::VInsGpr {
+                        rd: reg(w, 0),
+                        rn: reg(w, 5),
+                        index: (imm5 >> (tz + 1)) as u8,
+                        size_log2: tz as u8,
+                        src64: w >> 31 == 1,
+                    });
+                }
+                // INS lane (U=1, bits 11:10 = 01)
+                (true, 0b001001) if (w >> 10) & 0x3 == 0b01 => {
+                    let imm5 = rm as u32;
+                    let tz = imm5.trailing_zeros();
+                    if imm5 == 0 || imm5 & (1 << tz) == 0 || tz > 3 {
+                        return None;
+                    }
+                    let dst_size = tz as u8;
+                    let src_imm4 = ((w >> 11) & 0xF) as u32;
+                    let src_size = match dst_size {
+                        0 => 0u8,
+                        1 => 1u8,
+                        2 => 2u8,
+                        _ => 3u8,
+                    };
+                    return Some(Insn::VInsLane {
+                        rd: reg(w, 0),
+                        rn: reg(w, 5),
+                        dst_index: (imm5 >> (tz + 1)) as u8,
+                        src_index: (src_imm4 >> src_size) as u8,
+                        size_log2: dst_size,
+                        q: (w >> 30) & 1 == 1,
+                    });
+                }
+                // SMOV (U=0, bits 11:10 = 11)
+                (false, 0b001011) if (w >> 10) & 0x3 == 0b11 => {
+                    let imm5 = rm as u32;
+                    let tz = imm5.trailing_zeros();
+                    if imm5 == 0 || imm5 & (1 << tz) == 0 || tz > 2 {
+                        return None;
+                    }
+                    return Some(Insn::VVecToGpr {
+                        rd: reg(w, 0),
+                        rn: reg(w, 5),
+                        index: (imm5 >> (tz + 1)) as u8,
+                        size_log2: tz as u8,
+                        signed: true,
+                        dest64: w >> 31 == 1,
+                    });
+                }
+                // UMOV (U=0, bits 11:10 = 11)
+                (false, 0b001111) if (w >> 10) & 0x3 == 0b11 => {
+                    let imm5 = rm as u32;
+                    let tz = imm5.trailing_zeros();
+                    if imm5 == 0 || imm5 & (1 << tz) == 0 || tz > 2 {
+                        return None;
+                    }
+                    return Some(Insn::VVecToGpr {
+                        rd: reg(w, 0),
+                        rn: reg(w, 5),
+                        index: (imm5 >> (tz + 1)) as u8,
+                        size_log2: tz as u8,
+                        signed: false,
+                        dest64: w >> 31 == 1,
+                    });
+                }
+                // EXT (U=1, bit10=0, bit15=0)
+                (true, _) if (w >> 10) & 1 == 0 && (w >> 15) & 1 == 0 && opcode >= 0b000000 => {
+                    // EXT: imm4 = bits 15:11 (bit15=0); opcode 6-bit = imm4<<1
+                    if (w >> 16) & 0x1F == 0 && opcode & 1 == 0 {
+                        return Some(Insn::VExt {
+                            rd: reg(w, 0),
+                            rn: reg(w, 5),
+                            rm: reg(w, 16),
+                            imm4: (opcode >> 1) as u8,
+                            q: (w >> 30) & 1 == 1,
+                        });
+                    }
+                    return None;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // --- Session D: SHA1/SHA256 crypto (bits 29:24 = 0_11110 — top bytes
+    //     {0x5E, 0xDE}; bit29 = 0! capstone: 5E044272 sha256h has bit29=0),
+    //     size bits 23:22 = 00. Opcode map (capstone sweep):
+    //     3-reg (bit21=0): 000000 SHA1C, 000100 SHA1P, 001000 SHA1M,
+    //     001100 SHA1SU0, 010000 SHA256H, 010100 SHA256H2, 011000
+    //     SHA256SU1; 2-reg (bit21=1, rm = 01000): bits 15:11 {001 SHA1H,
+    //     011 SHA1SU1, 101 SHA256SU0}. Non-matching words fall through to
+    //     the scalar-FP guards (fcvtps shares the rm=01000 bit21=1 shape). ---
+    if (w >> 24) & 0x3F == 0x1E && (w >> 22) & 3 == 0 {
+        if (w >> 21) & 1 == 0 {
+            let opcode = (w >> 10) & 0x3F;
+            match opcode {
+                0b000000 => {
+                    return Some(Insn::VSha1Cpm {
+                        vd: reg(w, 0),
+                        vn: reg(w, 5),
+                        vm: reg(w, 16),
+                        op: Sha1CpmOp::Ch,
+                    })
+                }
+                0b000100 => {
+                    return Some(Insn::VSha1Cpm {
+                        vd: reg(w, 0),
+                        vn: reg(w, 5),
+                        vm: reg(w, 16),
+                        op: Sha1CpmOp::Parity,
+                    })
+                }
+                0b001000 => {
+                    return Some(Insn::VSha1Cpm {
+                        vd: reg(w, 0),
+                        vn: reg(w, 5),
+                        vm: reg(w, 16),
+                        op: Sha1CpmOp::Maj,
+                    })
+                }
+                0b001100 => {
+                    return Some(Insn::VSha1Su0 { vd: reg(w, 0), vn: reg(w, 5), vm: reg(w, 16) })
+                }
+                0b010000 => {
+                    return Some(Insn::VSha256H {
+                        vd: reg(w, 0),
+                        vn: reg(w, 5),
+                        vm: reg(w, 16),
+                        h2: false,
+                    })
+                }
+                0b010100 => {
+                    return Some(Insn::VSha256H {
+                        vd: reg(w, 0),
+                        vn: reg(w, 5),
+                        vm: reg(w, 16),
+                        h2: true,
+                    })
+                }
+                0b011000 => {
+                    return Some(Insn::VSha256Su1 { vd: reg(w, 0), vn: reg(w, 5), vm: reg(w, 16) })
+                }
+                _ => {}
+            }
+        } else if reg(w, 16) == 8 {
+            match (w >> 11) & 0x1F {
+                0b001 => return Some(Insn::VSha1H { rd: reg(w, 0), rn: reg(w, 5) }),
+                0b011 => return Some(Insn::VSha1Su1 { vd: reg(w, 0), vn: reg(w, 5) }),
+                0b101 => return Some(Insn::VSha256Su0 { vd: reg(w, 0), vn: reg(w, 5) }),
+                _ => {}
+            }
+        }
+    }
+
     // --- AdvSIMD three-same LOGICAL: bits[28:24]==01110, bit21=1,
     //     opcode bits[15:10]==000111. U(29)+size(23:22) pick one of
     //     AND/BIC/ORR/ORN (U=0) or EOR/BSL/BIT/EON (U=1); Q picks .16b/.8b.
@@ -1811,14 +2402,21 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
     }
 
     // --- AdvSIMD across-lane reduce: bits[28:24]==01110, size(23:22)==00,
-    //     bit21=1, bits[20:18]==000, opcode bits[15:10]: 101010 = MINV/MAXV
-    //     (bit16: 1=min, 0=max; U: 0=signed, 1=unsigned), 101110+bit16=ADDV.
+    //     bit21=1, bits[20:17]==1000 (Rm 16/17 slot), opcode bits[15:10]:
+    //     101010 = MINV/MAXV (bit16: 1=min, 0=max; U: 0=signed, 1=unsigned),
+    //     101110+bit16=ADDV. REAL-DATA BUG #15 fix: this guard used to
+    //     return None for any non-reduce opcode in the bits20:17==1000
+    //     slot — but that slot overlaps three-same insns with Vm=16/17
+    //     (fadd v0.4s,v0.4s,v16.4s = 0x4E30D400; ~1.5k real kernel words
+    //     were swallowed). The guard now falls through unless the opcode
+    //     IS a reduce op.
     //     (capstone: 0x6E31A801=uminv, 0x0E31A801=sminv, 0x6E30A801=umaxv,
     //     0x4E30A801=smaxv, 0x4E31B801=addv.)
     if (w & 0x9F00_0000) == 0x0E00_0000
         && (w >> 22) & 3 == 0
         && (w >> 21) & 1 == 1
         && (w >> 17) & 0xF == 0b1000
+        && matches!((w >> 10) & 0x3F, 0b101010 | 0b101110)
     {
         let size = ((w >> 22) & 3) as u8; // always 0 here; kept for exec shape
         let op = match ((w >> 10) & 0x3F, (w >> 16) & 1, (w >> 29) & 1) {
@@ -1836,6 +2434,79 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
             op,
             q: (w >> 30) & 1 == 1,
         });
+    }
+
+    // --- Session D: two-register miscellaneous (bit21=1, bit10=0, rm in
+    //     {0, 1, 10000, 10001}). Field map keystone-pinned (pin_m1d2.py):
+    //     opcode bits 15:10 + U(29); rm selects the sub-table:
+    //     rm=0: REV64(U0)/REV32(U1) 000010, REV16 000110, SADDLP(U0)/
+    //     UADDLP(U1) 001010, SUQADD(U0)/USQADD(U1) 001110, CLS(U0)/CLZ(U1)
+    //     010010, CNT 010110, CMGT#0(U0)/CMGE#0(U1) 100010, CMEQ#0(U0)/
+    //     CMLE#0(U1) 100110, CMLT#0 101010, ABS(U0)/NEG(U1) 101110,
+    //     FABS(U0)/FNEG(U1) 111110.
+    //     rm=1: XTN 001010, SQXTN(U0)/UQXTN(U1) 010010, FCVTN(U0)/FCVTXN(U1)
+    //     011010 (size=01), FCVTL 011110 (size=01), FCVTZS(U0)/FCVTZU(U1)
+    //     101110, FSQRT 111110.
+    //     rm=10000: SADDLV(U0)/UADDLV(U1) 001110. (rm 10000/10001 with
+    //     opcodes 101010/101110 are the reduce ops above.) ---
+    if (w & 0x9F00_0000) == 0x0E00_0000
+        && (w >> 21) & 1 == 1
+        && (w >> 10) & 1 == 0
+        && matches!(reg(w, 16), 0 | 1 | 16)
+    {
+        let opcode = (w >> 10) & 0x3F;
+        let u = (w >> 29) & 1 == 1;
+        let rm = reg(w, 16);
+        let size = ((w >> 22) & 3) as u8;
+        use V2MiscOp::*;
+        let op = match (rm, opcode, u) {
+            (0, 0b000010, false) => Some(Rev64),
+            (0, 0b000010, true) => Some(Rev32),
+            (0, 0b000110, false) => Some(Rev16),
+            (0, 0b001010, false) => Some(Saddlp),
+            (0, 0b001010, true) => Some(Uaddlp),
+            (0, 0b001110, false) => Some(Suqadd),
+            (0, 0b001110, true) => Some(Usqadd),
+            (0, 0b010010, false) => Some(Cls),
+            (0, 0b010010, true) => Some(Clz),
+            (0, 0b010110, false) => Some(Cnt),
+            (0, 0b100010, false) => Some(Cmgt0),
+            (0, 0b100010, true) => Some(Cmge0),
+            (0, 0b100110, false) => Some(Cmeq0),
+            (0, 0b100110, true) => Some(Cmle0),
+            (0, 0b101010, false) => Some(Cmlt0),
+            (0, 0b101110, false) => Some(Abs),
+            (0, 0b101110, true) => Some(Neg),
+            (0, 0b111110, false) => Some(Fabs),
+            (0, 0b111110, true) => Some(Fneg),
+            (1, 0b001010, false) => Some(Xtn),
+            (1, 0b010010, false) => Some(Sqxtn),
+            (1, 0b010010, true) => Some(Uqxtn),
+            (1, 0b011010, false) => Some(Fcvtn),
+            (1, 0b011010, true) => Some(Fcvtxn),
+            (1, 0b011110, false) => Some(Fcvtl),
+            (1, 0b101110, false) => Some(Fcvtzs),
+            (1, 0b101110, true) => Some(Fcvtzu),
+            (1, 0b111110, true) => Some(Fsqrt),
+            (1, 0b110110, false) => Some(Scvtf),
+            (1, 0b110110, true) => Some(Ucvtf),
+            (16, 0b001110, false) => Some(Saddlv),
+            (16, 0b001110, true) => Some(Uaddlv),
+            (16, 0b011010, false) => Some(Sadalp),
+            (16, 0b011010, true) => Some(Uadalp),
+            (17, 0b101110, false) => Some(Addv),
+            _ => None,
+        };
+        if let Some(op) = op {
+            // validity: FCVTN/FCVTXN need size==01 (dest S/H table);
+            // FCVTL needs size==01 (D-dest) or 00 (H-dest)
+            match op {
+                Fcvtn | Fcvtxn if size != 1 => return None,
+                Fcvtl if size > 1 => return None,
+                _ => {}
+            }
+            return Some(Insn::V2Misc { rd: reg(w, 0), rn: reg(w, 5), q: (w >> 30) & 1 == 1, size, op });
+        }
     }
 
     // --- AdvSIMD three-same INTEGER arithmetic/compare: bits[28:24]==01110,
@@ -1867,6 +2538,20 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
             // session C census: 100101 = MLA (U=0) / MLS (U=1)
             (0b100101, false) => Some(V3Op::Mla),
             (0b100101, true) => Some(V3Op::Mls),
+            // session D: shift-by-register three-same (bit10=1 arm) —
+            // keystone: 4EA24420 sshl / 6EA14444 ushl (010001),
+            // 4EA24C20 sqshl / 6EA24C20 uqshl (010011), 4EA25420 srshl /
+            // 6EA25420 urshl (010101), 4EA25C20 sqrshl / 6EA25C20 uqrshl
+            // (010111); ADDP 4EA2BC20 (101111).
+            (0b010001, false) => Some(V3Op::Shl),
+            (0b010001, true) => Some(V3Op::Shl),
+            (0b010011, false) => Some(V3Op::Sqshl),
+            (0b010011, true) => Some(V3Op::Sqshl),
+            (0b010101, false) => Some(V3Op::Rshl),
+            (0b010101, true) => Some(V3Op::Rshl),
+            (0b010111, false) => Some(V3Op::Rsqshl),
+            (0b010111, true) => Some(V3Op::Rsqshl),
+            (0b101111, _) => Some(V3Op::Addp3),
             _ => None,
         };
         if let Some(op) = v3op {
@@ -1879,6 +2564,37 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
                 q: (w >> 30) & 1 == 1,
                 op,
             });
+        }
+        // --- Session D: widening (long) class — bit21=1, opcode bits 15:10
+        //     {000000 S/UADDL, 000100 S/UADDW, 001000 S/USUBL, 001100
+        //     S/USUBW, 100000 S/UMLAL, 101100 S/UMLSL} (keystone:
+        //     0x4E620020 saddl2 op=000000, 0x6E228020 umlal2 op=100000).
+        //     Q=1 selects the "2" high-half source form. ---
+        {
+            let opcode = (w >> 10) & 0x3F;
+            let u = (w >> 29) & 1 == 1;
+            use VLongOp::*;
+            let op = match opcode {
+                0b000000 => Some(Addl),
+                0b000100 => Some(Addw),
+                0b001000 => Some(Subl),
+                0b001100 => Some(Subw),
+                0b100000 => Some(Mlal),
+                0b101100 => Some(Mlsl),
+                0b110000 => Some(Mull),
+                _ => None,
+            };
+            if let Some(op) = op {
+                return Some(Insn::VLong {
+                    vd: reg(w, 0),
+                    vn: reg(w, 5),
+                    vm: reg(w, 16),
+                    size: ((w >> 22) & 3) as u8,
+                    u,
+                    q: (w >> 30) & 1 == 1,
+                    op,
+                });
+            }
         }
         // --- three-same FP (session C keystone pin): opcode bits[15:10] +
         //     U(29) + bit23 picks the op; width = bit22 (0=S, 1=D). Guard
@@ -1969,8 +2685,9 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
                 // --- modified-immediate / FP-imm fallthrough (X < 8) ---
                 let cmode = ((w >> 12) & 0xF) as u8;
                 let imm8 = (((w >> 5) & 0x1F) | (((w >> 16) & 7) << 5)) as u8;
-                if cmode == 0xF && !u {
-                    return Some(Insn::FmovVecImm { rd: reg(w, 0), q, imm8 });
+                if cmode == 0xF {
+                    // U=0: .4s/.2s FP32 lanes; U=1: .2d FP64 lanes
+                    return Some(Insn::FmovVecImm { rd: reg(w, 0), q, imm8, double: u });
                 }
                 // (op, width_log2, shift) — only capstone-verified arms.
                 let spec = match (cmode, u) {
@@ -2101,54 +2818,163 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
         return None;
     }
 
-    // --- Advanced SIMD three-register (indexed): bits 28:24 == 01111.
-    //     STRUCTURAL decode (no local v8.1+ assembler oracle — see the
-    //     goldens header): opcode at bits 15:12 {1110 = SDOT/UDOT,
-    //     1100+U = FCMLA(rot=13:12)/SQRDMLAH, 1101+U = FCADD/ SQRDMLSH};
-    //     L=bit21, M=bit20, H=bit11 select the element index. ---
+    // --- Advanced SIMD three-register (indexed): bits 28:24 == 01111,
+    //     bit10 == 0. AUTHORITATIVE map from tools/re/oracle/pin_m1d3.py
+    //     (capstone brute-force over every (opcode4,U,size) combo; index
+    //     formulas verified on 728 disassemblies; the old hand-derived
+    //     structural table had wrong rows — 0x6F82C020 is fmlsl2, not
+    //     sqrdmlah; 0x4F42C020 is sqdmulh, not fcmla):
+    //       FP (U=0: 0001 FMLA / 0101 FMLS / 1001 FMUL; U=1: 1001 FMULX)
+    //         size 0 = .8h FP16, 2 = .4s, 3 = .2d;
+    //         index = H:L:M (.8h), H:L (.4s), H (.2d)
+    //       FCMLA (U=1, opcode4 ∈ {0001,0011,0101,0111}, rot = opcode4>>1;
+    //         size 1 = .8h, 2 = .4s)
+    //       FP16FML (size==2: U=0 0000 FMLAL, U=0 0100 FMLSL,
+    //         U=1 1000 FMLAL2, U=1 1100 FMLSL2; index = H:L:M)
+    //       INT (size 1/2): U=1 0000 MLA / 0100 MLS; U=0 1000 MUL;
+    //         widening U=0 0010 SMLAL 0011 SQDMLAL 0110 SMLSL 0111 SQDMLSL
+    //         1010 SMULL 1011 SQDMULL; U=1 0010 UMLAL 0110 UMLSL 1010 UMULL;
+    //         U=0 1100 SQDMULH 1101 SQRDMULH; U=1 1101 SQRDMLAH 1111 SQRDMLSH
+    //       DOT (opcode4=1110, size==2): U=0 SDOT / U=1 UDOT
+    //       (sudot/bfdot/usdot/bfmlalt at opcode4=1111 stay honest gaps.)
     if (w & 0x9F00_0000) == 0x0F00_0000 || (w & 0x9F00_0000) == 0x8F00_0000 {
-        let opcode4 = (w >> 12) & 0xF;
-        let l = (w >> 21) & 1;
-        let m = (w >> 20) & 1;
-        let h = (w >> 11) & 1;
+        if (w >> 10) & 1 != 0 {
+            return None; // shift-imm / MOVI space — handled upstream
+        }
+        let opcode4 = ((w >> 12) & 0xF) as u8;
+        let l = ((w >> 21) & 1) as u8;
+        let m = ((w >> 20) & 1) as u8;
+        let h = ((w >> 11) & 1) as u8;
         let u = (w >> 29) & 1 == 1;
         let q = (w >> 30) & 1 == 1;
         let size = ((w >> 22) & 3) as u8;
-        if (w >> 10) & 1 != 0 {
+        let vd = reg(w, 0);
+        // H-width lanes steal M (bit20) as the low index bit — Rm is then
+        // only bits 19:16 (V0..V15). For S/D widths M is the Rm register
+        // MSB (capstone: fmla .4s M=1 → v18.s[...]).
+        let vm4 = reg(w, 16) & 0xF; // M stolen for index (H-width / FP16FML)
+        let vm5 = reg(w, 16);
+        let idx_h = ((h << 2) | (l << 1) | m) as u8;
+        let idx_s = ((h << 1) | l) as u8;
+        let idx_d = h;
+
+        // FP: FMLA/FMLS/FMUL(U=0)/FMULX(U=1) — size 0 (.8h)/2 (.4s)/3 (.2d)
+        let fp_op = match (opcode4, u) {
+            (0b0001, false) => Some(VindexStdOp::Fmla),
+            (0b0101, false) => Some(VindexStdOp::Fmls),
+            (0b1001, false) => Some(VindexStdOp::Fmul),
+            (0b1001, true) => Some(VindexStdOp::Fmulx),
+            _ => None,
+        };
+        if let Some(op) = fp_op {
+            if matches!(size, 0 | 2 | 3) {
+                let (size_log2, index) = match size {
+                    0 => (1u8, idx_h),
+                    2 => (2u8, idx_s),
+                    _ => (3u8, idx_d),
+                };
+                let vm = if size == 0 { vm4 } else { vm5 };
+                return Some(Insn::VindexStd { vd, vn: reg(w, 5), vm, op, index, size_log2, q });
+            }
             return None;
         }
-        let size_log2 = if size == 2 { 2u8 } else { 1u8 };
-        let index: u8 = if size_log2 == 1 {
-            ((h << 2) | (l << 1) | m) as u8
-        } else {
-            ((h << 1) | l) as u8
-        };
-        let op = match (opcode4, u) {
-            (0xE, false) => VIndexedOp::Sdot,
-            (0xE, true) => VIndexedOp::Udot,
-            // rot lives in the size-field slot (bits 23:22) for the
-            // complex-indexed ops (no size encoding there)
-            (0xC, false) => VIndexedOp::Fcmla(((w >> 22) & 3) as u8),
-            (0xC, true) => VIndexedOp::Sqrdmlah,
-            (0xD, false) => VIndexedOp::Fcadd((w >> 23) & 1 == 1),
-            (0xD, true) => VIndexedOp::Sqrdmlsh,
-            _ => return None,
-        };
-        return Some(Insn::Vindexed {
-            vd: reg(w, 0),
-            vn: reg(w, 5),
-            vm: reg(w, 16),
-            op,
-            index,
-            size_log2,
-            q,
-        });
+        // FCMLA by element: U=1, rot = opcode4>>1, size 1 (.8h)/2 (.4s)
+        if u && matches!(opcode4, 0b0001 | 0b0011 | 0b0101 | 0b0111) {
+            if matches!(size, 1 | 2) {
+                let (size_log2, index) = if size == 1 { (1u8, idx_h) } else { (2u8, idx_s) };
+                let vm = if size == 1 { vm4 } else { vm5 };
+                return Some(Insn::Vindexed {
+                    vd,
+                    vn: reg(w, 5),
+                    vm,
+                    op: VIndexedOp::Fcmla((opcode4 >> 1) as u8),
+                    index,
+                    size_log2,
+                    q,
+                });
+            }
+            return None;
+        }
+        // FP16FML widening (size==2; M is an index bit even here)
+        if size == 2 {
+            if let Some((sub, two)) = match (opcode4, u) {
+                (0b0000, false) => Some((false, false)), // FMLAL
+                (0b0100, false) => Some((true, false)),  // FMLSL
+                (0b1000, true) => Some((false, true)),   // FMLAL2
+                (0b1100, true) => Some((true, true)),    // FMLSL2
+                _ => None,
+            } {
+                return Some(Insn::VindexStd {
+                    vd,
+                    vn: reg(w, 5),
+                    vm: vm4,
+                    op: VindexStdOp::Fp16Fml { sub, two },
+                    index: idx_h,
+                    // size_log2 2 = dest S-lane semantics (exec loop lanes
+                    // 4/2 match the .4s/.2s dest), src lanes read at H
+                    // width inside the exec arm.
+                    size_log2: 2,
+                    q,
+                });
+            }
+        }
+        // INT families — size 1 (.8h) / 2 (.4s) only
+        if matches!(size, 1 | 2) {
+            let (size_log2, index) = if size == 1 { (1u8, idx_h) } else { (2u8, idx_s) };
+            let vm = if size == 1 { vm4 } else { vm5 };
+            // RDM (v8.1) and DOT keep the Vindexed home (exec lives there)
+            match (opcode4, u) {
+                (0b1101, true) => {
+                    return Some(Insn::Vindexed {
+                        vd, vn: reg(w, 5), vm,
+                        op: VIndexedOp::Sqrdmlah, index, size_log2, q,
+                    });
+                }
+                (0b1111, true) => {
+                    return Some(Insn::Vindexed {
+                        vd, vn: reg(w, 5), vm,
+                        op: VIndexedOp::Sqrdmlsh, index, size_log2, q,
+                    });
+                }
+                (0b1110, _) if size == 2 => {
+                    return Some(Insn::Vindexed {
+                        vd, vn: reg(w, 5), vm,
+                        op: if u { VIndexedOp::Udot } else { VIndexedOp::Sdot },
+                        index, size_log2: 2, q,
+                    });
+                }
+                _ => {}
+            }
+            use VindexStdOp::*;
+            let op = match (opcode4, u) {
+                (0b0000, true) => Mla,
+                (0b0100, true) => Mls,
+                (0b1000, false) => Mul,
+                (0b0010, false) => Smlal,
+                (0b0010, true) => Umlal,
+                (0b0110, false) => Smlsl,
+                (0b0110, true) => Umlsl,
+                (0b1010, false) => Smull,
+                (0b1010, true) => Umull,
+                (0b1011, false) => Sqdmull,
+                (0b0011, false) => Sqdmlal,
+                (0b0111, false) => Sqdmlsl,
+                (0b1100, false) => Sqdmulh,
+                (0b1101, false) => Sqrdmulh,
+                _ => return None,
+            };
+            return Some(Insn::VindexStd { vd, vn: reg(w, 5), vm, op, index, size_log2, q });
+        }
+        return None;
     }
 
     // =====================================================================
     // FP16 scalar (FP data-processing): M S 0001110 …
     // =====================================================================
-    if (w & 0x7F00_0000) == 0x1E00_0000 {
+    // --- Session D: widen the scalar-FP space to the full bits28:24 =
+    //     11110 class (0x1E/0x3E/0x5E/0x7E/0x9E/… — the old 0x7F mask
+    //     missed the U=1 forms 0x5E/0x7E where UCVTF/FCVTZU live). ---
+    if (w >> 24) & 0x1F == 0x1E {
         if let Some(f) = decode_fp_scalar(w) {
             return Some(f);
         }
@@ -2242,11 +3068,16 @@ fn decode_simd(w: u32) -> Option<Insn> {
             _ => None,
         };
     }
-    // --- AES (U=0, bit21=1, bits 15:12 in 4..7, bit11=1); other U=0
-    //     bit21=1 words: PMULL (opcode 0x38 — bit21 is its 7th opcode bit) ---
+    // --- AES (U=0, bit21=1, bits 15:12 in 4..7, bit11=1, size(23:22)==00);
+    //     PMULL (opcode 0x38 — bit21 is its 7th opcode bit; size 00 = 8→16
+    //     and size 11 = 64→128 (PMULL .1q, capstone 0x0EE0E000)).
+    //     REAL-DATA BUG #16 fix: without the size==00 guard on AES,
+    //     FCVTL collided with AESIMC; PMULL-d64 needed the size split too. ---
     if !big && (w >> 21) & 1 == 1 && group24 == 0x0E {
+        let opcode = (w >> 10) & 0x3F;
+        let size = ((w >> 22) & 3) as u8;
         let hi = (w >> 12) & 0xF;
-        if hi >= 4 && hi <= 7 && (w >> 11) & 1 == 1 {
+        if size == 0 && hi >= 4 && hi <= 7 && (w >> 11) & 1 == 1 {
             let op = match hi {
                 4 => AesOp::Ese,
                 5 => AesOp::Esd,
@@ -2338,7 +3169,121 @@ fn decode_fp_scalar(w: u32) -> Option<Insn> {
         3 => FpType::H,
         _ => return None,
     };
-    if (w >> 11) & 1 == 1 {
+    let double = ty == FpType::D;
+    let bit21 = (w >> 21) & 1 == 1;
+    let b11 = (w >> 11) & 1 == 1;
+    let b10 = (w >> 10) & 1 == 1;
+
+    // --- Session D (keystone pin_m1d.py, all U-space aware):
+    //     bit21=1 + bits 11:10 = 11 → FCSEL (cond = bits 15:12)
+    //     bit21=1 + bits 11:10 = 01 → FCCMP/FCCMPE (cond = bits 15:12,
+    //         E = bit14, nzcv = bits 3:0)
+    //     bit21=1 + bits 15:10 = 001000 → FCMP/FCMPE (zero-form bit3, E bit4)
+    //     bit21=1 + bit12=1, bit11=0, bit10=0 → FMOV #imm (imm8 = 20:13)
+    //     bit21=1 + bits 15:10 = 000000 → plain conversions, opcode5 =
+    //         bits 20:16 (rmode 2b : op 3b): 00000 FCVTNS, 00001 FCVTNU,
+    //         00010 SCVTF, 00011 UCVTF, 00100 FCVTAS, 00101 FCVTAU,
+    //         01000 FCVTPS, 01001 FCVTPU, 00110 FMOV gpr<-fp, 00111 FMOV
+    //         fp<-gpr, 11000 FCVTZS, 11001 FCVTZU (gpr64 = bit31 for the
+    //         gpr-side width; FMOV gpr forms use bit31 too)
+    //     bit21=0 + opcode5 in {11000,11001,00010,00011} → fixed-point
+    //         (fbits = 64 - bits 15:10)
+    //     rm = 10000 + bit21=1 → scalar pairwise ADDP (0x5E U=0 int-D?) /
+    //         FADDP-scalar. Census: addp d0,v0.2d = 0x5EF1B800 (opcode
+    //         bits 15:10 = 101110, big=0, U=1).
+    //     Existing 2-source (bit11=1, bit10=0): opcode bits 14:12 with
+    //         FMAXNM=6 / FMINNM=7 added (census fmaxnm/fminnm 250 words).
+    //     Existing 1-source op10 map unchanged (abs/neg/sqrt/fcvt/fjcvtzs).
+
+    if bit21 && b11 && b10 {
+        // FCSEL
+        return Some(Insn::Fcsel { rd, rn, rm, cond: ((w >> 12) & 0xF) as u8, double });
+    }
+    if bit21 && !b11 && b10 {
+        // FCCMP / FCCMPE
+        return Some(Insn::Fccmp {
+            rn,
+            rm,
+            nzcv: ((w) & 0xF) as u8,
+            cond: ((w >> 12) & 0xF) as u8,
+            e: (w >> 14) & 1 == 1,
+            double,
+        });
+    }
+    if bit21 && !b11 && !b10 {
+        let opcode6 = (w >> 10) & 0x3F;
+        if opcode6 == 0b001000 {
+            // FCMP / FCMPE
+            return Some(Insn::FpCmp {
+                rn,
+                rm,
+                zero: (w >> 3) & 1 == 1,
+                e: (w >> 4) & 1 == 1,
+                double,
+            });
+        }
+        if (w >> 12) & 1 == 1 {
+            // FMOV immediate (imm8 = bits 20:13)
+            return Some(Insn::FmovImm { rd, imm8: ((w >> 13) & 0xFF) as u8, double });
+        }
+        if opcode6 == 0b000000 && ty != FpType::H {
+            // plain conversions: opcode5 = bits 20:16 (H-type keeps the
+            // legacy FpCvtInt/FpCvtFixed op10 paths below)
+            let op5 = (w >> 16) & 0x1F;
+            // round: 0=NS 1=NU 2=AS 3=AU 6=PS 7=PU (low bit = unsigned);
+            // exec mode = round>>1 {0:N, 1:A, 3:P} — 4/5 = Z pair
+            let kind = match op5 {
+                0b00000 => Some(FpIntCvtKind::FcvtGpr { round: 0 }),
+                0b00001 => Some(FpIntCvtKind::FcvtGpr { round: 1 }),
+                0b00100 => Some(FpIntCvtKind::FcvtGpr { round: 2 }),
+                0b00101 => Some(FpIntCvtKind::FcvtGpr { round: 3 }),
+                0b01000 => Some(FpIntCvtKind::FcvtGpr { round: 6 }),
+                0b01001 => Some(FpIntCvtKind::FcvtGpr { round: 7 }),
+                0b11000 => Some(FpIntCvtKind::FcvtGpr { round: 4 }),
+                0b11001 => Some(FpIntCvtKind::FcvtGpr { round: 5 }),
+                0b00010 => Some(FpIntCvtKind::Cvtf { unsigned: false }),
+                0b00011 => Some(FpIntCvtKind::Cvtf { unsigned: true }),
+                0b00110 => Some(FpIntCvtKind::MovFromFp),
+                0b00111 => Some(FpIntCvtKind::MovToFp),
+                _ => None, // fall through to the legacy op10 map (FJCVTZS…)
+            };
+            if let Some(kind) = kind {
+                // FMOV gpr<->fp: bit31 = 64-bit gpr side; FCVTZx: bit31 =
+                // 64-bit dest; SCVTF/UCVTF: bit31 = 64-bit source.
+                return Some(Insn::FpIntCvt { rd, rn, kind, double, gpr64: is64, fbits: 0 });
+            }
+        }
+    }
+    if !bit21 && ty != FpType::H {
+        // fixed-point conversions (bit21=0): opcode5 + imm6 (bits 15:10)
+        // (H-type fixed-point stays on the legacy paths — none in kernel)
+        let op5 = (w >> 16) & 0x1F;
+        let imm6 = ((w >> 10) & 0x3F) as u8;
+        if imm6 == 0 {
+            return None;
+        }
+        let kind = match op5 {
+            0b11000 => Some(FpIntCvtKind::FcvtGpr { round: 4 }),
+            0b11001 => Some(FpIntCvtKind::FcvtGpr { round: 5 }),
+            0b00010 => Some(FpIntCvtKind::Cvtf { unsigned: false }),
+            0b00011 => Some(FpIntCvtKind::Cvtf { unsigned: true }),
+            _ => return None,
+        };
+        return Some(Insn::FpIntCvt {
+            rd,
+            rn,
+            kind: kind.unwrap(),
+            double,
+            gpr64: is64,
+            fbits: 64 - imm6 as u16 as u8,
+        });
+    }
+    // scalar pairwise ADDP (rm = 10000, bit21=1, opcode 101110, U=1,
+    // census 0x5EF1B800 addp d0,v0.2d)
+    if bit21 && b11 && !b10 && rm == 16 && ((w >> 10) & 0x3F) == 0b101110 {
+        return Some(Insn::AddpScalar { rd, rn, double });
+    }
+    if b11 {
         // 2-source FP: opcode at bits 14:12, Rm at bits 20:16
         let op = match (w >> 12) & 7 {
             0 => VfpOp::Mul,
@@ -2347,21 +3292,45 @@ fn decode_fp_scalar(w: u32) -> Option<Insn> {
             3 => VfpOp::Sub,
             4 => VfpOp::Max,
             5 => VfpOp::Min,
+            // session D census: fmaxnm/fminnm (opcodes 6/7)
+            6 => VfpOp::Maxnm,
+            7 => VfpOp::Minnm,
             _ => return None,
         };
-        return Some(Insn::Fp2 { rd, rn, rm, op });
+        return Some(Insn::Fp2 { rd, rn, rm, op, ty });
     }
     // 1-source: opcode10 = bits 20:11 (bit11 = 0)
     let op10 = (w >> 11) & 0x3FF;
     match op10 {
+        0x008 => Some(Insn::FmovReg { rd, rn, double }),
         0x018 => Some(Insn::Fp1 { rd, rn, op: Vfp1Op::Abs }),
         0x028 => Some(Insn::Fp1 { rd, rn, op: Vfp1Op::Neg }),
         0x038 => Some(Insn::Fp1 { rd, rn, op: Vfp1Op::Sqrt }),
-        0x040 => Some(Insn::FpCvtInt { rd, rn, to_half: ty == FpType::H, unsigned: false, src64: is64 }),
-        0x060 => Some(Insn::FpCvtInt { rd, rn, to_half: ty == FpType::H, unsigned: true, src64: is64 }),
+        // capstone ground truth (pin_m1d3 check): 0x1EE20020 = scvtf h0,
+        // w1 and 0x9EE30020 = ucvtf h0, x1 — op10 0x040/0x060 with ty=H
+        // convert a GPR INTO half (to_half: true; the old to_half: false
+        // inverted the direction). 0x300/0x320 = FCVTZS/ZU from half
+        // (0x1EF80020 = fcvtzs w0, h1).
+        0x040 if ty == FpType::H => {
+            Some(Insn::FpCvtInt { rd, rn, to_half: true, unsigned: false, src64: is64 })
+        }
+        0x060 if ty == FpType::H => {
+            Some(Insn::FpCvtInt { rd, rn, to_half: true, unsigned: true, src64: is64 })
+        }
+        0x300 if ty == FpType::H => {
+            Some(Insn::FpCvtFixed { rd, rn, unsigned: false, src64: is64 })
+        }
+        0x320 if ty == FpType::H => {
+            Some(Insn::FpCvtFixed { rd, rn, unsigned: true, src64: is64 })
+        }
         0x048 => Some(Insn::Fcvt { rd, rn, from: ty, to: FpType::S }),
         0x058 => Some(Insn::Fcvt { rd, rn, from: ty, to: FpType::D }),
         0x078 => Some(Insn::Fcvt { rd, rn, from: ty, to: FpType::H }),
+        // FJCVTZS: opcode5(20:16)=11110, type=D — op10 = bits 20:11 =
+        // 0x3C0 (python-verified: (0x1E7E0020>>11)&0x3FF == 0x3C0; a
+        // hand-derived 0x3E0 briefly regressed the real-boot word).
+        // H-type FCVTZS/U fixed (capstone: 0x1EF80020 fcvtzs w0,h1 —
+        // op10 0x300; S/D plain forms take the op5 branch above).
         0x300 => Some(Insn::FpCvtFixed { rd, rn, unsigned: false, src64: is64 }),
         0x320 => Some(Insn::FpCvtFixed { rd, rn, unsigned: true, src64: is64 }),
         0x3C0 if ty == FpType::D => Some(Insn::Fjcvtzs { rd, rn }),
@@ -3076,8 +4045,21 @@ mod tests {
         assert_eq!(decode(0, 0x1E27_0060), Some(Insn::FmovGprVec { rt: 0, rn: 3, is64: false, to_vec: true }));
         // capstone: fmov d0, x3
         assert_eq!(decode(0, 0x9E67_0060), Some(Insn::FmovGprVec { rt: 0, rn: 3, is64: true, to_vec: true }));
-        // NEGATIVE: fcvtzs-family (bits[20:16] = 10000) must not match
-        assert_eq!(decode(0, 0x1E28_0022), None);
+        // 0x1E280022 = fcvtps w2, s1 (capstone-verified — the old guard
+        // was incomplete and asserted None; session D decodes it properly)
+        assert_eq!(
+            decode(0, 0x1E28_0022),
+            Some(Insn::FpIntCvt {
+                rd: 2,
+                rn: 1,
+                kind: FpIntCvtKind::FcvtGpr { round: 6 },
+                double: false,
+                gpr64: false,
+                fbits: 0,
+            })
+        );
+        // NEGATIVE: op5 = 0b01010 (unallocated slot) must not match
+        assert_eq!(decode(0, 0x1E2A_0022), None);
     }
 
     #[test]
@@ -3384,7 +4366,7 @@ mod tests {
         // fmov vector immediate (cmode 1111, U=0)
         assert_eq!(
             decode(0, 0x0F00_F400),
-            Some(Insn::FmovVecImm { rd: 0, q: false, imm8: 0 })
+            Some(Insn::FmovVecImm { rd: 0, q: false, imm8: 0, double: false })
         );
 
         // NEGATIVES: unverified cmode arms stay unknown (honest gaps)

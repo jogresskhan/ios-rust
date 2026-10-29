@@ -142,7 +142,7 @@ pub const GOLDENS_EXT: &[Golden] = &[
     Golden { word: 0xCEC08020, mnemonic: "sha512su0", group: "SHA512", oracle: "capstone" },
     Golden { word: 0x0E20E020, mnemonic: "pmull", group: "AES/PMULL", oracle: "capstone" },
     Golden { word: 0x4E20E020, mnemonic: "pmull2", group: "AES/PMULL", oracle: "capstone" },
-    Golden { word: 0x0E60E020, mnemonic: "pmull", group: "AES/PMULL", oracle: "ddi0487" },
+    Golden { word: 0x0E22E020, mnemonic: "pmull", group: "AES/PMULL", oracle: "capstone" },
     Golden { word: 0x4E60E020, mnemonic: "pmull2", group: "AES/PMULL", oracle: "ddi0487" },
     Golden { word: 0xCE628020, mnemonic: "sha512h", group: "SHA512", oracle: "capstone" },
     Golden { word: 0xCE628420, mnemonic: "sha512h2", group: "SHA512", oracle: "capstone" },
@@ -166,8 +166,8 @@ pub const GOLDENS_EXT: &[Golden] = &[
     Golden { word: 0x6E428420, mnemonic: "sqrdmlah", group: "ASIMDRDM", oracle: "capstone" },
     Golden { word: 0x2E428C20, mnemonic: "sqrdmlsh", group: "ASIMDRDM", oracle: "capstone" },
     Golden { word: 0x6E428C20, mnemonic: "sqrdmlsh", group: "ASIMDRDM", oracle: "capstone" },
-    Golden { word: 0x6F42C020, mnemonic: "sqrdmlah", group: "ASIMDRDM", oracle: "ddi0487" },
-    Golden { word: 0x6F42D020, mnemonic: "sqrdmlsh", group: "ASIMDRDM", oracle: "ddi0487" },
+    Golden { word: 0x6F42D020, mnemonic: "sqrdmlah", group: "ASIMDRDM", oracle: "capstone" },
+    Golden { word: 0x6F42F020, mnemonic: "sqrdmlsh", group: "ASIMDRDM", oracle: "capstone" },
     Golden { word: 0x7F42D420, mnemonic: "sqrdmlah", group: "RDM", oracle: "ddi0487" },
     Golden { word: 0x7F42DC20, mnemonic: "sqrdmlsh", group: "RDM", oracle: "ddi0487" },
     Golden { word: 0x2E42C420, mnemonic: "fcmla", group: "FCMA", oracle: "capstone" },
@@ -289,6 +289,7 @@ pub fn mnemonic_of(i: &Insn) -> String {
         Insn::Vfp16 { op, .. } => match op {
             VfpOp::Add => "fadd", VfpOp::Sub => "fsub", VfpOp::Mul => "fmul",
             VfpOp::Div => "fdiv", VfpOp::Max => "fmax", VfpOp::Min => "fmin",
+            VfpOp::Maxnm => "fmaxnm", VfpOp::Minnm => "fminnm",
         }.into(),
         Insn::Vsha512h { h2, .. } => if *h2 { "sha512h2" } else { "sha512h" }.into(),
         Insn::Vsha512su0 { .. } => "sha512su0".into(),
@@ -317,6 +318,7 @@ pub fn mnemonic_of(i: &Insn) -> String {
         Insn::Fp2 { op, .. } => match op {
             VfpOp::Add => "fadd", VfpOp::Sub => "fsub", VfpOp::Mul => "fmul",
             VfpOp::Div => "fdiv", VfpOp::Max => "fmax", VfpOp::Min => "fmin",
+            VfpOp::Maxnm => "fmaxnm", VfpOp::Minnm => "fminnm",
         }.into(),
         Insn::Fp1 { op, .. } => match op {
             Vfp1Op::Abs => "fabs", Vfp1Op::Neg => "fneg", Vfp1Op::Sqrt => "fsqrt",

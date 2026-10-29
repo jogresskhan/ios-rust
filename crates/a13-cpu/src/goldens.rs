@@ -317,12 +317,31 @@ fn indexed_structural() {
     // udot .4s with H=1 → index = (H<<1)|L = 2
     let w = mk(1, 1, 0, 0, 2, 0b1110, 1, 1, 0, 2);
     assert!(matches!(d(w), Some(Insn::Vindexed { op: VIndexedOp::Udot, index: 2, .. })));
-    // sqrdmlah .8h elem: opcode 1100, U=1 (per v8.1 RDM elem layout)
-    let w = mk(1, 1, 0, 0, 2, 0b1100, 0, 1, 0, 2);
-    assert!(matches!(d(w), Some(Insn::Vindexed { op: VIndexedOp::Sqrdmlah, .. })));
-    // fcmla elem rot 90: opcode 1100, U=0, rot at bits 23:22
-    let w = mk(1, 0, 0, 0, 2, 0b1100, 0, 1, 0, 1);
+    // sqrdmlah .8h elem — capstone-verified word (0x6F42D820, op4=1101
+    // U=1 size=1, H=1 -> index 4; the old row used a hand-derived
+    // "opcode 1100" word that capstone names fmlsl2 — RE-tool rule:
+    // never hand-split bits)
+    let w = 0x6F42_D820u32;
+    assert!(matches!(d(w), Some(Insn::Vindexed { op: VIndexedOp::Sqrdmlah, index: 4, .. })));
+    // fcmla .8h elem rot 90 — capstone 0x6F423020 (op4=0011, rot = op4>>1)
+    let w = 0x6F42_3020u32;
     assert!(matches!(d(w), Some(Insn::Vindexed { op: VIndexedOp::Fcmla(1), .. })));
+    // fmlsl2 .4s by element (FP16FML) — capstone 0x6F82C020 (op4=1100
+    // U=1 size=2; the "sqrdmlah" label the old row asserted was wrong)
+    assert_eq!(
+        d(0x6F82_C020),
+        Some(Insn::VindexStd {
+            vd: 0,
+            vn: 1,
+            vm: 2,
+            op: VindexStdOp::Fp16Fml { sub: true, two: true },
+            index: 0,
+            size_log2: 2,
+            q: true
+        })
+    );
+    // mul .4s by element — capstone/keystone 0x4F828020 (op4=1000 U=0)
+    assert!(matches!(d(0x4F82_8020), Some(Insn::VindexStd { op: VindexStdOp::Mul, .. })));
 }
 
 // ---------------------------------------------------------------------------
@@ -404,12 +423,12 @@ fn fp16_scalar_goldens() {
     assert_eq!(d(0x1E23_C020), Some(Insn::Fcvt { rd: 0, rn: 1, from: FpType::S, to: FpType::H }));
     assert_eq!(d(0x1E63_C020), Some(Insn::Fcvt { rd: 0, rn: 1, from: FpType::D, to: FpType::H }));
     assert_eq!(d(0x1EE2_C020), Some(Insn::Fcvt { rd: 0, rn: 1, from: FpType::H, to: FpType::D }));
-    assert_eq!(d(0x1EE2_2820), Some(Insn::Fp2 { rd: 0, rn: 1, rm: 2, op: VfpOp::Add }));
-    assert_eq!(d(0x1EE2_3820), Some(Insn::Fp2 { rd: 0, rn: 1, rm: 2, op: VfpOp::Sub }));
-    assert_eq!(d(0x1EE2_0820), Some(Insn::Fp2 { rd: 0, rn: 1, rm: 2, op: VfpOp::Mul }));
-    assert_eq!(d(0x1EE2_1820), Some(Insn::Fp2 { rd: 0, rn: 1, rm: 2, op: VfpOp::Div }));
-    assert_eq!(d(0x1EE2_4820), Some(Insn::Fp2 { rd: 0, rn: 1, rm: 2, op: VfpOp::Max }));
-    assert_eq!(d(0x1EE2_5820), Some(Insn::Fp2 { rd: 0, rn: 1, rm: 2, op: VfpOp::Min }));
+    assert_eq!(d(0x1EE2_2820), Some(Insn::Fp2 { rd: 0, rn: 1, rm: 2, op: VfpOp::Add, ty: FpType::H }));
+    assert_eq!(d(0x1EE2_3820), Some(Insn::Fp2 { rd: 0, rn: 1, rm: 2, op: VfpOp::Sub, ty: FpType::H }));
+    assert_eq!(d(0x1EE2_0820), Some(Insn::Fp2 { rd: 0, rn: 1, rm: 2, op: VfpOp::Mul, ty: FpType::H }));
+    assert_eq!(d(0x1EE2_1820), Some(Insn::Fp2 { rd: 0, rn: 1, rm: 2, op: VfpOp::Div, ty: FpType::H }));
+    assert_eq!(d(0x1EE2_4820), Some(Insn::Fp2 { rd: 0, rn: 1, rm: 2, op: VfpOp::Max, ty: FpType::H }));
+    assert_eq!(d(0x1EE2_5820), Some(Insn::Fp2 { rd: 0, rn: 1, rm: 2, op: VfpOp::Min, ty: FpType::H }));
     assert_eq!(d(0x1EE0_C020), Some(Insn::Fp1 { rd: 0, rn: 1, op: Vfp1Op::Abs }));
     assert_eq!(d(0x1EE1_4020), Some(Insn::Fp1 { rd: 0, rn: 1, op: Vfp1Op::Neg }));
     assert_eq!(d(0x1EE1_C020), Some(Insn::Fp1 { rd: 0, rn: 1, op: Vfp1Op::Sqrt }));

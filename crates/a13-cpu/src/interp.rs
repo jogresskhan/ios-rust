@@ -683,6 +683,37 @@ impl Interpreter {
                 let v = self.ld(addr, if is64 { 8 } else { 4 })?;
                 self.set_r(rt, v);
             }
+            Insn::LdrLitSw { rt, imm } => {
+                // LDRSW Xt, label — sign-extended 32-bit literal load
+                let addr = (pc as i64 + imm) as u64;
+                let v = self.ld(addr, 4)?;
+                self.set_r(rt, (v as u32 as i32) as i64 as u64);
+            }
+            Insn::LdrLitVec { rt, imm, width_log2 } => {
+                // SIMD LDR (literal): S/D/Q from a PC-relative address
+                let addr = (pc as i64 + imm) as u64;
+                let sz = 1u16 << width_log2;
+                let val = self.load_vec(addr, sz)?;
+                self.write_vec_low(rt, sz, val);
+            }
+            Insn::Adc { rd, rn, rm, setflags, subtract, is64 } => {
+                // ADC/ADCS/SBC/SBCS (session D): carry-in via NZCV.C.
+                let c_in = self.nzcv & C != 0;
+                let mask = if is64 { u64::MAX } else { 0xFFFF_FFFF };
+                let (a, b) = (self.r(rn) & mask, self.r(rm) & mask);
+                if setflags {
+                    let res = self.add_with_flags(self.r(rn), self.r(rm), c_in, is64, subtract);
+                    self.set_r(rd, res);
+                } else {
+                    // plain ADC/SBC: no flag writes
+                    let res = if subtract {
+                        a.wrapping_sub(b).wrapping_sub(!c_in as u64)
+                    } else {
+                        a.wrapping_add(b).wrapping_add(c_in as u64)
+                    } & mask;
+                    self.set_r(rd, res);
+                }
+            }
             Insn::Ldp { rt, rt2, rn, imm, mode, is64 } => {
                 let base = self.rsp(rn);
                 let addr = match mode {
@@ -999,6 +1030,91 @@ impl Interpreter {
                                 }
                             }
                         }
+                        // Session D: shift-by-register three-same. Amount =
+                        // signed element of Vm; positive → left, negative →
+                        // right (arithmetic for U=0 SSHL/SQSHL-family, logical
+                        // for U=1 USHL/UQSHL-family). SRSHL/URSHL (Rshl) and
+                        // SQRSHL/UQRSHL (Rsqshl) negate the amount.
+                        V3Op::Shl | V3Op::Sqshl | V3Op::Rshl | V3Op::Rsqshl => {
+                            let negate = matches!(op, V3Op::Rshl | V3Op::Rsqshl);
+                            let sat = matches!(op, V3Op::Sqshl | V3Op::Rsqshl);
+                            let amt_raw = sext(pair[l as usize].1) as i64;
+                            let mut amt = if negate { -amt_raw } else { amt_raw };
+                            // saturating ops clamp the shift amount to width
+                            if sat {
+                                amt = amt.clamp(-(bits as i64), bits as i64);
+                            }
+                            let x = pair[l as usize].0;
+                            if amt >= 0 {
+                                if sat {
+                                    // saturating left shift
+                                    if amt >= bits as i64 {
+                                        if sext(x) == 0 {
+                                            0
+                                        } else if sext(x) < 0 && !u {
+                                            (1i128 << (bits - 1)) as u128 & mask
+                                        } else {
+                                            mask
+                                        }
+                                    } else {
+                                        let wide = (x as i128) << amt;
+                                        let lim = (1i128 << (bits - 1)) - 1;
+                                        if !u && wide > lim {
+                                            lim as u128 & mask
+                                        } else if !u && wide < -lim - 1 {
+                                            ((-lim - 1) as u128) & mask
+                                        } else if u && wide > (lim << 1 | 1) {
+                                            mask
+                                        } else {
+                                            (wide as u128) & mask
+                                        }
+                                    }
+                                } else if u {
+                                    // USHL: logical left
+                                    if amt >= bits as i64 {
+                                        0
+                                    } else {
+                                        (x << amt) & mask
+                                    }
+                                } else {
+                                    // SSHL: arithmetic left (same as logical)
+                                    if amt >= bits as i64 {
+                                        0
+                                    } else {
+                                        (x << amt) & mask
+                                    }
+                                }
+                            } else {
+                                let amt = (-amt) as u32;
+                                if amt >= bits as u32 {
+                                    if !u && sext(x) < 0 {
+                                        mask
+                                    } else {
+                                        0
+                                    }
+                                } else if u {
+                                    (x >> amt) & mask
+                                } else {
+                                    ((sext(x) >> amt) as u128) & mask
+                                }
+                            }
+                        }
+                        // Session D: ADDP three-register (pairwise add).
+                        // First half of the lanes fold Vn pairs, second half
+                        // fold Vm pairs (mirrors the FP Addp layout).
+                        V3Op::Addp3 => {
+                            let half = (lanes / 2).max(1);
+                            let (src, idx) = if (l as u64) < half {
+                                (a, (l as u64) * 2)
+                            } else {
+                                (b, ((l as u64) - half) * 2)
+                            };
+                            let sh0 = idx * eb * 8;
+                            let sh1 = sh0 + eb * 8;
+                            let x = (src >> sh0) & mask;
+                            let y = (src >> sh1) & mask;
+                            x.wrapping_add(y) & mask
+                        }
                     };
                     r |= out << sh;
                     let _ = lanes_h;
@@ -1112,28 +1228,1221 @@ impl Interpreter {
                     }
                 }
             }
-            Insn::FmovVecImm { rd, q, imm8 } => {
+            Insn::FmovVecImm { rd, q, imm8, double } => {
                 self.group_exec[1] += 1;
-                // FMOV (vector, immediate): VFP-ExpandImm, single-precision
-                // form (.2s/.4s). imm8 = a:B:cdef:  exp = NOT(b6)b6b5b4<<4
-                // | 0xF (low 4 bits forced — the VFP imm exponent rule,
-                // verified against the real kernel's fmov d8,#1.0 imm8=0x70);
-                // frac[22:19] = b3..b0.
-                let b = imm8;
-                let exp = (((((!b >> 6) & 1) << 3) | ((b >> 6) & 1) << 2)
-                    | ((b >> 5) & 1) << 1)
-                    | ((b >> 4) & 1);
-                let exp8 = (exp << 4) | 0xF;
-                let frac = (b & 0xF) as u32;
-                let bits = (((b >> 7) as u32) << 31) | ((exp8 as u32) << 23) | (frac << 19);
-                let lane = bits as u64;
-                let imm128 = if q {
-                    (lane | (lane << 32)) as u128
-                        | (((lane | (lane << 32)) as u128) << 64)
+                // FMOV (vector, immediate): VFP-ExpandImm. U=0: FP32 lanes
+                // (.4s/.2s); U=1: FP64 lanes (.2d — 6F00F400 fmov v0.2d,#2.0).
+                let s = (imm8 >> 7) & 1;
+                let n = (imm8 >> 6) & 1;
+                let e2 = ((imm8 >> 4) & 3) as u64;
+                let frac = (imm8 & 0xF) as u64;
+                if double {
+                    let mut exp: u64 = if n == 0 { 1 << 10 } else { 0 };
+                    if n == 1 {
+                        exp |= ((1u64 << 8) - 1) << 2;
+                    }
+                    exp |= e2 << 2;
+                    let bits = ((s as u64) << 63) | (exp << 52) | (frac << 48);
+                    let imm128 = (bits as u128) | ((bits as u128) << 64);
+                    self.v.v[rd as usize] = if q { imm128 } else { bits as u128 };
                 } else {
-                    (lane | (lane << 32)) as u128
+                    let mut exp: u32 = if n == 0 { 1 << 7 } else { 0 };
+                    if n == 1 {
+                        exp |= ((1u32 << 5) - 1) << 2;
+                    }
+                    exp |= (e2 as u32) << 2;
+                    let bits = ((s as u32) << 31) | (exp << 23) | ((frac as u32) << 19);
+                    let lane = bits as u64;
+                    let imm128 = if q {
+                        (lane | (lane << 32)) as u128
+                            | (((lane | (lane << 32)) as u128) << 64)
+                    } else {
+                        (lane | (lane << 32)) as u128
+                    };
+                    self.v.v[rd as usize] = imm128;
+                }
+            }
+            Insn::LdStSimdRegOff { vt, rn, rm, option, scaled, width_log2, load } => {
+                self.group_exec[0] += 1;
+                let bytes = 1u16 << width_log2;
+                let shift = if scaled { width_log2 as u64 } else { 0 };
+                let addr = self.rsp(rn).wrapping_add(option.apply(self.r(rm)) << shift);
+                if load {
+                    let val = self.load_vec(addr, bytes)?;
+                    self.write_vec_low(vt, bytes, val);
+                } else {
+                    let val = self.read_vec_low(vt, bytes);
+                    self.store_vec(addr, bytes, val)?;
+                }
+            }
+            Insn::LdStMult { q, load, op4, type2, post, rm, rn, rt } => {
+                self.group_exec[0] += 1;
+                // regs from op4 {0:4, 2:4, 4:3, 6:3, 7:1, 8:2, 0xA:2};
+                // lanes per reg = 8>>type2 (Q=0) or 16>>type2 (Q=1);
+                // element bytes = 1<<type2.
+                let regs: u8 = match op4 {
+                    0x0 | 0x2 => 4,
+                    0x4 | 0x6 => 3,
+                    0x7 => 1,
+                    0x8 => 2,
+                    0xA => 2,
+                    _ => 1,
                 };
-                self.v.v[rd as usize] = imm128;
+                let ebytes = 1u16 << type2;
+                let lanes: u16 = (if q { 16 } else { 8 }) / ebytes;
+                let per_reg = (lanes * ebytes) as u64; // 8 or 16
+                let base = self.rsp(rn);
+                if load {
+                    for l in 0..lanes {
+                        for r in 0..regs {
+                            let addr = base + (l as u64) * (regs as u64) * (ebytes as u64)
+                                + (r as u64) * (ebytes as u64);
+                            let val = self.load_vec(addr, ebytes)?;
+                            let sh = (l as u32) * (ebytes as u32) * 8;
+                            let keep = !((0xFu128 << ((r as u32) * 64)) << (sh / 8) * 8
+                                >> (sh / 8) * 8);
+                            let _ = keep;
+                            // write into v[rt+r] lane l
+                            let lane_bytes = ebytes as u32;
+                            let mask = (1u128 << (lane_bytes * 8)) - 1;
+                            let reg_i = (rt + r) as usize;
+                            self.v.v[reg_i] = (self.v.v[reg_i] & !(mask << sh))
+                                | ((val & mask) << sh);
+                        }
+                    }
+                } else {
+                    for l in 0..lanes {
+                        for r in 0..regs {
+                            let addr = base + (l as u64) * (regs as u64) * (ebytes as u64)
+                                + (r as u64) * (ebytes as u64);
+                            let lane_bytes = ebytes as u32;
+                            let mask = (1u128 << (lane_bytes * 8)) - 1;
+                            let sh = (l as u32) * lane_bytes * 8;
+                            let val = (self.v.v[(rt + r) as usize] >> sh) & mask;
+                            self.store_vec(addr, ebytes, val)?;
+                        }
+                    }
+                }
+                if post {
+                    let nb = if rm == 31 {
+                        (regs as u64) * per_reg
+                    } else {
+                        self.r(rm)
+                    };
+                    self.set_rsp(rn, base.wrapping_add(nb));
+                }
+            }
+            Insn::LdStSingle { q, load, op4, s, h, r, size2, post, rm, rn, rt } => {
+                self.group_exec[0] += 1;
+                if op4 >= 0xC {
+                    // LD1R/LD2R/LD3R/LD4R: op4 0xC+r → 1/2 regs, 0xE+r → 3/4
+                    let reps: u8 = match op4 {
+                        0xC => if r { 2 } else { 1 },
+                        0xE => if r { 4 } else { 3 },
+                        _ => 1,
+                    };
+                    let ebytes = 1u16 << size2;
+                    let base = self.rsp(rn);
+                    let val = self.load_vec(base, ebytes)?;
+                    let mask = (1u128 << (ebytes as u32 * 8)) - 1;
+                    let mut rep: u128 = 0;
+                    for j in 0..(16 / ebytes as u32) {
+                        rep |= (val & mask) << (j * ebytes as u32 * 8);
+                    }
+                    for k in 0..reps {
+                        self.v.v[(rt + k) as usize] = rep;
+                    }
+                    if post {
+                        let nb = if rm == 31 { (reps as u64) * (ebytes as u64) } else { self.r(rm) };
+                        self.set_rsp(rn, base.wrapping_add(nb));
+                    }
+                } else {
+                    // one-lane load/store: index + esize from op4/size2/s/h/q
+                    let (esize_log2, index) = match op4 & 0b1110 {
+                        0b0000 => {
+                            // B: index = Q:S:size2
+                            (0u8, ((q as u8) << 3) | ((s as u8) << 2) | size2)
+                        }
+                        0b0100 => {
+                            // H: index = Q:S:h
+                            (1u8, ((q as u8) << 2) | ((s as u8) << 1) | h as u8)
+                        }
+                        _ => {
+                            if size2 == 0b01 {
+                                // D: index = Q
+                                (3u8, q as u8)
+                            } else {
+                                // S: index = Q:S
+                                (2u8, ((q as u8) << 1) | s as u8)
+                            }
+                        }
+                    };
+                    let ebytes = 1u16 << esize_log2;
+                    let base = self.rsp(rn);
+                    if load {
+                        let val = self.load_vec(base, ebytes)?;
+                        self.v.set_lane(rt, index, esize_log2, val as u64);
+                    } else {
+                        let val = self.v.lane(rt, index, esize_log2) as u128;
+                        self.store_vec(base, ebytes, val)?;
+                    }
+                    if post {
+                        let nb = if rm == 31 { ebytes as u64 } else { self.r(rm) };
+                        self.set_rsp(rn, base.wrapping_add(nb));
+                    }
+                }
+            }
+            Insn::VindexStd { vd, vn, vm, op, index, size_log2, q } => {
+                self.group_exec[1] += 1;
+                use crate::decode::VindexStdOp as VO;
+                let lanes: u8 = if q { 16 >> size_log2 } else { 8 >> size_log2 };
+                let lanes = lanes.max(1);
+                let eb = 1u64 << size_log2;
+                let bits = eb * 8;
+                let mask = (1u128 << bits) - 1;
+                let a = self.v.v[vn as usize];
+                let m = self.v.v[vm as usize];
+                let sh_m = (index as u32) * (eb as u32) * 8;
+                let mv = (m >> sh_m) & (mask as u128);
+                let mut r: u128 = 0;
+                for l in 0..lanes {
+                    let sh = (l as u32) * (eb as u32) * 8;
+                    let av = (a >> sh) & (mask as u128);
+                    // destination accumulate (MLA family reads Vd)
+                    let acc = (self.v.v[vd as usize] >> sh) & (mask as u128);
+                    let out: u128 = match op {
+                        VO::Fp16Fml { sub, two } => {
+                            // FMLAL/FMLSL by element (pin_m1d3.py): dest
+                            // S-lane j = f32(Vn.H[src_j]) * f32(Vm.H[index])
+                            // +/- acc (fused). "two" reads the source HIGH
+                            // half. size_log2==2 keeps the generic loop's
+                            // lane count == dest S-lanes (4/2).
+                            let dlanes: u32 = if q { 4 } else { 2 };
+                            let src_j = if two { l as u32 + dlanes } else { l as u32 };
+                            let a = simd::h_to_f32(self.v.lane(vn, src_j as u8, 1) as u16);
+                            let mel = simd::h_to_f32(self.v.lane(vm, index, 1) as u16);
+                            let c = f32::from_bits(acc as u32);
+                            let r = if sub { (-a).mul_add(mel, c) } else { a.mul_add(mel, c) };
+                            r.to_bits() as u128
+                        }
+                        VO::Fmul | VO::Fmulx => vindex_fp(op, av, mv, 0, size_log2),
+                        VO::Fmla | VO::Fmls => vindex_fp(op, av, mv, acc, size_log2),
+                        VO::Mul => av.wrapping_mul(mv),
+                        VO::Mla => av.wrapping_mul(mv).wrapping_add(acc),
+                        VO::Mls => acc.wrapping_sub(av.wrapping_mul(mv)),
+                        VO::Smull | VO::Umlal | VO::Smlsl | VO::Umull | VO::Smlal
+                        | VO::Umlsl | VO::Sqdmull | VO::Sqdmlal | VO::Sqdmlsl => {
+                            // widening: dest element is 2× src; handled
+                            // separately below — placeholder (never reached)
+                            0
+                        }
+                        VO::Sqdmulh | VO::Sqrdmulh => {
+                            // signed saturating doubling multiply high
+                            let sx = sext_u128(av, bits as u32);
+                            let sm = sext_u128(mv, bits as u32);
+                            let prod = (sx as i128) * (sm as i128) * 2;
+                            let hi = if bits >= 64 {
+                                // 64-bit: product may exceed i128? sx,sm < 2^63
+                                // product < 2^127 fits
+                                (prod >> bits) as i128
+                            } else {
+                                prod >> bits
+                            };
+                            let sat_lim = (1i128 << (bits - 1)) - 1;
+                            let v = if matches!(op, VO::Sqrdmulh) {
+                                // rounding variant: add 2^(bits-1) before shift
+                                let prod = (sx as i128) * (sm as i128) * 2
+                                    + (1i128 << bits);
+                                (prod >> (bits + 1)) as i128
+                            } else {
+                                hi
+                            };
+                            v.clamp(-sat_lim - 1, sat_lim) as u128 & mask
+                        }
+                    };
+                    if matches!(op, VO::Smull | VO::Umull | VO::Smlal | VO::Umlal
+                        | VO::Smlsl | VO::Umlsl | VO::Sqdmull | VO::Sqdmlal | VO::Sqdmlsl)
+                    {
+                        // widening indexed: dest lanes = 2× count, element 2×
+                        let dbits = bits * 2;
+                        let dmask = ((1u128 << dbits) - 1) as u128;
+                        if dbits >= 128 {
+                            // 64→128 not expressible in u128 lanes; saturate
+                            // to the i128/u128 domain (not used by kernel)
+                            continue;
+                        }
+                        let sx = sext_u128(av, bits as u32);
+                        let sm = sext_u128(mv, bits as u32);
+                        let prod: i128 = match op {
+                            VO::Sqdmull | VO::Sqdmlal | VO::Sqdmlsl => {
+                                // saturating doubling
+                                let p = (sx as i128) * (sm as i128) * 2;
+                                let lim = (1i128 << (dbits - 1)) - 1;
+                                p.clamp(-lim - 1, lim)
+                            }
+                            _ => match op {
+                                VO::Umull | VO::Umlal | VO::Umlsl => {
+                                    (av as i128) * (mv as i128)
+                                }
+                                _ => (sx as i128) * (sm as i128),
+                            },
+                        };
+                        let base_acc = if matches!(op, VO::Umlal | VO::Smlal | VO::Sqdmlal) {
+                            let ash = (l as u32) * (dbits as u32);
+                            let lim = (1i128 << (dbits - 1)) - 1;
+                            if matches!(op, VO::Umlal) {
+                                ((self.v.v[vd as usize] >> ash) & dmask) as i128
+                            } else {
+                                let cur = (self.v.v[vd as usize] >> ash) & dmask;
+                                let m2 = (1i128 << (dbits - 1));
+                                ((cur as i128 & ((m2 << 1) - 1))
+                                    - ((cur as i128 & m2 as u128 as i128) << 1))
+                            }
+                        } else {
+                            0
+                        };
+                        let val: i128 = match op {
+                            VO::Smlsl | VO::Umlsl | VO::Sqdmlsl => base_acc.wrapping_sub(prod),
+                            _ => base_acc.wrapping_add(prod),
+                        };
+                        let ash = (l as u32) * (dbits as u32);
+                        self.v.v[vd as usize] = (self.v.v[vd as usize]
+                            & !(dmask << ash))
+                            | (((val as u128) & dmask) << ash);
+                        continue;
+                    }
+                    r |= (out & (mask as u128)) << sh;
+                }
+                if !matches!(op, VO::Smull | VO::Umull | VO::Smlal | VO::Umlal
+                    | VO::Smlsl | VO::Umlsl | VO::Sqdmull | VO::Sqdmlal | VO::Sqdmlsl)
+                {
+                    self.v.v[vd as usize] = r;
+                }
+            }
+            Insn::V2Misc { rd, rn, q, size, op } => {
+                self.group_exec[1] += 1;
+                use crate::decode::V2MiscOp as VM;
+                let eb = 1u64 << size;
+                let total = if q { 16u64 } else { 8 };
+                let lanes = (total / eb).max(1);
+                let bits = eb * 8;
+                let mask = (1u128 << bits) - 1;
+                let a = self.v.v[rn as usize];
+                let mut r: u128 = 0;
+                let sextl = |v: u128| -> i128 { sext_u128(v, bits as u32) };
+                match op {
+                    VM::Rev64 | VM::Rev32 | VM::Rev16 => {
+                        // REV64: reverse element order within 64-bit containers;
+                        // REV32: within 32-bit; REV16: byte-swap within 16-bit
+                        // elements. Element bytes = 1<<size.
+                        let cont: u64 = match op {
+                            VM::Rev64 => 8,
+                            VM::Rev32 => 4,
+                            _ => 2,
+                        };
+                        let ebytes = eb as usize;
+                        let mut out = [0u8; 16];
+                        let src = a.to_le_bytes();
+                        let mut c = 0usize;
+                        while c < 16 {
+                            let cw = cont as usize;
+                            for e in 0..(cw / ebytes) {
+                                // element e in container c (reverse order)
+                                let se = cw / ebytes - 1 - e;
+                                for b in 0..ebytes {
+                                    out[c + e * ebytes + b] =
+                                        src[c + se * ebytes + b];
+                                }
+                            }
+                            c += cw;
+                        }
+                        // REV16 semantics: reverse BYTES within each element
+                        if matches!(op, VM::Rev16) {
+                            let mut o2 = [0u8; 16];
+                            for e in 0..(16 / ebytes) {
+                                for b in 0..ebytes {
+                                    o2[e * ebytes + b] = src[e * ebytes + (ebytes - 1 - b)];
+                                }
+                            }
+                            r = u128::from_le_bytes(o2);
+                        } else {
+                            r = u128::from_le_bytes(out);
+                        }
+                    }
+                    VM::Saddlp | VM::Uaddlp => {
+                        // pairwise add long: dest element 2× src
+                        let dbits = bits * 2;
+                        let dmask = ((1u128 << dbits) - 1) as u128;
+                        let dlanes = (total * 8 / dbits as u64).max(1);
+                        for l in 0..dlanes {
+                            let sh0 = (l * 2) as u32 * (bits as u32);
+                            let sh1 = sh0 + bits as u32;
+                            let x = (a >> sh0) & mask;
+                            let y = (a >> sh1) & mask;
+                            let v: i128 = if matches!(op, VM::Saddlp) {
+                                sextl(x).wrapping_add(sextl(y))
+                            } else {
+                                (x as i128).wrapping_add(y as i128)
+                            };
+                            let sh = (l as u32) * dbits as u32;
+                            r |= ((v as u128) & dmask) << sh;
+                        }
+                    }
+                    VM::Suqadd | VM::Usqadd => {
+                        // saturating accumulate: dest element = sat(vd + vn)
+                        // SUQADD: signed dest + unsigned src; USQADD: unsigned
+                        // dest + signed src
+                        let d = self.v.v[rd as usize];
+                        for l in 0..lanes {
+                            let sh = (l as u32) * bits as u32;
+                            let x = (d >> sh) & mask;
+                            let y = (a >> sh) & mask;
+                            let lim = (1i128 << (bits - 1)) - 1;
+                            let v: i128 = match op {
+                                VM::Suqadd => sextl(x).wrapping_add(y as i128),
+                                _ => (x as i128).wrapping_add(sextl(y)),
+                            };
+                            let sv = if matches!(op, VM::Suqadd) {
+                                v.clamp(-lim - 1, lim)
+                            } else {
+                                v.clamp(0, (lim << 1) | 1)
+                            };
+                            r |= ((sv as u128) & mask) << sh;
+                        }
+                    }
+                    VM::Cls | VM::Clz | VM::Cnt => {
+                        for l in 0..lanes {
+                            let sh = (l as u32) * bits as u32;
+                            let x = (a >> sh) & mask;
+                            let v: u64 = match op {
+                                VM::Cls => {
+                                    let sv = sextl(x);
+                                    if sv == 0 || sv == -1 {
+                                        bits - 1
+                                    } else if sv > 0 {
+                                        (sv.leading_zeros() as u64) - (64 - bits)
+                                    } else {
+                                        (sv.leading_ones() as u64) - (64 - bits)
+                                    }
+                                }
+                                VM::Clz => {
+                                    if x == 0 {
+                                        bits
+                                    } else {
+                                        (x.leading_zeros() as u64) - (64 - bits)
+                                    }
+                                }
+                                _ => x.count_ones() as u64,
+                            };
+                            r |= ((v as u128) & mask) << sh;
+                        }
+                    }
+                    VM::Cmgt0 | VM::Cmge0 | VM::Cmeq0 | VM::Cmle0 | VM::Cmlt0 => {
+                        for l in 0..lanes {
+                            let sh = (l as u32) * bits as u32;
+                            let x = sextl((a >> sh) & mask);
+                            let hit = match op {
+                                VM::Cmgt0 => x > 0,
+                                VM::Cmge0 => x >= 0,
+                                VM::Cmeq0 => x == 0,
+                                VM::Cmle0 => x <= 0,
+                                _ => x < 0,
+                            };
+                            r |= if hit { mask } else { 0 } << sh;
+                        }
+                    }
+                    VM::Abs | VM::Neg => {
+                        for l in 0..lanes {
+                            let sh = (l as u32) * bits as u32;
+                            let x = (a >> sh) & mask;
+                            let v: u128 = match op {
+                                VM::Abs => {
+                                    if sextl(x) < 0 {
+                                        ((sextl(x).wrapping_neg()) as u128) & mask
+                                    } else {
+                                        x
+                                    }
+                                }
+                                _ => ((sextl(x).wrapping_neg()) as u128) & mask,
+                            };
+                            r |= v << sh;
+                        }
+                    }
+                    VM::Fabs | VM::Fneg | VM::Fsqrt => {
+                        for l in 0..lanes {
+                            let sh = (l as u32) * bits as u32;
+                            let x = (a >> sh) & mask;
+                            let v: u128 = if bits == 64 {
+                                let f = f64::from_bits(x as u64);
+                                let o = match op {
+                                    VM::Fabs => f.abs(),
+                                    VM::Fneg => -f,
+                                    _ => f.sqrt(),
+                                };
+                                (o.to_bits() as u128) & mask
+                            } else {
+                                let f = f32::from_bits(x as u32);
+                                let o = match op {
+                                    VM::Fabs => f.abs(),
+                                    VM::Fneg => -f,
+                                    _ => f.sqrt(),
+                                };
+                                (o.to_bits() as u128) & mask
+                            };
+                            r |= v << sh;
+                        }
+                    }
+                    VM::Xtn | VM::Sqxtn | VM::Uqxtn => {
+                        // narrowing: dest element = size, src = size+1; dest
+                        // lane count = 2× (Q=0 → low half only, Q=1 → high)
+                        let dbits = bits / 2;
+                        let dmask = (1u128 << dbits) - 1;
+                        let dlanes = lanes * 2;
+                        let lim = (1i128 << (dbits - 1)) - 1;
+                        for l in 0..dlanes {
+                            let sh = (l as u32) * bits as u32;
+                            if sh >= 128 {
+                                break;
+                            }
+                            let x = (a >> sh) & mask;
+                            let v: i128 = match op {
+                                VM::Xtn => sextl(x),
+                                VM::Sqxtn => sextl(x).clamp(-lim - 1, lim),
+                                _ => {
+                                    // UQXTN: unsigned src, sat to unsigned
+                                    (x as i128).clamp(0, (lim << 1) | 1)
+                                }
+                            };
+                            let dsh = (l as u32) * dbits as u32 + if q { 64 } else { 0 };
+                            if dsh + dbits as u32 > 128 {
+                                break;
+                            }
+                            r |= ((v as u128) & dmask) << dsh;
+                        }
+                    }
+                    VM::Fcvtn | VM::Fcvtxn => {
+                        // FP narrowing: D→S (size==1) with round-to-nearest
+                        // (fcvtn) or round-to-odd (fcvtxn); Q=1 = high half
+                        let dsh0 = if q { 64u32 } else { 0 };
+                        for l in 0..(lanes * 2) {
+                            let sh = (l as u32) * bits as u32;
+                            if sh >= 128 {
+                                break;
+                            }
+                            let x = (a >> sh) & mask;
+                            let d = f64::from_bits(x as u64);
+                            let o: u128 = if matches!(op, VM::Fcvtn) {
+                                (d as f32).to_bits() as u128
+                            } else {
+                                // round-to-odd: round to f32; if lost bits,
+                                // OR the LSB
+                                let f = d as f32;
+                                let mut bitsv = f.to_bits();
+                                if d != f64::from(f) && (bitsv & 1) == 0 {
+                                    // approx RTO: nudge toward odd on ties
+                                    bitsv |= 1;
+                                }
+                                bitsv as u128
+                            };
+                            let dsh = dsh0 + (l as u32) * 32;
+                            if dsh >= 128 {
+                                break;
+                            }
+                            r |= (o & 0xFFFF_FFFF) << dsh;
+                        }
+                    }
+                    VM::Fcvtl => {
+                        // widening: S→D (size 1) or H→S (size 0); Q=1 = src
+                        // high half
+                        let ssh0 = if q { 64u32 } else { 0 };
+                        for l in 0..(lanes / 2).max(1) {
+                            let sh = ssh0 + (l as u32) * bits as u32;
+                            if sh >= 128 {
+                                break;
+                            }
+                            let x = (a >> sh) & mask;
+                            let o: u128 = if size == 1 {
+                                (f32::from_bits(x as u32) as f64).to_bits() as u128
+                            } else {
+                                (simd::h_to_f32(x as u16) as f32).to_bits() as u128
+                            };
+                            let dsh = (l as u32) * (bits as u32) * 2;
+                            r |= o << dsh;
+                        }
+                    }
+                    VM::Fcvtzs | VM::Fcvtzu => {
+                        for l in 0..lanes {
+                            let sh = (l as u32) * bits as u32;
+                            let x = (a >> sh) & mask;
+                            let v: u128 = if bits == 64 {
+                                let f = f64::from_bits(x as u64);
+                                match op {
+                                    VM::Fcvtzs => (f as i64) as u128,
+                                    _ => (f as u64) as u128,
+                                }
+                            } else {
+                                let f = f32::from_bits(x as u32);
+                                match op {
+                                    VM::Fcvtzs => (f as i32 as i64) as u128 & mask,
+                                    _ => (f.max(0.0) as u64 as u128) & mask,
+                                }
+                            };
+                            r |= v << sh;
+                        }
+                    }
+                    VM::Scvtf | VM::Ucvtf => {
+                        for l in 0..lanes {
+                            let sh = (l as u32) * bits as u32;
+                            let x = (a >> sh) & mask;
+                            let v: u128 = if bits == 64 {
+                                let f = match op {
+                                    VM::Scvtf => (sextl(x) as i64) as f64,
+                                    _ => (x as u64) as f64,
+                                };
+                                f.to_bits() as u128
+                            } else {
+                                let f = match op {
+                                    VM::Scvtf => sextl(x) as f32,
+                                    _ => x as u32 as f32,
+                                };
+                                (f.to_bits() as u128) & mask
+                            };
+                            r |= v << sh;
+                        }
+                    }
+                    VM::Sadalp | VM::Uadalp => {
+                        // pairwise add + accumulate: vd[i] += widen(vn[2i] +
+                        // vn[2i+1]) (SADALP signed / UADALP unsigned)
+                        let d = self.v.v[rd as usize];
+                        let dbits = (bits * 2).min(128);
+                        let dmask = if dbits >= 128 { u128::MAX } else { (1u128 << dbits) - 1 };
+                        let dlanes = (total * 8 / dbits as u64).max(1);
+                        for l in 0..dlanes {
+                            let sh0 = (l * 2) as u32 * bits as u32;
+                            let sh1 = sh0 + bits as u32;
+                            let x = (a >> sh0) & mask;
+                            let y = (a >> sh1) & mask;
+                            let pair = if matches!(op, VM::Sadalp) {
+                                sextl(x).wrapping_add(sextl(y))
+                            } else {
+                                (x as i128).wrapping_add(y as i128)
+                            };
+                            let dsh = (l as u32) * dbits as u32;
+                            let cur = (d >> dsh) & dmask;
+                            let cur_s = sext_u128(cur, dbits as u32);
+                            let v = cur_s.wrapping_add(pair);
+                            r |= ((v as u128) & dmask) << dsh;
+                        }
+                    }
+                    VM::Saddlv | VM::Uaddlv => {
+                        // across-lane widening add; dest scalar lane 0
+                        let dbits = (bits * 2).min(64);
+                        let dmask = (1u128 << dbits) - 1;
+                        let mut acc: i128 = 0;
+                        for l in 0..lanes {
+                            let sh = (l as u32) * bits as u32;
+                            let x = (a >> sh) & mask;
+                            acc = if matches!(op, VM::Saddlv) {
+                                acc.wrapping_add(sextl(x))
+                            } else {
+                                acc.wrapping_add(x as i128)
+                            };
+                        }
+                        r = (acc as u128) & dmask;
+                    }
+                    VM::Addv => {
+                        // across-lane add, non-widening: dest scalar lane 0
+                        let mut acc: u128 = 0;
+                        let mut sacc: i128 = 0;
+                        for l in 0..lanes {
+                            let sh = (l as u32) * bits as u32;
+                            let x = (a >> sh) & mask;
+                            acc = acc.wrapping_add(x);
+                            sacc = sacc.wrapping_add(sextl(x));
+                        }
+                        r = acc & mask;
+                        let _ = sacc;
+                    }
+
+                    VM::Sadalp | VM::Uadalp => {
+                        // pairwise add + accumulate: vd[i] += widen(vn[2i] +
+                        // vn[2i+1]) (SADALP signed / UADALP unsigned)
+                        let d = self.v.v[rd as usize];
+                        let dbits = (bits * 2).min(128);
+                        let dmask = if dbits >= 128 { u128::MAX } else { (1u128 << dbits) - 1 };
+                        let dlanes = (total * 8 / dbits as u64).max(1);
+                        for l in 0..dlanes {
+                            let sh0 = (l * 2) as u32 * bits as u32;
+                            let sh1 = sh0 + bits as u32;
+                            let x = (a >> sh0) & mask;
+                            let y = (a >> sh1) & mask;
+                            let pair = if matches!(op, VM::Sadalp) {
+                                sextl(x).wrapping_add(sextl(y))
+                            } else {
+                                (x as i128).wrapping_add(y as i128)
+                            };
+                            let dsh = (l as u32) * dbits as u32;
+                            let cur = (d >> dsh) & dmask;
+                            let cur_s = sext_u128(cur, dbits as u32);
+                            let v = cur_s.wrapping_add(pair);
+                            r |= ((v as u128) & dmask) << dsh;
+                        }
+                    }
+                }
+                self.v.v[rd as usize] = r;
+            }
+            Insn::VPerm { rd, rn, rm, size, op } => {
+                self.group_exec[1] += 1;
+                use crate::decode::PermOp as PO;
+                let eb = 1u64 << size;
+                let total = 16u64; // permute ops are always full vectors
+                let lanes = (total / eb).max(1);
+                let bits = eb * 8;
+                let mask = (1u128 << bits) - 1;
+                let a = self.v.v[rn as usize];
+                let b = self.v.v[rm as usize];
+                let get = |v: u128, i: u64| -> u128 { (v >> (i * bits)) & mask };
+                let mut r: u128 = 0;
+                for l in 0..lanes {
+                    let idx = match op {
+                        // even/odd interleaves across the concat(a,b)
+                        PO::Zip1 => {
+                            let h = l / ((lanes + 1) / 2);
+                            let i = l % ((lanes + 1) / 2);
+                            if h == 0 {
+                                i * 2
+                            } else {
+                                lanes + i * 2
+                            }
+                        }
+                        PO::Zip2 => {
+                            let h = l / ((lanes + 1) / 2);
+                            let i = l % ((lanes + 1) / 2);
+                            if h == 0 {
+                                i * 2 + 1
+                            } else {
+                                lanes + i * 2 + 1
+                            }
+                        }
+                        PO::Uzp1 => {
+                            let h = l / ((lanes + 1) / 2);
+                            let i = l % ((lanes + 1) / 2);
+                            if h == 0 {
+                                i * 2
+                            } else {
+                                lanes + i * 2
+                            }
+                        }
+                        PO::Uzp2 => {
+                            let h = l / ((lanes + 1) / 2);
+                            let i = l % ((lanes + 1) / 2);
+                            if h == 0 {
+                                i * 2 + 1
+                            } else {
+                                lanes + i * 2 + 1
+                            }
+                        }
+                        PO::Trn1 => {
+                            let h = l / ((lanes + 1) / 2);
+                            let i = l % ((lanes + 1) / 2);
+                            if h == 0 {
+                                i * 2
+                            } else {
+                                lanes + i * 2
+                            }
+                        }
+                        PO::Trn2 => {
+                            let h = l / ((lanes + 1) / 2);
+                            let i = l % ((lanes + 1) / 2);
+                            if h == 0 {
+                                i * 2 + 1
+                            } else {
+                                lanes + i * 2 + 1
+                            }
+                        }
+                    };
+                    let v = if idx < lanes { get(a, idx) } else { get(b, idx - lanes) };
+                    r |= v << (l * bits);
+                }
+                self.v.v[rd as usize] = r;
+            }
+            Insn::VExt { rd, rn, rm, imm4, q } => {
+                self.group_exec[1] += 1;
+                // concat(rn, rm) >> (imm4 * 8) bytes; .16b always (Q=1) —
+                // .8b form writes the low 8 bytes and zeroes the rest.
+                let concat = (self.v.v[rn as usize] << 64)
+                    | (self.v.v[rm as usize] >> 64)
+                    | (self.v.v[rn as usize] & u128::from(u64::MAX) << 0);
+                // proper concat: low half = rm, high half = rn
+                let cat = ((self.v.v[rn as usize] as u128) << 64)
+                    | (self.v.v[rm as usize] & u128::from(u64::MAX));
+                let _ = concat;
+                let sh = (imm4 as u32) * 8;
+                let out = cat >> sh;
+                self.v.v[rd as usize] = if q { out } else { out & u128::from(u64::MAX) };
+            }
+            Insn::VTbl { rd, rn, rm, len, tbx, q } => {
+                self.group_exec[1] += 1;
+                // table registers rn..rn+len-1 form a 16*len byte table;
+                // index bytes come from rm; out-of-range → 0 (TBL) or keep
+                // rd's original byte (TBX).
+                let mut table = [0u8; 64];
+                for k in 0..len as usize {
+                    let bytes = self.v.v[(rn + k as u8) as usize].to_le_bytes();
+                    table[k * 16..k * 16 + 16].copy_from_slice(&bytes);
+                }
+                let idx = self.v.v[rm as usize].to_le_bytes();
+                let orig = self.v.v[rd as usize].to_le_bytes();
+                let n = if q { 16 } else { 8 };
+                let mut out = [0u8; 16];
+                for i in 0..n {
+                    let j = idx[i] as usize;
+                    out[i] = if j < len as usize * 16 {
+                        table[j]
+                    } else if tbx {
+                        orig[i]
+                    } else {
+                        0
+                    };
+                }
+                let mut val = u128::from_le_bytes(out);
+                if !q {
+                    val &= u128::from(u64::MAX);
+                }
+                self.v.v[rd as usize] = val;
+            }
+            Insn::VDupElem { rd, rn, index, size_log2, q } => {
+                self.group_exec[1] += 1;
+                let lane = self.v.lane(rn, index, size_log2);
+                let eb = 1u64 << size_log2;
+                let mut rep: u128 = 0;
+                let count = if q { 16 / eb } else { 8 / eb };
+                for j in 0..count {
+                    rep |= (lane as u128) << (j * eb * 8);
+                }
+                self.v.v[rd as usize] = rep;
+            }
+            Insn::VDupGpr { rd, rn, size_log2, q } => {
+                self.group_exec[1] += 1;
+                let v = self.r(rn) & match size_log2 {
+                    0 => 0xFF,
+                    1 => 0xFFFF,
+                    2 => 0xFFFF_FFFF,
+                    _ => u64::MAX,
+                };
+                let eb = 1u64 << size_log2;
+                let mut rep: u128 = 0;
+                let count = if q { 16 / eb } else { 8 / eb };
+                for j in 0..count {
+                    rep |= (v as u128) << (j * eb * 8);
+                }
+                self.v.v[rd as usize] = rep;
+            }
+            Insn::VInsGpr { rd, rn, index, size_log2, src64 } => {
+                self.group_exec[1] += 1;
+                let v = if src64 { self.r(rn) } else { self.r(rn) & 0xFFFF_FFFF };
+                self.v.set_lane(rd, index, size_log2, v);
+            }
+            Insn::VInsLane { rd, rn, dst_index, src_index, size_log2, q: _ } => {
+                self.group_exec[1] += 1;
+                let v = self.v.lane(rn, src_index, size_log2);
+                self.v.set_lane(rd, dst_index, size_log2, v);
+            }
+            Insn::VVecToGpr { rd, rn, index, size_log2, signed, dest64 } => {
+                self.group_exec[1] += 1;
+                let lane = self.v.lane(rn, index, size_log2);
+                let bits = 1u32 << (size_log2 + 3);
+                let val = if signed {
+                    let m = 1i64 << (bits - 1);
+                    (((lane as i64) & ((m << 1) - 1)) - (((lane as i64) & m) << 1)) as u64
+                } else {
+                    lane
+                };
+                self.set_r(rd, if dest64 { val } else { val & 0xFFFF_FFFF });
+            }
+            Insn::VLong { vd, vn, vm, size, u, q, op } => {
+                self.group_exec[1] += 1;
+                use crate::decode::VLongOp as VL;
+                let eb = 1u64 << size;
+                let bits = eb * 8;
+                let dbits = bits * 2;
+                let mask = (1u128 << bits) - 1;
+                let dmask = ((1u128 << dbits) - 1) as u128;
+                let lanes = 8 >> size; // source lanes per half
+                let sh0 = if q { (8 >> size) as u32 * bits as u32 } else { 0 };
+                let a = self.v.v[vn as usize];
+                let b = self.v.v[vm as usize];
+                let dsh = if q { 0u32 } else { 0 }; // dest offset: Q=1 → full 128, Q=0 → low half
+                let dsh = if q { 0u32 } else { 0 };
+                for l in 0..lanes {
+                    let sh = sh0 + (l as u32) * bits as u32;
+                    let av = (a >> sh) & mask;
+                    let bv = (b >> sh) & mask;
+                    let sx = sext_u128(av, bits as u32);
+                    let sx2 = sext_u128(bv, bits as u32);
+                    let (prod, add): (i128, i128) = match op {
+                        VL::Addl => (0, if u { av as i128 } else { sx }.wrapping_add(if u { bv as i128 } else { sx2 })),
+                        VL::Addw => (0, 0), // handled below
+                        VL::Subl => (0, if u { av as i128 } else { sx }.wrapping_sub(if u { bv as i128 } else { sx2 })),
+                        VL::Subw => (0, 0),
+                        VL::Mlal | VL::Mlsl => {
+                            let p = if u { (av as i128) * (bv as i128) } else { sx * sx2 };
+                            (p, 0)
+                        }
+                        VL::Mull => {
+                            let p = if u { (av as i128) * (bv as i128) } else { sx * sx2 };
+                            (p, 0)
+                        }
+                    };
+                    let dsh = dsh + (l as u32) * dbits as u32;
+                    if dsh + dbits as u32 > 128 {
+                        break;
+                    }
+                    let cur = (self.v.v[vd as usize] >> dsh) & dmask;
+                    let cur_s = sext_u128(cur, dbits as u32);
+                    let out: i128 = match op {
+                        VL::Addl | VL::Subl => add,
+                        VL::Addw => {
+                            // vn is the WIDE operand (size+1), vm narrow
+                            let wsh = sh0 + (l as u32) * dbits as u32;
+                            let wmask = dmask;
+                            let wv = (a >> wsh) & wmask;
+                            let wsext = sext_u128(wv, dbits as u32);
+                            let nv = if u { wv as i128 } else { wsext };
+                            nv.wrapping_add(if u { bv as i128 } else { sx2 })
+                        }
+                        VL::Subw => {
+                            let wsh = sh0 + (l as u32) * dbits as u32;
+                            let wmask = dmask;
+                            let wv = (a >> wsh) & wmask;
+                            let wsext = sext_u128(wv, dbits as u32);
+                            let nv = if u { wv as i128 } else { wsext };
+                            nv.wrapping_sub(if u { bv as i128 } else { sx2 })
+                        }
+                        VL::Mlal | VL::Mull => cur_s.wrapping_add(prod),
+                        VL::Mlsl => cur_s.wrapping_sub(prod),
+                    };
+                    self.v.v[vd as usize] = (self.v.v[vd as usize] & !(dmask << dsh))
+                        | (((out as u128) & dmask) << dsh);
+                }
+            }
+            Insn::VSha1H { rd, rn } => {
+                self.group_exec[2] += 1;
+                let v = self.v.lane(rn, 0, 2) as u32;
+                self.v.set_lane(rd, 0, 2, v.rotate_left(30) as u64);
+            }
+            Insn::VSha1Su1 { vd, vn } => {
+                self.group_exec[2] += 1;
+                let d = self.v.v[vd as usize];
+                let n = self.v.v[vn as usize];
+                let lane = |v: u128, i: u32| -> u32 { ((v >> (i * 32)) & 0xFFFF_FFFF) as u32 };
+                let mut r: u128 = 0;
+                for i in 0..4u32 {
+                    let t = lane(d, i) ^ lane(n, (i + 1) % 4) ^ lane(n, i).rotate_right(2);
+                    r |= (t as u128) << (i * 32);
+                }
+                self.v.v[vd as usize] = r;
+            }
+            Insn::VSha256Su0 { vd, vn } => {
+                self.group_exec[2] += 1;
+                let d = self.v.v[vd as usize];
+                let lane = |v: u128, i: u32| -> u32 { ((v >> (i * 32)) & 0xFFFF_FFFF) as u32 };
+                let sig0 = |x: u32| x.rotate_right(7) ^ x.rotate_right(18) ^ (x >> 3);
+                let mut r: u128 = 0;
+                for i in 0..4u32 {
+                    let t = sig0(lane(d, i)).wrapping_add(lane(d, (i + 3) % 4));
+                    r |= (t as u128) << (i * 32);
+                }
+                self.v.v[vd as usize] = r;
+            }
+            Insn::VSha1Cpm { vd, vn, vm, op } => {
+                self.group_exec[2] += 1;
+                use crate::decode::Sha1CpmOp as SO;
+                let d = self.v.v[vd as usize];
+                let lane = |v: u128, i: u32| -> u32 { ((v >> (i * 32)) & 0xFFFF_FFFF) as u32 };
+                let (a, b, c, d4) = (lane(d, 0), lane(d, 1), lane(d, 2), lane(d, 3));
+                let e = self.v.lane(vn, 0, 2) as u32;
+                let w = self.v.lane(vm, 0, 2) as u32;
+                let f = match op {
+                    SO::Ch => (b & c) | (!b & d4),
+                    SO::Parity => b ^ c ^ d4,
+                    SO::Maj => (b & c) | (b & d4) | (c & d4),
+                };
+                // ARM round: t = e + f + w + ror(a, 2); state shifts
+                let t = e.wrapping_add(f).wrapping_add(w).wrapping_add(a.rotate_right(2));
+                let mut r: u128 = t as u128;
+                r |= (a as u128) << 32;
+                r |= (b as u128) << 64;
+                r |= (c as u128) << 96;
+                self.v.v[vd as usize] = r;
+            }
+            Insn::VSha1Su0 { vd, vn, vm } => {
+                self.group_exec[2] += 1;
+                let d = self.v.v[vd as usize];
+                let n = self.v.v[vn as usize];
+                let m = self.v.v[vm as usize];
+                let lane = |v: u128, i: u32| -> u32 { ((v >> (i * 32)) & 0xFFFF_FFFF) as u32 };
+                let mut r: u128 = 0;
+                for i in 0..4u32 {
+                    let t = lane(m, i) ^ lane(d, (i + 2) % 4) ^ lane(n, i).rotate_right(2);
+                    r |= (t as u128) << (i * 32);
+                }
+                self.v.v[vd as usize] = r;
+            }
+            Insn::VSha256H { vd, vn, vm, h2 } => {
+                self.group_exec[2] += 1;
+                // 2 rounds of SHA256 compression; H uses Vm lanes 0-1, H2
+                // lanes 2-3. Both Qd (a..d) and Qn (e..h) are written back.
+                let lane = |v: u128, i: u32| -> u32 { ((v >> (i * 32)) & 0xFFFF_FFFF) as u32 };
+                let put = |i: u32, t: u32| (t as u128) << (i * 32);
+                let sig0 = |x: u32| x.rotate_right(2) ^ x.rotate_right(13) ^ x.rotate_right(22);
+                let sig1 = |x: u32| x.rotate_right(6) ^ x.rotate_right(11) ^ x.rotate_right(25);
+                let sml0 = |x: u32| x.rotate_right(7) ^ x.rotate_right(18) ^ (x >> 3);
+                let sml1 = |x: u32| x.rotate_right(17) ^ x.rotate_right(19) ^ (x >> 10);
+                let (mut a, mut b, mut c, mut d) = (
+                    lane(self.v.v[vd as usize], 0),
+                    lane(self.v.v[vd as usize], 1),
+                    lane(self.v.v[vd as usize], 2),
+                    lane(self.v.v[vd as usize], 3),
+                );
+                let (mut e, mut f, mut g, mut h) = (
+                    lane(self.v.v[vn as usize], 0),
+                    lane(self.v.v[vn as usize], 1),
+                    lane(self.v.v[vn as usize], 2),
+                    lane(self.v.v[vn as usize], 3),
+                );
+                let base = if h2 { 2u32 } else { 0 };
+                for i in 0..2u32 {
+                    let w = lane(self.v.v[vm as usize], base + i);
+                    let t1 = h
+                        .wrapping_add(sig1(e))
+                        .wrapping_add((e & f) ^ (!e & g))
+                        .wrapping_add(w);
+                    let t2 = sig0(a).wrapping_add((a & b) ^ (a & c) ^ (b & c));
+                    h = g;
+                    g = f;
+                    f = e;
+                    e = d.wrapping_add(t1);
+                    d = c;
+                    c = b;
+                    b = a;
+                    a = t1.wrapping_add(t2);
+                }
+                self.v.v[vd as usize] =
+                    put(0, a) | put(1, b) | put(2, c) | put(3, d);
+                self.v.v[vn as usize] =
+                    put(0, e) | put(1, f) | put(2, g) | put(3, h);
+            }
+            Insn::VSha256Su1 { vd, vn, vm } => {
+                self.group_exec[2] += 1;
+                let d = self.v.v[vd as usize];
+                let n = self.v.v[vn as usize];
+                let m = self.v.v[vm as usize];
+                let lane = |v: u128, i: u32| -> u32 { ((v >> (i * 32)) & 0xFFFF_FFFF) as u32 };
+                let sml1 = |x: u32| x.rotate_right(17) ^ x.rotate_right(19) ^ (x >> 10);
+                let mut r: u128 = 0;
+                for i in 0..4u32 {
+                    let t = lane(d, i)
+                        .wrapping_add(sml1(lane(n, (i + 1) % 4)))
+                        .wrapping_add(lane(m, i));
+                    r |= (t as u128) << (i * 32);
+                }
+                self.v.v[vd as usize] = r;
+            }
+            Insn::FpCmp { rn, rm, zero, e: _, double } => {
+                self.group_exec[4] += 1;
+                let (ord, lt, eq) = if double {
+                    let a = f64::from_bits(self.v.lane(rn, 0, 3));
+                    let b = if zero {
+                        0.0
+                    } else {
+                        f64::from_bits(self.v.lane(rm, 0, 3))
+                    };
+                    (a.partial_cmp(&b), a < b, a == b)
+                } else {
+                    let a = f32::from_bits(self.v.lane(rn, 0, 2) as u32);
+                    let b = if zero {
+                        0.0f32
+                    } else {
+                        f32::from_bits(self.v.lane(rm, 0, 2) as u32)
+                    };
+                    (a.partial_cmp(&b), a < b, a == b)
+                };
+                self.nzcv = match ord {
+                    None => C | V,               // unordered
+                    Some(std::cmp::Ordering::Less) => N,
+                    Some(std::cmp::Ordering::Equal) => Z | C,
+                    Some(std::cmp::Ordering::Greater) => C,
+                };
+                let _ = (lt, eq);
+            }
+            Insn::Fccmp { rn, rm, nzcv, cond, e: _, double } => {
+                self.group_exec[4] += 1;
+                let c = crate::decode::Cond::from_bits(cond as u32);
+                match c {
+                    Some(c) if self.cond(c) => {
+                        let (ord, _lt, _eq) = if double {
+                            let a = f64::from_bits(self.v.lane(rn, 0, 3));
+                            let b = f64::from_bits(self.v.lane(rm, 0, 3));
+                            (a.partial_cmp(&b), a < b, a == b)
+                        } else {
+                            let a = f32::from_bits(self.v.lane(rn, 0, 2) as u32);
+                            let b = f32::from_bits(self.v.lane(rm, 0, 2) as u32);
+                            (a.partial_cmp(&b), a < b, a == b)
+                        };
+                        self.nzcv = match ord {
+                            None => C | V,
+                            Some(std::cmp::Ordering::Less) => N,
+                            Some(std::cmp::Ordering::Equal) => Z | C,
+                            Some(std::cmp::Ordering::Greater) => C,
+                        };
+                    }
+                    _ => self.nzcv = nzcv as u32,
+                }
+            }
+            Insn::Fcsel { rd, rn, rm, cond, double } => {
+                self.group_exec[4] += 1;
+                let pick = crate::decode::Cond::from_bits(cond as u32)
+                    .map(|c| self.cond(c))
+                    .unwrap_or(false);
+                let src = if pick { rn } else { rm };
+                let sl = if double { 3 } else { 2 };
+                let v = self.v.lane(src, 0, sl);
+                self.v.set_lane(rd, 0, sl, v);
+            }
+            Insn::FmovReg { rd, rn, double } => {
+                self.group_exec[4] += 1;
+                let sl = if double { 3 } else { 2 };
+                let v = self.v.lane(rn, 0, sl);
+                self.v.set_lane(rd, 0, sl, v);
+            }
+            Insn::FmovImm { rd, imm8, double } => {
+                self.group_exec[4] += 1;
+                // VFP-ExpandImm: exp = NOT(imm8<6>) : Replicate(imm8<6>, E-3)
+                // : imm8<5:4>; frac = imm8<3:0> (keystone grid-verified:
+                // 1.0→0x70, 0.5→0x60, 2.0→0x00, 31.0(D)→0x3F, -1.0→0xF0).
+                let s = (imm8 >> 7) & 1;
+                let n = (imm8 >> 6) & 1;
+                let e2 = ((imm8 >> 4) & 3) as u64;
+                let frac = (imm8 & 0xF) as u64;
+                if double {
+                    let mut exp: u64 = if n == 0 { 1 << 10 } else { 0 };
+                    if n == 1 {
+                        exp |= ((1u64 << 8) - 1) << 2;
+                    }
+                    exp |= e2 << 2;
+                    let bits = ((s as u64) << 63) | (exp << 52) | (frac << 48);
+                    self.v.set_lane(rd, 0, 3, bits);
+                } else {
+                    let mut exp: u32 = if n == 0 { 1 << 7 } else { 0 };
+                    if n == 1 {
+                        exp |= ((1u32 << 5) - 1) << 2;
+                    }
+                    exp |= (e2 as u32) << 2;
+                    let bits = ((s as u32) << 31) | (exp << 23) | ((frac as u32) << 19);
+                    self.v.set_lane(rd, 0, 2, bits as u64);
+                }
+            }
+            Insn::FpIntCvt { rd, rn, kind, double, gpr64, fbits } => {
+                self.group_exec[4] += 1;
+                use crate::decode::FpIntCvtKind as FK;
+                match kind {
+                    FK::MovToFp => {
+                        // FMOV Sd,Wn / Dd,Xn — bit pattern copy
+                        let v = if gpr64 { self.r(rn) } else { self.r(rn) & 0xFFFF_FFFF };
+                        let sl = if double { 3 } else { 2 };
+                        self.v.set_lane(rd, 0, sl, v);
+                    }
+                    FK::MovFromFp => {
+                        let sl = if double { 3 } else { 2 };
+                        let mask = if gpr64 { u64::MAX } else { 0xFFFF_FFFF };
+                        self.set_r(rd, self.v.lane(rn, 0, sl) & mask);
+                    }
+                    FK::Cvtf { unsigned } => {
+                        // SCVTF/UCVTF: int -> fp (fbits = fixed-point scale)
+                        let v = if gpr64 { self.r(rn) } else { self.r(rn) & 0xFFFF_FFFF };
+                        let scale = 2f64.powi(-(fbits as i32));
+                        let val: f64 = if unsigned {
+                            (v as f64) * scale
+                        } else {
+                            let sv = if gpr64 { v as i64 } else { v as i32 as i64 };
+                            (sv as f64) * scale
+                        };
+                        if double {
+                            self.v.set_lane(rd, 0, 3, val.to_bits());
+                        } else {
+                            self.v.set_lane(rd, 0, 2, (val as f32).to_bits() as u64);
+                        }
+                    }
+                    FK::FcvtGpr { round } => {
+                        // FCVT{N,A,P,M,Z}{S,U}: fp -> int with rounding mode;
+                        // round encoding: 0=N(even) 1=U?? — layout from the
+                        // decode table: 0b00=NS/NU pair is rmode 00 op 0/1…
+                        // here round: 0=NS 1=NU 2=AS 3=AU 4=ZS 5=ZU (PS/PU
+                        // unused by kernel but encoded 2b10/2b11 at decode…)
+                        let sl = if double { 3 } else { 2 };
+                        let val: f64 = if double {
+                            f64::from_bits(self.v.lane(rn, 0, 3))
+                        } else {
+                            f32::from_bits(self.v.lane(rn, 0, 2) as u32) as f64
+                        };
+                        let scaled = val * 2f64.powi(fbits as i32);
+                        let unsigned = round & 1 == 1;
+                        // mode = round>>1: 0=N, 1=A, 2=Z (rounds 4/5), 3=P
+                        let rm_kind = match round {
+                            0 | 1 => 0u8,
+                            2 | 3 => 1,
+                            4 | 5 => 2,
+                            _ => 3,
+                        };
+                        let iv: i128 = match rm_kind {
+                            0 => scaled as i128, // nearest-even (Rust cast)
+                            1 => {
+                                // round ties away from zero
+                                let t = scaled.trunc();
+                                let frac = (scaled - t).abs();
+                                let r = if frac >= 0.5 {
+                                    t + (if scaled < 0.0 { -1.0 } else { 1.0 })
+                                } else {
+                                    t
+                                };
+                                r as i128
+                            }
+                            2 => scaled.trunc() as i128, // Z (toward zero)
+                            _ => {
+                                // round toward +inf (P)
+                                scaled.ceil() as i128
+                            }
+                        };
+                        if !unsigned {
+                            let v = if gpr64 {
+                                (iv.clamp(i64::MIN as i128, i64::MAX as i128)) as i64 as u64
+                            } else {
+                                (iv.clamp(i32::MIN as i128, i32::MAX as i128)) as i32 as u64
+                            };
+                            self.set_r(rd, v);
+                        } else {
+                            let v = if gpr64 {
+                                (iv.clamp(0, u64::MAX as i128)) as u64
+                            } else {
+                                (iv.clamp(0, u32::MAX as i128)) as u32 as u64
+                            };
+                            self.set_r(rd, v);
+                        }
+                    }
+                }
+            }
+            Insn::AddpScalar { rd, rn, double } => {
+                self.group_exec[4] += 1;
+                if double {
+                    let lo = self.v.lane(rn, 0, 3);
+                    let hi = self.v.lane(rn, 1, 3);
+                    self.v.set_lane(rd, 0, 3, lo.wrapping_add(hi));
+                } else {
+                    let lo = self.v.lane(rn, 0, 2) as u32;
+                    let hi = self.v.lane(rn, 1, 2) as u32;
+                    self.v.set_lane(rd, 0, 2, lo.wrapping_add(hi) as u64);
+                }
             }
             Insn::VShiftImm { rd, rn, op, immh_immb, size, u, q } => {
                 self.group_exec[1] += 1;
@@ -2009,6 +3318,12 @@ impl Interpreter {
                         VfpOp::Div => a / b,
                         VfpOp::Max => if a > b { a } else { b },
                         VfpOp::Min => if a < b { a } else { b },
+                        VfpOp::Maxnm => {
+                            if a.is_nan() { b } else if b.is_nan() { a } else { a.max(b) }
+                        }
+                        VfpOp::Minnm => {
+                            if a.is_nan() { b } else if b.is_nan() { a } else { a.min(b) }
+                        }
                     };
                     self.v.set_lane(vd, i, 1, simd::f32_to_h(r) as u64);
                 }
@@ -2265,19 +3580,27 @@ impl Interpreter {
                     FpType::H => self.v.set_lane(rd, 0, 1, simd::f64_to_h(val) as u64),
                 }
             }
-            Insn::Fp2 { rd, rn, rm, op } => {
+            Insn::Fp2 { rd, rn, rm, op, ty } => {
                 self.group_exec[4] += 1;
-                let a = simd::h_to_f32(self.v.lane(rn, 0, 1) as u16);
-                let b = simd::h_to_f32(self.v.lane(rm, 0, 1) as u16);
-                let r = match op {
-                    VfpOp::Add => a + b,
-                    VfpOp::Sub => a - b,
-                    VfpOp::Mul => a * b,
-                    VfpOp::Div => a / b,
-                    VfpOp::Max => if a > b { a } else { b },
-                    VfpOp::Min => if a < b { a } else { b },
-                };
-                self.v.set_lane(rd, 0, 1, simd::f32_to_h(r) as u64);
+                use crate::decode::FpType;
+                match ty {
+                    FpType::D => {
+                        let a = f64::from_bits(self.v.lane(rn, 0, 3));
+                        let b = f64::from_bits(self.v.lane(rm, 0, 3));
+                        self.v.set_lane(rd, 0, 3, fp2_f64(op, a, b).to_bits());
+                    }
+                    FpType::S => {
+                        let a = f32::from_bits(self.v.lane(rn, 0, 2) as u32);
+                        let b = f32::from_bits(self.v.lane(rm, 0, 2) as u32);
+                        self.v.set_lane(rd, 0, 2, fp2_f32(op, a, b).to_bits() as u64);
+                    }
+                    FpType::H => {
+                        let a = simd::h_to_f32(self.v.lane(rn, 0, 1) as u16);
+                        let b = simd::h_to_f32(self.v.lane(rm, 0, 1) as u16);
+                        let r = fp2_f32(op, a, b);
+                        self.v.set_lane(rd, 0, 1, simd::f32_to_h(r) as u64);
+                    }
+                }
             }
             Insn::Fp1 { rd, rn, op } => {
                 self.group_exec[4] += 1;
@@ -2896,5 +4219,148 @@ fn fp3_f64(op: crate::decode::V3FpOp, a: f64, b: f64, acc: f64) -> f64 {
         Mls => acc - a * b,
         Recps => 2.0 - a * b,
         Rsqrts => (3.0 - a * b) / 2.0,
+    }
+}
+
+/// Sign-extend the low `bits` of a u128 lane value to i128.
+pub(crate) fn sext_u128(v: u128, bits: u32) -> i128 {
+    if bits >= 128 {
+        v as i128
+    } else {
+        let m = 1i128 << (bits - 1);
+        ((v as i128) & ((m << 1) - 1)) - (((v as i128) & m) << 1)
+    }
+}
+
+/// Scalar/indexed 2-source FP for the VfpOp set (S width).
+fn fp2_f32(op: crate::decode::VfpOp, a: f32, b: f32) -> f32 {
+    use crate::decode::VfpOp::*;
+    match op {
+        Add => a + b,
+        Sub => a - b,
+        Mul => a * b,
+        Div => a / b,
+        Max => {
+            if a.is_nan() || b.is_nan() {
+                f32::NAN
+            } else {
+                a.max(b)
+            }
+        }
+        Min => {
+            if a.is_nan() || b.is_nan() {
+                f32::NAN
+            } else {
+                a.min(b)
+            }
+        }
+        Maxnm => {
+            if a.is_nan() {
+                b
+            } else if b.is_nan() {
+                a
+            } else {
+                a.max(b)
+            }
+        }
+        Minnm => {
+            if a.is_nan() {
+                b
+            } else if b.is_nan() {
+                a
+            } else {
+                a.min(b)
+            }
+        }
+    }
+}
+
+/// Scalar/indexed 2-source FP (D width).
+fn fp2_f64(op: crate::decode::VfpOp, a: f64, b: f64) -> f64 {
+    use crate::decode::VfpOp::*;
+    match op {
+        Add => a + b,
+        Sub => a - b,
+        Mul => a * b,
+        Div => a / b,
+        Max => {
+            if a.is_nan() || b.is_nan() {
+                f64::NAN
+            } else {
+                a.max(b)
+            }
+        }
+        Min => {
+            if a.is_nan() || b.is_nan() {
+                f64::NAN
+            } else {
+                a.min(b)
+            }
+        }
+        Maxnm => {
+            if a.is_nan() {
+                b
+            } else if b.is_nan() {
+                a
+            } else {
+                a.max(b)
+            }
+        }
+        Minnm => {
+            if a.is_nan() {
+                b
+            } else if b.is_nan() {
+                a
+            } else {
+                a.min(b)
+            }
+        }
+    }
+}
+
+/// Indexed (by-element) FP op: a OP b (+/- acc for FMLA/FMLS). S or D width
+/// from size_log2 (2 = S, 3 = D). Returns raw bits in the low lane.
+fn vindex_fp(
+    op: crate::decode::VindexStdOp,
+    a: u128,
+    b: u128,
+    acc: u128,
+    size_log2: u8,
+) -> u128 {
+    use crate::decode::VindexStdOp as VO;
+    if size_log2 >= 3 {
+        let x = f64::from_bits(a as u64);
+        let y = f64::from_bits(b as u64);
+        let c = f64::from_bits(acc as u64);
+        let o = match op {
+            VO::Fmul => x * y,
+            VO::Fmulx => {
+                if (x == 0.0 && y.is_infinite()) || (y == 0.0 && x.is_infinite()) {
+                    2.0
+                } else {
+                    x * y
+                }
+            }
+            VO::Fmla => x * y + c,
+            _ => c - x * y,
+        };
+        o.to_bits() as u128
+    } else {
+        let x = f32::from_bits(a as u32);
+        let y = f32::from_bits(b as u32);
+        let c = f32::from_bits(acc as u32);
+        let o = match op {
+            VO::Fmul => x * y,
+            VO::Fmulx => {
+                if (x == 0.0 && y.is_infinite()) || (y == 0.0 && x.is_infinite()) {
+                    2.0
+                } else {
+                    x * y
+                }
+            }
+            VO::Fmla => x * y + c,
+            _ => c - x * y,
+        };
+        o.to_bits() as u128
     }
 }

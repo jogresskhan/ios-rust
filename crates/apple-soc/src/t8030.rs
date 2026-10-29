@@ -322,7 +322,10 @@ mod tests {
 
     #[test]
     fn fallback_map_attaches() {
-        let mut m = T8030Machine::new(DEFAULT_DRAM_MB);
+        // 256 MiB: unit tests don't need real DRAM size; DEFAULT (4 GiB)
+        // OOMs the 3 GiB CI sandbox (the runtime knob IOS_RUST_DRAM_MB
+        // exists for the same reason).
+        let mut m = T8030Machine::new(256);
         m.attach_fallback();
         assert!(m.bus.region_count() > 10);
         assert!(m.summary().contains("T8030"));
@@ -330,7 +333,10 @@ mod tests {
 
     #[test]
     fn adt_discovery_attaches_aic() {
-        let mut m = T8030Machine::new(DEFAULT_DRAM_MB);
+        // 256 MiB: unit tests don't need real DRAM size; DEFAULT (4 GiB)
+        // OOMs the 3 GiB CI sandbox (the runtime knob IOS_RUST_DRAM_MB
+        // exists for the same reason).
+        let mut m = T8030Machine::new(256);
         let n = m.attach_from_adt(&sample_root());
         assert_eq!(n, 1);
         // real base from the tree

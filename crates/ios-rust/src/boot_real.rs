@@ -663,7 +663,15 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
                     ));
                 }
             } else {
-                out.push("cpu_data[0]: never discovered".into());
+                out.push(format!(
+                    "cpu_data[0]: never discovered · tpidr {:#x}{}",
+                    cpu.sys.tpidr_el1,
+                    if cpu.sys.tpidr_el1 != 0 {
+                        " (set by the kernel itself — no seed needed)"
+                    } else {
+                        ""
+                    }
+                ));
             }
             out
         },

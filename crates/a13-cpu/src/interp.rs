@@ -3455,25 +3455,36 @@ impl Interpreter {
                 let dst = self.r(rd);
                 match kind {
                     BfmKind::Bfm => {
-                        // Insert: dst[immr+width-1 : immr] = src[width-1:0]
-                        // (wrapping rotate), all other dst bits preserved.
-                        // `imms` encodes ~width: width = bits - imms - 1.
-                        let width: u32 = bits - (imms & (bits - 1)) - 1;
-                        if width == 0 {
-                            self.set_r(rd, dst);
+                        // Canonical BFM (REAL-DATA BUG #27, keystone/capstone-
+                        // pinned). The old `width = bits - imms - 1` formula
+                        // was simply wrong: it turned `bfxil x14,x15,#0,#56`
+                        // — the arm_vm_init packed-pointer decoder — into an
+                        // 8-bit insert, storing 0xfffe00ee488b0058 instead of
+                        // 0xfffffff007724458 (the array base the DT walk
+                        // later dereferences — the bug #27 stop).
+                        // Aliases (capstone ground truth):
+                        //   bfxil #lsb,#w  = BFM immr=lsb, imms=lsb+w-1
+                        //     → dst[w-1:0] = src[lsb+w-1:lsb], rest preserved
+                        //   bfi  #lsb,#w   = BFM immr=(bits-lsb)&63, imms=w-1
+                        //     → dst[lsb+w-1:lsb] = src[w-1:0], rest preserved
+                        //   raw BFM s>=r  → dst[s-r:0] = src[s:r] (capstone
+                        //     renders `bfm #4,#10` as `bfxil #4,#7`)
+                        //   raw BFM s<r   → bfi lsb=bits-r, w=s+1
+                        if imms >= immr {
+                            // bfxil family: extract src[imms:immr], insert low.
+                            let w = imms - immr + 1;
+                            let ones = if w >= 64 { u64::MAX } else { (1u64 << w) - 1 };
+                            let field = (src >> immr) & ones;
+                            self.set_r(rd, ((dst & !ones) | field) & mask);
                         } else {
-                            let ones = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
-                            let sh = immr % bits;
-                            let field = src & ones;
-                            let (placed, wm) = if is64 {
-                                (field.rotate_right(sh), ones.rotate_right(sh))
-                            } else {
-                                (
-                                    ((field as u32).rotate_right(sh)) as u64,
-                                    ((ones as u32).rotate_right(sh)) as u64,
-                                )
-                            };
-                            self.set_r(rd, ((dst & !wm) | (placed & wm)) & mask);
+                            // bfi family (wrap): insert src[imms:0] at
+                            // lsb = bits - immr.
+                            let lsb = ((bits as u64) - immr as u64) % bits as u64;
+                            let w = imms + 1;
+                            let ones = if w >= 64 { u64::MAX } else { (1u64 << w) - 1 };
+                            let field = (src & ones).wrapping_shl(lsb as u32);
+                            let wm = ones.wrapping_shl(lsb as u32) & mask;
+                            self.set_r(rd, ((dst & !wm) | (field & wm)) & mask);
                         }
                     }
                     BfmKind::Sbfm => {
@@ -3481,14 +3492,18 @@ impl Interpreter {
                         // and sign-extend. W-form extracting through bit 31
                         // sign-extends into the upper word.
                         if (imms as u32) < immr.min(bits - 1) {
-                            // s < r: rotate-model fallback (LSL/ASR alias
-                            // territory — rare on the boot path)
-                            let rot = src.rotate_right(immr % bits);
-                            let sign_bit = (rot >> imms) & 1;
-                            let mut v = rot & ((1u64 << (imms + 1)) - 1);
-                            if sign_bit == 1 {
-                                v |= (!0u64) << (imms + 1);
-                            }
+                            // sbfiz family (bug #27 follow-up): dst =
+                            // SX(src[imms:0]) << (bits - immr). The old
+                            // rotate-model fallback picked up the WRAPPED
+                            // high bits (src[63:62]-class) that the alias
+                            // discards — sx-first, shift, zero the LSB gap.
+                            let w = imms + 1;
+                            let ones = if w >= 64 { u64::MAX } else { (1u64 << w) - 1 };
+                            let field = src & ones;
+                            let sign = (field >> (w - 1)) & 1;
+                            let mut v = if sign == 1 { field | !ones } else { field };
+                            let sh = (bits as u64) - immr as u64;
+                            v = v.wrapping_shl(sh as u32);
                             self.set_r(rd, v & mask);
                         } else {
                             let width = imms - immr + 1;
@@ -3512,8 +3527,17 @@ impl Interpreter {
                         if imms == bits - 1 {
                             self.set_r(rd, (src >> (immr.min(bits - 1))) & mask);
                         } else if (imms as u32) < immr.min(bits - 1) {
+                            // ubfiz family (bug #27 follow-up): dst =
+                            // (src & ones(imms+1)) << (bits - immr) — the
+                            // mask matters: the plain `src << sh` leaked
+                            // src's high bits into the field (ubfiz must
+                            // zero everything outside [lsb, lsb+w)). For the
+                            // LSL alias (imms = bits-1-immr) the mask is
+                            // exactly the bits the shift discards, so it is
+                            // a no-op there — one path serves both.
                             let sh = (bits as u64) - (immr.min(bits - 1) as u64);
-                            self.set_r(rd, src.wrapping_shl(sh as u32) & mask);
+                            let ones = (1u64 << (imms + 1)) - 1;
+                            self.set_r(rd, ((src & ones).wrapping_shl(sh as u32)) & mask);
                         } else {
                             let width = imms - immr + 1;
                             let ones = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
@@ -5154,6 +5178,81 @@ mod gap_mair_tests {
             "stop={res:?}"
         );
         assert_eq!(cpu.undefined_taken, 0);
+    }
+
+    /// REAL-DATA BUG #27: the BFM family executed `width = bits-imms-1` —
+    /// the arm_vm_init packed-pointer decoder's `bfxil x14,x15,#0,#56`
+    /// became an 8-bit insert, storing 0xfffe00ee488b0058 instead of
+    /// 0xfffffff007724458 into the DT-registry array base (the
+    /// far=0xfffe00ee488b0058 stop @0x…7b8cd70, 8.18M insns). Encodings
+    /// keystone-verified; expected values per ARM DDI 0487 (bfxil/bfi/bfm/
+    /// ubfiz/sbfiz), cross-checked against the rebase decode arithmetic.
+    #[test]
+    fn bfm_bfxil_family_value_goldens() {
+        let exec = |words: &[u32], preset: &[(usize, u64)]| {
+            let mut ram = FakeRam::new(0x8000);
+            for (i, w) in words.iter().enumerate() {
+                ram.load_code(0x1000 + i * 4, &w.to_le_bytes());
+            }
+            ram.load_code(0x1000 + words.len() * 4, &0xD440_0000u32.to_le_bytes());
+            let mut cpu = Interpreter::new(Box::new(ram));
+            cpu.set_reset_vector(0x1000);
+            for &(r, v) in preset {
+                cpu.x[r] = v;
+            }
+            let res = cpu.run(InterpBudget { max_insn: 64, max_ns: u64::MAX });
+            assert_eq!(res.stop, StopReason::Halted, "program must halt");
+            cpu
+        };
+
+        // 1) THE rebase-decode pipeline (arm_vm_init, verbatim):
+        //    lsl x14,x13,#13 ; sbfx x15,x13,#0,#43 ; bfxil x14,x15,#0,#56 ;
+        //    add x14,x22,x14 ; add x14,x14,x11
+        //    with x13 = the shipped packed entry, x22 = link base, x11 =
+        //    0x0FF8FFC000 (the walker's constant) → x14 MUST be the clean
+        //    array-base VA. x14 pre-filled with garbage: bfxil must replace
+        //    the low 56 bits and preserve the top byte.
+        let cpu = exec(
+            &[0xD373_C9AE, 0x9340_A9AF, 0xB340_DDEE, 0x8B0E_02CE, 0x8B0B_01CE],
+            &[
+                (13, 0x0017_FFF0_0772_4458),
+                (22, 0xFFFF_FFF0_0700_4000),
+                (11, 0x0000_000F_F8FF_C000), // the walker's x11 constant (watch-measured)
+                (14, 0x1234_5678_9ABC_DEF0), // garbage: bfxil must replace low 56
+            ],
+        );
+        assert_eq!(
+            cpu.x[14], 0xFFFF_FFF0_0772_4458,
+            "packed-pointer decode pipeline must yield the clean VA (bug #27)"
+        );
+
+        // 2) bfi x0,x1,#3,#9 (wrap family): x0[11:3] = x1[8:0], rest kept.
+        let cpu = exec(
+            &[0xB37D_2020],
+            &[(0, 0xDEAD_BEEF_DEAD_BEEF), (1, 0x1234_5678_9ABC_DEF1)],
+        );
+        assert_eq!(cpu.x[0], 0xDEAD_BEEF_DEAD_B78F, "bfi wrap insert");
+
+        // 3) raw bfm x4,x5,#4,#10 (capstone: bfxil #4,#7): x4[6:0]=x5[10:4].
+        let cpu = exec(
+            &[0xB344_28A4],
+            &[(4, 0xCAFE_F00D_BEEF_F00D), (5, 0x0123_4567_89AB_CDEF)],
+        );
+        assert_eq!(cpu.x[4], 0xCAFE_F00D_BEEF_F05E, "raw bfm = bfxil s>=r");
+
+        // 4) ubfiz x0,x1,#2,#12: (x1 & 0xFFF) << 2 — high garbage must go.
+        let cpu = exec(&[0xD37E_2C20], &[(1, 0xFEED_FACE_FEED_FACE)]);
+        assert_eq!(cpu.x[0], 0x2B38, "ubfiz must mask the field");
+
+        // 5) sbfiz x2,x3,#2,#12: SX12(x3[11:0]) << 2 — negative + positive.
+        let cpu = exec(&[0x937E_2C62], &[(3, 0x1234_5678_9ABC_DEF1)]);
+        assert_eq!(cpu.x[2], 0xFFFF_FFFF_FFFF_FBC4, "sbfiz negative sx");
+        let cpu = exec(&[0x937E_2C62], &[(3, 0xFFFF_FFFF_FFFF_F801)]);
+        assert_eq!(cpu.x[2], 0xFFFF_FFFF_FFFF_E004, "sbfiz negative 2");
+
+        // 6) 32-bit bfxil w0,w1,#8,#12: w0[11:0]=w1[19:8], upper word zero.
+        let cpu = exec(&[0x3308_4C20], &[(0, 0xDEAD_BEEF), (1, 0x1ABC_DEF1)]);
+        assert_eq!(cpu.x[0], 0xDEAD_BCDE, "W-form bfxil zero-extends");
     }
 
     /// M4-b: TPIDR_EL1 seeds itself from the GUEST's own cpu_data[0]

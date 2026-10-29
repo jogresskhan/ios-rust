@@ -832,3 +832,61 @@ enforcement stays an honest, tracked limit gated on M4 vectoring.
   through this commit. Pre-existing gap unchanged: /home/z/work/
   ios-re-toolkit + ios-research/research-docs remain missing since the
   earlier sandbox reset (SKIP lines in the snapshot log).
+
+### 2.12c — Session J (2026-10-30): bug #27 BFM family — boot 8.19M → 2,000,000,000 CLEAN insns
+
+* **REAL-DATA BUG #27 (BFM/bfxil width formula):** the interpreter's
+  `BfmKind::Bfm` executed `width = bits − imms − 1` with a rotate model —
+  correct for NOTHING in the family. The arm_vm_init packed-pointer
+  rebase decoder (`lsl x14,x13,#13 → sbfx x15,x13,#0,#43 → bfxil
+  x14,x15,#0,#56 → add x14,x22,x14 → add x14,x14,x11(=0x0FF8FFC000)`,
+  walker @0x…7b802c0, store @0x…7b80340) decoded the shipped entry
+  0x0017fff007724458 into 0xfffe00ee488b0058 instead of
+  0xfffffff007724458 (arithmetically proven delta) and STORED it into
+  the DT-registry array base (object 0x…772478c field +0x14) — the
+  array-push `str w19,[x9]` @0x…7b8cd70 (session I's stop) then faulted
+  on its own garbage base. Found via the session-I-planned
+  `IOS_RUST_WATCH_VA` store-watch: EXACTLY ONE corrupting write, at
+  insn 107,008 — not 8.18M; the value was written once by the kernel's
+  own rebase walker very early and used much later.
+* **Fix (keystone/capstone truth table, ARM DDI 0487 semantics):**
+  imms ≥ immr → extract src[imms:immr], insert at the LSB, all other dst
+  bits preserved (bfxil family — capstone renders raw `bfm #4,#10` as
+  `bfxil #4,#7`); imms < immr → wrap insert at lsb = bits − immr (bfi
+  family). Two siblings fixed on the same evidence: **ubfiz** (Ubfm s<r
+  branch had NO field mask — high garbage leaked into the field; for the
+  LSL alias the mask is provably a no-op) and **sbfiz** (Sbfm s<r branch
+  used a rotate model that picks up the wrapped high bits the alias
+  discards — now sign-extend-then-shift). 6 goldens including the
+  verbatim decode pipeline pinning x14 = 0xfffffff007724458.
+* **Staged layout end_kern = the kernel's own VA span (bug #22
+  follow-up):** end_kern = round_16K(max(vmaddr+vmsize)) =
+  0xFFFFFFF0_09C60000 (the kernel's own `end_kern` writer @0x…7b83758 —
+  RE-confirmed), NOT round_page(file bytes) — the VA span ends 0xB3000
+  above the file-backed end, so the file-size staging put the DT blob
+  BELOW end_kern and the physmap tail entry e[DT].len wrapped negative.
+  All staging rounding is 16K (ARM64 xnu page size): dt_pa 0x803C60000 ·
+  boot_args 0x803C98000 · topOfKernelData 0x803C9C000. Measured: the
+  rebase now lands deviceTreeP on the REAL blob — SecureDTInit's node
+  table builds with real 0x9c6xxxx KVAs (stack-write log).
+* **Measured (IOS_RUST_DRAM_MB=1024, release build):** boot-first
+  8,194,993 → 48,000,000 (budget stop, clean) → **2,000,000,000 insns
+  retired · stop=Budget · clean · panic() 0 · sync aborts 0 · exceptions
+  0 · bus unmapped 0/0** — the real kernel runs 2 GIGA instructions
+  without a single fault. M4 gate: the **≥10M clause cleared 244×**;
+  the WFI-and-resume clause NOT yet exercised (0 WFI in 2G insns).
+* **NEW STOP CLASS (bug #28, next block's RE target):** the 2G budget
+  stop is a diverging **Euclid GCD loop** @0x…7b92d68-78
+  (`mov x11,x12; udiv x12,x10,x12; msub x12,x12,x11,x10; mov x10,x11;
+  cbnz x12`), called from arm_vm_init (lr 0x…7b80a30): the operand pair
+  is (24,000,000 — the timebase — and 2⁶⁴−24,000,000, i.e. a
+  SIGNED-NEGATIVE value read as unsigned). Unsigned-udiv Euclid on a
+  negative operand never terminates (the residue stays wrapped). An
+  upstream clock-frequency derivation yields the wrapped value —
+  candidate link to bug #25's unresolved placeholders (clock fields
+  reading reference bytes). RE next: gcd args' provenance at the
+  0x…7b80a30 call site.
+* `cargo test --workspace`: **406 passed / 0 failed** (IOS_RUST_DRAM_MB=
+  768; +3 goldens over session I's 403). Report improvement: the
+  cpu_data[0] line now prints tpidr_el1 even when the scan never ran
+  (the kernel sets TPIDR itself — 0 aborts through 2G insns).

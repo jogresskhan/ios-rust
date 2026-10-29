@@ -274,7 +274,47 @@ xnu builds its own page tables during early boot; the interpreter must walk them
    T0SZ=T1SZ=25, TBI0=1, IPS=40-bit) and now surfaced live in the boot
    report's MMU config line.]**
 
-## M4 — IRQ / AIC / timers  [ ] (session I 2026-10-30: text-zeroing root-caused, TPIDR seeded, bugs #25/#26 fixed — gate NOT cleared, honest)
+## M4 — IRQ / AIC / timers  [ ] (session J 2026-10-30: bug #27 BFM family fixed — boot 8.19M → 2,000,000,000 CLEAN insns, zero aborts; insn gate clause cleared 244×, WFI clause pending: new #28 gcd-divergence stop)
+
+**Session J evidence (2026-10-30, IOS_RUST_DRAM_MB=1024):** boot-first
+8,194,993 → 48,000,000 (48M budget stop, clean) → **2,000,000,000 insns
+retired with stop=Budget · clean · panic() 0 · sync aborts 0 · exceptions
+delivered 0 · bus unmapped 0/0** — the real kernel runs 2 GIGA insns
+without a single fault after bug #27. The 2G stop is a NEW class (next
+block's RE target, bug #28): a diverging **Euclid GCD loop** at
+0x…7b92d68-78 (`udiv x12,x10,x12; msub x12,x12,x11,x10; cbnz`) called
+from arm_vm_init (lr 0x…7b80a30): the pair is (24,000,000 = the timebase,
+2⁶⁴−24,000,000 = a SIGNED-NEGATIVE operand) — unsigned-udiv Euclid on a
+negative operand never terminates (the residue stays wrapped). Some
+upstream clock-frequency derivation produces a wrapped value — candidate
+link to bug #25's unresolved placeholders (clock fields reading reference
+bytes). RE next: the gcd args' provenance at the 0x…7b80a30 call site.
+
+**Session J model changes (all keystone/capstone-pinned, 6 new goldens):**
+* **Staged layout end_kern = the kernel's own VA span (bug #22 follow-up):**
+  end_kern = round_16K(max(vmaddr+vmsize)) = 0xFFFFFFF0_09C60000 — NOT
+  round_page(file bytes) (the VA span ends 0xB3000 above the file-backed
+  end; the kernel's `end_kern` writer @0x…7b83758 measures
+  0xFFFFFFF009C60000). All staging rounds are 16K (ARM64 xnu page size):
+  dt_pa 0x803C60000 · boot_args 0x803C98000 · topOfKernelData 0x803C9C000
+  (the e[DT] physmap tail entry is now positive and whole-page — the
+  rebase lands deviceTreeP on the REAL blob; SecureDTInit's node table
+  builds with real 0x9c6xxxx KVAs). Golden `staged_layout_uses_va_span_end_kern`.
+* **REAL-DATA BUG #27 — BFM family width formula was simply wrong:**
+  `width = bits − imms − 1` (plus a rotate model) turned
+  `bfxil x14,x15,#0,#56` — the arm_vm_init packed-pointer rebase decoder
+  (`lsl #13 → sbfx #0,#43 → bfxil #0,#56 → add x22 → add 0x0FF8FFC000`)
+  — into an 8-bit insert, storing 0xfffe00ee488b0058 instead of
+  0xfffffff007724458 into the DT-registry array base (object 0x…772478c
+  field +0x14; the array-push `str w19,[x9]` @0x…7b8cd70 then faulted —
+  the session-I stop). Found via `IOS_RUST_WATCH_VA` store-watch: exactly
+  ONE corrupting write at insn 107,008 (pc=0x…7b80340, the walker).
+  Fix per keystone/capstone truth table: imms ≥ immr → extract
+  src[imms:immr] insert at LSB (bfxil family); imms < immr → wrap insert
+  at lsb = bits−immr (bfi family). Also fixed on the same evidence:
+  ubfiz's missing field mask (Ubfm s<r branch) and sbfiz's rotate-model
+  (Sbfm s<r branch must sign-extend THEN shift). Goldens include the
+  verbatim decode pipeline → 0xfffffff007724458.
 
 **Session I evidence (2026-10-30, IOS_RUST_DRAM_MB=1024, /tmp/bf-bug26.log):**
 boot-first panic-point 8,135,842 → **8,194,993 retired insns** with
@@ -330,15 +370,17 @@ remap storm" wording below is retired; the real VBAR_EL1 vector table is
   (far=0x696d614674736f48 @ insn 8,148,893). Fix: iBoot-equivalent
   per-segment BSS zero-fill after staging.
 
-**Honest limits carried forward:** M4 acceptance NOT met (8.19M < 10M,
-stop is not a WFI park); identity placeholders stay unresolved reference
-strings (no SysCfg device); AIC v1 + timer-FIQ models landed but see 0
-device accesses pre-stop (M5 census); PAR/AT S1E1R + PAR_EL1 still
-absent; permission/AF/XN enforcement still gated. cargo test --workspace:
-**403 passed / 0 failed** (IOS_RUST_DRAM_MB=768 on the 3 GiB host —
-honest workaround, unchanged behavior on 4+ GiB hosts). **S3 snapshot
-TAKEN at session closeout** (390 files + full-history bundle →
-ios-research-vault; the vault's stale-at-1f9ec59 gap is closed).
+**Honest limits carried forward:** M4 acceptance: the **≥10M clause is
+cleared 244× over (2G clean insns)**; the WFI-and-resume clause is NOT
+yet exercised (0 WFI in 2G insns — the kernel is stuck in the bug-#28
+gcd before reaching the idle loop). AIC v1 + timer-FIQ models landed but
+still see 0 device accesses through 2G insns (M5 census: the boot path
+stays sysreg/DRAM-only — M5 attach work correctly waits). Identity
+placeholders stay unresolved reference strings (no SysCfg device);
+PAR/AT S1E1R + PAR_EL1 still absent; permission/AF/XN enforcement still
+gated. cargo test --workspace: **406 passed / 0 failed**
+(IOS_RUST_DRAM_MB=768 on the 3 GiB host — honest workaround, unchanged
+behavior on 4+ GiB hosts; +3 goldens over session I's 403).
 
 1. Model `apple-aic` v1 (devices crate has a stub): event reg, IPI regs,
    pending-set/clear, mask; wire to `vm-core::irq::IrqController`.

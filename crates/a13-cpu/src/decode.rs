@@ -185,6 +185,57 @@ pub enum Insn {
     Ldp { rt: u8, rt2: u8, rn: u8, imm: i64, mode: PairMode, is64: bool },
     /// STP.
     Stp { rt: u8, rt2: u8, rn: u8, imm: i64, mode: PairMode, is64: bool },
+    /// LDPSW — load pair, sign-extend 32→64.
+    Ldpsw { rt: u8, rt2: u8, rn: u8, imm: i64, mode: PairMode },
+    /// SIMD load/store pair (S=4B / D=8B / Q=16B): `log2_width` 2..=4.
+    LdpSimd { vt: u8, vt2: u8, rn: u8, imm: i64, mode: PairMode, log2_width: u8 },
+    StpSimd { vt: u8, vt2: u8, rn: u8, imm: i64, mode: PairMode, log2_width: u8 },
+    /// Load/store 9-bit-addressing forms: LDUR/STUR, pre/post-index,
+    /// LDTR/STTR. `size_log2` 0..=3; post/pre write back base+imm9.
+    LdSt9 { rt: u8, rn: u8, imm9: i64, size_log2: u8, load: bool, mode: LsMode },
+    /// Signed 9-bit forms: LDRSB/LDRSH/LDRSW. `dest64` selects the
+    /// 64-bit-destination variant (opc 10) vs 32-bit (opc 11).
+    Ldrs9 { rt: u8, rn: u8, imm9: i64, size_log2: u8, mode: LsMode, dest64: bool },
+    /// Load/store register offset: LDR/STR/STRB/LDRB/… [Rn, Rm{, extend {#s}}].
+    LdStRegOff {
+        rt: u8,
+        rn: u8,
+        rm: u8,
+        option: ExtOp,
+        scaled: bool,
+        size_log2: u8,
+        load: bool,
+        /// Signed-load variants (LDRSB/LDRSH/LDRSW) in this group.
+        sign_ext: bool,
+        dest64: bool,
+    },
+    /// SIMD single register, 9-bit addressing (LDUR/STUR/post/pre B/H/Q).
+    LdStSimd9 { vt: u8, rn: u8, imm9: i64, width_log2: u8, load: bool, mode: LsMode },
+    /// SIMD single register, unsigned offset (B/H/S/D/Q); Q = width_log2 4.
+    LdStSimdU { vt: u8, rn: u8, imm12: u32, width_log2: u8, load: bool },
+    /// RETAA / RETAB (auth-return; QARMA-model auth is a no-op strip).
+    RetA { ab: bool },
+    /// BRAA/BRAB/BLRAA/BLRAB — authenticated branch (register).
+    BrAuth { rn: u8, link: bool, ab: bool },
+    /// BRK #imm — software breakpoint; interpreter stops with Panic.
+    Brk { imm16: u16 },
+    /// DCPS1/2/3 #imm.
+    Dcps { level: u8, imm16: u16 },
+    /// DRPS — debug restore state.
+    Drps,
+    /// Variable-shift register ops: LSLV/LSRV/ASRV/RORV (2-source).
+    ShiftReg { rd: u8, rn: u8, rm: u8, op: ShiftOp, is64: bool },
+    /// Add/sub extended register: ADD Xd, Xn, Wm, UXTW #imm3 …
+    AddSubExt {
+        rd: u8,
+        rn: u8,
+        rm: u8,
+        option: ExtOp,
+        imm3: u8,
+        subtract: bool,
+        setflags: bool,
+        is64: bool,
+    },
     /// MRS Xt, <sysreg> — `sysreg` is the canonical 15-bit encoding.
     Mrs { rt: u8, sysreg: u16 },
     /// MSR <sysreg>, Xt.
@@ -383,6 +434,71 @@ pub enum AtomicOp {
     Swp,
 }
 
+/// Variable-shift op (LSLV/LSRV/ASRV/RORV).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShiftOp {
+    Lsl,
+    Lsr,
+    Asr,
+    Ror,
+}
+
+/// 9-bit-addressing load/store mode (unscaled / post / pre / unprivileged).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LsMode {
+    /// LDUR/STUR (imm9, type 00).
+    Unscaled,
+    /// post-index (imm9, type 01) — writeback base+imm.
+    Post,
+    /// pre-index (imm9, type 11) — writeback, address = base+imm.
+    Pre,
+    /// LDTR/STTR (imm9, type 10) — unprivileged alias of unscaled.
+    Unpriv,
+}
+
+/// Register-offset index extension (bits 15:13).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExtOp {
+    Uxtb,
+    Uxth,
+    Uxtw,
+    Lsl,
+    Sxtb,
+    Sxth,
+    Sxtw,
+    Sxtx,
+}
+
+impl ExtOp {
+    pub fn from_bits(b: u32) -> Option<ExtOp> {
+        Some(match b {
+            0 => ExtOp::Uxtb,
+            1 => ExtOp::Uxth,
+            2 => ExtOp::Uxtw,
+            3 => ExtOp::Lsl,
+            4 => ExtOp::Sxtb,
+            5 => ExtOp::Sxth,
+            6 => ExtOp::Sxtw,
+            7 => ExtOp::Sxtx,
+            _ => return None,
+        })
+    }
+
+    /// Extend `v`'s relevant low half per the option.
+    pub fn apply(self, v: u64) -> u64 {
+        match self {
+            ExtOp::Uxtb => v & 0xFF,
+            ExtOp::Uxth => v & 0xFFFF,
+            ExtOp::Uxtw => v & 0xFFFF_FFFF,
+            ExtOp::Lsl => v,
+            ExtOp::Sxtb => (v & 0xFF) as u8 as i8 as i64 as u64,
+            ExtOp::Sxth => (v & 0xFFFF) as u16 as i16 as i64 as u64,
+            ExtOp::Sxtw => (v & 0xFFFF_FFFF) as u32 as i32 as i64 as u64,
+            ExtOp::Sxtx => v,
+        }
+    }
+}
+
 /// Logical (shifted register) op.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LogicOp {
@@ -544,6 +660,28 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
     if (w & 0xFFFF_FC1F) == 0xD65F_0000 {
         return Some(Insn::Ret { rn: reg(w, 5) });
     }
+    // RETAA/RETAB (exact encodings; capstone-verified 0xD65F0BFF/0xD65F0FFF)
+    if w == 0xD65F_0BFF {
+        return Some(Insn::RetA { ab: false });
+    }
+    if w == 0xD65F_0FFF {
+        return Some(Insn::RetA { ab: true });
+    }
+    // BRAA/BRAB/BLRAA/BLRAB — authenticated branch (register); masks
+    // derived with tools/re/oracle/mask_discover.py over the 0xd6/0xd7
+    // space (capstone ground truth).
+    if (w & 0xFFFF_FC00) == 0xD71F_0800 {
+        return Some(Insn::BrAuth { rn: reg(w, 5), link: false, ab: false });
+    }
+    if (w & 0xFFFF_FC00) == 0xD71F_0C00 {
+        return Some(Insn::BrAuth { rn: reg(w, 5), link: false, ab: true });
+    }
+    if (w & 0xFFFF_FC00) == 0xD73F_0800 {
+        return Some(Insn::BrAuth { rn: reg(w, 5), link: true, ab: false });
+    }
+    if (w & 0xFFFF_FC00) == 0xD73F_0C00 {
+        return Some(Insn::BrAuth { rn: reg(w, 5), link: true, ab: true });
+    }
     if (w & 0xFFFF_FFE0) == 0xD69F_03E0 {
         return Some(Insn::Eret);
     }
@@ -571,6 +709,23 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
     }
     if (w & 0xFFE0_001F) == 0xD440_0000 {
         return Some(Insn::Hlt { imm16: ((w >> 5) & 0xFFFF) as u16 });
+    }
+    // BRK — xnu release kernels carry tens of thousands of these traps.
+    if (w & 0xFFE0_001F) == 0xD420_0000 {
+        return Some(Insn::Brk { imm16: ((w >> 5) & 0xFFFF) as u16 });
+    }
+    // DCPS1/2/3 / DRPS (debug exception classes; masks via mask_discover.py)
+    if (w & 0xFFF0_001F) == 0xD4A0_0001 {
+        return Some(Insn::Dcps { level: 1, imm16: ((w >> 5) & 0xFFFF) as u16 });
+    }
+    if (w & 0xFFF0_001F) == 0xD4A0_0002 {
+        return Some(Insn::Dcps { level: 2, imm16: ((w >> 5) & 0xFFFF) as u16 });
+    }
+    if (w & 0xFFF0_001F) == 0xD4A0_0003 {
+        return Some(Insn::Dcps { level: 3, imm16: ((w >> 5) & 0xFFFF) as u16 });
+    }
+    if w == 0xD6BF_03E0 {
+        return Some(Insn::Drps);
     }
 
     // --- Apple GXF GENTER/GEXIT (Inferno disas_apple_insn:
@@ -666,14 +821,11 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
         });
     }
 
-    // --- ORR shifted register — MOV register alias only (honest subset):
-    //     sf 01 01010 0000 0 Rm 000000 Rn(=31) Rd  ->  MOV Xd, Xn ---
-    if (w >> 24) & 0x1F == 0x0A && (w >> 29) & 0x3 == 0b01 && (w >> 21) & 1 == 0 {
-        if reg(w, 5) == 31 && (w >> 10) & 0x3F == 0 && (w >> 22) & 0x3 == 0 {
-            return Some(Insn::MovReg { rd: reg(w, 0), rn: reg(w, 16) });
-        }
-        return None; // general logical-shifted not in subset
-    }
+    // --- ORR shifted register — MOV register alias is folded into the
+    //     general logical-shifted-register arm near the end of decode()
+    //     (an early return-None here used to swallow EVERY ORR/AND/EOR
+    //     shifted-register form — real-data bug found on iOS 14.3 bytes,
+    //     e.g. `orr w10, w10, w11` = 0x2a0b014a).
 
     // --- Unconditional branch (immediate): bits30:26 == 00101 / 10001 ---
     if (w >> 26) & 0x3F == 0x05 {
@@ -735,9 +887,17 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
         return match (opc, size_log2) {
             (0, _) => Some(Insn::StrImmU { rt, rn, imm12, size_log2 }),
             (1, _) => Some(Insn::LdrImmU { rt, rn, imm12, size_log2 }),
+            (2 | 3, 0..=2) => Some(Insn::Ldrs9 {
+                rt,
+                rn,
+                imm9: (imm12 as i64) << size_log2, // scaled byte offset
+                size_log2,
+                mode: LsMode::Unscaled,
+                dest64: opc == 2,
+            }),
             (2, 3) => Some(Insn::LdrImmU { rt, rn, imm12, size_log2 }), // LDR Xt
             (3, 3) => Some(Insn::LdrImmU { rt, rn, imm12, size_log2 }), // PRFM as LDR
-            _ => None, // LDRSW not in subset
+            _ => None,
         };
     }
 
@@ -758,13 +918,16 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
         };
     }
 
-    // --- LDP/STP: bits29:25 == 10100, opc 01(32)/10(64) ---
-    if (w >> 25) & 0x1F == 0b10100 {
-        let is_pair64 = match (w >> 30) & 0x3 {
-            0b01 => false,
-            0b10 => true,
-            _ => return None, // SIMD pairs not in subset
-        };
+    // --- LDP/STP: group bits[29:25] = 10100 (V=0) / 10110 (V=1);
+    //     L = bit22, mode = bits[24:23] (00=NT, 01=post, 10=offset,
+    //     11=pre). GPR pairs: opc 00=32-bit, 01=LDPSW, 10=64-bit. SIMD
+    //     pairs: opc 00=S(4B), 01=D(8B), 10=Q(16B) — keystone-derived;
+    //     the old check excluded ALL SIMD pairs and mapped LDPSW onto
+    //     the 32-bit form (real-14.3 bugs). ---
+    let pair_group = (w >> 25) & 0x1F;
+    if pair_group == 0b10100 || pair_group == 0b10110 {
+        let v = pair_group == 0b10110;
+        let opc = (w >> 30) & 0x3;
         let load = (w >> 22) & 1 == 1;
         let mode = match (w >> 23) & 0x3 {
             0b00 => PairMode::NonTemporal,
@@ -772,15 +935,163 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
             0b10 => PairMode::Offset,
             _ => PairMode::Pre,
         };
-        let imm7 = sext(((w >> 15) & 0x7F) as i64, 7);
-        let imm = imm7 * if is_pair64 { 8 } else { 4 };
         let rt = reg(w, 0);
         let rn = reg(w, 5);
         let rt2 = reg(w, 10);
-        return Some(if load {
-            Insn::Ldp { rt, rt2, rn, imm, mode, is64: is_pair64 }
-        } else {
-            Insn::Stp { rt, rt2, rn, imm, mode, is64: is_pair64 }
+        let imm7 = sext(((w >> 15) & 0x7F) as i64, 7);
+        if v {
+            // SIMD pair: S(4)/D(8)/Q(16); opc 11 unallocated.
+            let log2_width = match opc {
+                0 => 2,
+                1 => 3,
+                2 => 4,
+                _ => return None,
+            };
+            let imm = imm7 * (1i64 << log2_width);
+            return Some(if load {
+                Insn::LdpSimd { vt: rt, vt2: rt2, rn, imm, mode, log2_width }
+            } else {
+                Insn::StpSimd { vt: rt, vt2: rt2, rn, imm, mode, log2_width }
+            });
+        }
+        return Some(match opc {
+            0 => {
+                let imm = imm7 * 4;
+                if load {
+                    Insn::Ldp { rt, rt2, rn, imm, mode, is64: false }
+                } else {
+                    Insn::Stp { rt, rt2, rn, imm, mode, is64: false }
+                }
+            }
+            1 if load => Insn::Ldpsw { rt, rt2, rn, imm: imm7 * 4, mode },
+            2 => {
+                let imm = imm7 * 8;
+                if load {
+                    Insn::Ldp { rt, rt2, rn, imm, mode, is64: true }
+                } else {
+                    Insn::Stp { rt, rt2, rn, imm, mode, is64: true }
+                }
+            }
+            _ => return None, // opc 01 store = unallocated
+        });
+    }
+
+    // --- Load/store 9-bit addressing (GPR, V=0): group 111 0 00 with
+    //     bit21=0. type[11:10]: 00=unscaled, 01=post, 10=unpriv, 11=pre.
+    //     opc[23:22]: 00=STR, 01=LDR, 10/11=signed (LDRSB/LDRSH/LDRSW;
+    //     opc 11 = 32-bit destination). ---
+    if (w >> 24) & 0x3F == 0x38 && (w >> 21) & 1 == 0 {
+        let size_log2 = ((w >> 30) & 0x3) as u8;
+        let opc = (w >> 22) & 0x3;
+        let mode = match (w >> 10) & 0x3 {
+            0 => LsMode::Unscaled,
+            1 => LsMode::Post,
+            2 => LsMode::Unpriv,
+            _ => LsMode::Pre,
+        };
+        let rt = reg(w, 0);
+        let rn = reg(w, 5);
+        let imm9 = sext(((w >> 12) & 0x1FF) as i64, 9);
+        return match (opc, size_log2) {
+            (0, _) => Some(Insn::LdSt9 { rt, rn, imm9, size_log2, load: false, mode }),
+            (1, _) => Some(Insn::LdSt9 { rt, rn, imm9, size_log2, load: true, mode }),
+            (2 | 3, 0..=2) => Some(Insn::Ldrs9 {
+                rt,
+                rn,
+                imm9,
+                size_log2,
+                mode,
+                dest64: opc == 2,
+            }),
+            _ => None, // opc 10/11 with size 11 unallocated
+        };
+    }
+
+    // --- Load/store register offset (GPR, V=0): group 111 0 00 with
+    //     bit21=1, type[11:10]=10, option[15:13], S[12]. ---
+    if (w >> 24) & 0x3F == 0x38 && (w >> 21) & 1 == 1 && (w >> 10) & 0x3 == 0b10 {
+        let size_log2 = ((w >> 30) & 0x3) as u8;
+        let opc = (w >> 22) & 0x3;
+        let option = ExtOp::from_bits((w >> 13) & 0x7)?;
+        let scaled = (w >> 12) & 1 == 1;
+        let rt = reg(w, 0);
+        let rn = reg(w, 5);
+        let rm = reg(w, 16);
+        return match (opc, size_log2) {
+            (0, _) => Some(Insn::LdStRegOff {
+                rt,
+                rn,
+                rm,
+                option,
+                scaled,
+                size_log2,
+                load: false,
+                sign_ext: false,
+                dest64: false,
+            }),
+            (1, _) => Some(Insn::LdStRegOff {
+                rt,
+                rn,
+                rm,
+                option,
+                scaled,
+                size_log2,
+                load: true,
+                sign_ext: false,
+                dest64: false,
+            }),
+            (2 | 3, 0..=2) => Some(Insn::LdStRegOff {
+                rt,
+                rn,
+                rm,
+                option,
+                scaled,
+                size_log2,
+                load: true,
+                sign_ext: true,
+                dest64: opc == 2,
+            }),
+            _ => None,
+        };
+    }
+
+    // --- SIMD single register, 9-bit addressing (V=1): group 111 1 00.
+    //     load = opc[0]; width: opc[1] && size==0 → Q(16B), else 1<<size
+    //     (keystone/capstone-verified table: stur b0 0x3c0023e0,
+    //     ldur q0 0x3cdf83e0, stur h0 0x7c8013e0, stur d0 0xfc8803e0). ---
+    if (w >> 24) & 0x3F == 0x3C && (w >> 21) & 1 == 0 {
+        let size_log2 = ((w >> 30) & 0x3) as u8;
+        let opc = (w >> 22) & 0x3;
+        let width_log2 = if opc & 0b10 != 0 && size_log2 == 0 { 4 } else { size_log2 };
+        let mode = match (w >> 10) & 0x3 {
+            0 => LsMode::Unscaled,
+            1 => LsMode::Post,
+            2 => LsMode::Unpriv,
+            _ => LsMode::Pre,
+        };
+        return Some(Insn::LdStSimd9 {
+            vt: reg(w, 0),
+            rn: reg(w, 5),
+            imm9: sext(((w >> 12) & 0x1FF) as i64, 9),
+            width_log2,
+            load: opc & 1 == 1,
+            mode,
+        });
+    }
+
+    // --- SIMD single register, unsigned offset (V=1): group 111 1 01.
+    //     Same width rule as the 9-bit group (str q0 = 0x3d80c3e0,
+    //     ldr q0 = 0x3dc143e0, str s0 = 0xbd000be0, str d0 = 0xfd0007e0). ---
+    if (w >> 24) & 0x3F == 0x3D {
+        let size_log2 = ((w >> 30) & 0x3) as u8;
+        let opc = (w >> 22) & 0x3;
+        let width_log2 = if opc & 0b10 != 0 && size_log2 == 0 { 4 } else { size_log2 };
+        return Some(Insn::LdStSimdU {
+            vt: reg(w, 0),
+            rn: reg(w, 5),
+            imm12: (w >> 10) & 0xFFF,
+            width_log2,
+            load: opc & 1 == 1,
         });
     }
 
@@ -907,6 +1218,10 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
             (0x0DC, 0) => Some(Insn::Sqrdmlah { rd, rn, rm, is64, subtract: false }),
             (0x0DD, 0) => Some(Insn::Sqrdmlah { rd, rn, rm, is64, subtract: true }),
             (0x0D6, 0x0C) => Some(Insn::Pacga { rd, rn, rm }),
+            (0x0D6, 0x08) => Some(Insn::ShiftReg { rd, rn, rm, op: ShiftOp::Lsl, is64 }),
+            (0x0D6, 0x09) => Some(Insn::ShiftReg { rd, rn, rm, op: ShiftOp::Lsr, is64 }),
+            (0x0D6, 0x0A) => Some(Insn::ShiftReg { rd, rn, rm, op: ShiftOp::Asr, is64 }),
+            (0x0D6, 0x0B) => Some(Insn::ShiftReg { rd, rn, rm, op: ShiftOp::Ror, is64 }),
             _ => None,
         };
         if insn.is_some() {
@@ -971,6 +1286,22 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
         };
     }
 
+    // --- Add/sub extended register: sf op S 01011 0 1 Rm option imm3 Rn Rd
+    //     (add x1, x9, w8, uxtw = 0x8b284121; keystone-verified). ---
+    if (w >> 24) & 0x1F == 0x0B && (w >> 21) & 1 == 1 && (w >> 23) & 1 == 0 {
+        let option = ExtOp::from_bits((w >> 13) & 0x7)?;
+        return Some(Insn::AddSubExt {
+            rd: reg(w, 0),
+            rn: reg(w, 5),
+            rm: reg(w, 16),
+            option,
+            imm3: ((w >> 10) & 0x7) as u8,
+            subtract: (w >> 30) & 1 == 1,
+            setflags: (w >> 29) & 1 == 1,
+            is64: w >> 31 == 1,
+        });
+    }
+
     // --- Logical shifted register: sf 01 01010 shift N Rm imm6 Rn Rd ---
     // (N = bit21 = BIC/ORN/EON invert flag; the add/sub-shifted group is
     // 01011 at bits 28:24, disjoint from this 01010 group.)
@@ -988,6 +1319,10 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
         let rm = reg(w, 16);
         let imm6 = (w >> 10) & 0x3F;
         let is64 = w >> 31 == 1;
+        // MOV (register) alias: ORR Xd, XZR, Xm with no shift/invert.
+        if op10 == 0b01 && !invert && reg(w, 5) == 31 && imm6 == 0 {
+            return Some(Insn::MovReg { rd, rn: rm });
+        }
         let (setflags, op) = match op10 {
             0b00 => (false, LogicOp::And),  // AND / BIC
             0b01 => (false, LogicOp::Orr),  // ORR / ORN
@@ -1637,6 +1972,221 @@ mod tests {
         assert_eq!(decode(0, 0xD5033F9F), Some(Insn::Dsb));
         // mrs x0, SCTLR_EL1 (enc 0xC080): D5300000 | 0xC080<<5
         assert_eq!(decode(0, 0xD5300000 | (0x4080u32 << 5)), Some(Insn::Mrs { rt: 0, sysreg: 0x4080 }));
+    }
+
+
+    // ---- iOS 14.3 real-data gap goldens (keystone/capstone-derived) ----
+
+    #[test]
+    fn gap_pac_branch_family() {
+        assert_eq!(decode(0, 0xD65F0BFF), Some(Insn::RetA { ab: false }));
+        assert_eq!(decode(0, 0xD65F0FFF), Some(Insn::RetA { ab: true }));
+        // blraa x8, x9 (real 14.3 text): target Xn=x8 (bits9:5), modifier x9
+        assert_eq!(
+            decode(0, 0xD73F0909),
+            Some(Insn::BrAuth { rn: 8, link: true, ab: false })
+        );
+        assert_eq!(
+            decode(0, 0xD71F0800),
+            Some(Insn::BrAuth { rn: 0, link: false, ab: false })
+        );
+        assert_eq!(
+            decode(0, 0xD71F0C01),
+            Some(Insn::BrAuth { rn: 0, link: false, ab: true })
+        );
+        // plain RET still decodes as RET
+        assert_eq!(decode(0, 0xD65F03C0), Some(Insn::Ret { rn: 30 }));
+    }
+
+    #[test]
+    fn gap_exception_class() {
+        // brk #0xc471 (real 14.3: 0xd4388e20)
+        assert_eq!(decode(0, 0xD4388E20), Some(Insn::Brk { imm16: 0xC471 }));
+        assert_eq!(decode(0, 0xD4200000), Some(Insn::Brk { imm16: 0 }));
+        assert_eq!(decode(0, 0xD4A00001), Some(Insn::Dcps { level: 1, imm16: 0 }));
+        assert_eq!(decode(0, 0xD6BF03E0), Some(Insn::Drps));
+        // hlt still hlt
+        assert_eq!(decode(0, 0xD4400000), Some(Insn::Hlt { imm16: 0 }));
+    }
+
+    #[test]
+    fn gap_pre_post_index_load_store() {
+        // ldur x1, [x22, #-8] (real 14.3: 0xf85f82c1)
+        assert_eq!(
+            decode(0, 0xF85F82C1),
+            Some(Insn::LdSt9 { rt: 1, rn: 22, imm9: -8, size_log2: 3, load: true, mode: LsMode::Unscaled })
+        );
+        // stur w1, [x29, #-0x3c] (real: 0xb81c43a1)
+        assert_eq!(
+            decode(0, 0xB81C43A1),
+            Some(Insn::LdSt9 { rt: 1, rn: 29, imm9: -0x3c, size_log2: 2, load: false, mode: LsMode::Unscaled })
+        );
+        // ldrb w11, [x23], #1 (real: 0x384016eb)
+        assert_eq!(
+            decode(0, 0x384016EB),
+            Some(Insn::LdSt9 { rt: 11, rn: 23, imm9: 1, size_log2: 0, load: true, mode: LsMode::Post })
+        );
+        // ldur x1, [x22, #-8]!  pre-index (0xF85F82C1 | type=11)
+        assert_eq!(
+            decode(0, 0xF85F82C1 | 0xC00),
+            Some(Insn::LdSt9 { rt: 1, rn: 22, imm9: -8, size_log2: 3, load: true, mode: LsMode::Pre })
+        );
+        // ldrsw x0, [sp, #8] (keystone 0xb9800be0)
+        assert_eq!(
+            decode(0, 0xB9800BE0),
+            Some(Insn::Ldrs9 { rt: 0, rn: 31, imm9: 8, size_log2: 2, mode: LsMode::Unscaled, dest64: true })
+        );
+    }
+
+    #[test]
+    fn gap_register_offset_load_store() {
+        // strb wzr, [x8, x10] (real: 0x382a691f)
+        assert_eq!(
+            decode(0, 0x382A691F),
+            Some(Insn::LdStRegOff {
+                rt: 31, rn: 8, rm: 10, option: ExtOp::Lsl, scaled: false,
+                size_log2: 0, load: false, sign_ext: false, dest64: false,
+            })
+        );
+        // ldr x0, [x8, x10, lsl #3] (keystone 0xf86a7900)
+        assert_eq!(
+            decode(0, 0xF86A7900),
+            Some(Insn::LdStRegOff {
+                rt: 0, rn: 8, rm: 10, option: ExtOp::Lsl, scaled: true,
+                size_log2: 3, load: true, sign_ext: false, dest64: false,
+            })
+        );
+        // ldrsw x0, [x8, x10, sxtx] (keystone 0xb8aae900)
+        assert_eq!(
+            decode(0, 0xB8AAE900),
+            Some(Insn::LdStRegOff {
+                rt: 0, rn: 8, rm: 10, option: ExtOp::Sxtx, scaled: false,
+                size_log2: 2, load: true, sign_ext: true, dest64: true,
+            })
+        );
+    }
+
+    #[test]
+    fn gap_pairs_gpr_and_simd() {
+        // ldp w9, w8, [x0, #0x18] (real: 0x29432009 — was rejected before)
+        assert_eq!(
+            decode(0, 0x29432009),
+            Some(Insn::Ldp { rt: 9, rt2: 8, rn: 0, imm: 0x18, mode: PairMode::Offset, is64: false })
+        );
+        // stp w0, w21, [x29, #-0x70] (real: 0x293257a0)
+        assert_eq!(
+            decode(0, 0x293257A0),
+            Some(Insn::Stp { rt: 0, rt2: 21, rn: 29, imm: -0x70, mode: PairMode::Offset, is64: false })
+        );
+        // stp q0, q0, [sp, #0x170] (real: 0xad0b83e0)
+        assert_eq!(
+            decode(0, 0xAD0B83E0),
+            Some(Insn::StpSimd { vt: 0, vt2: 0, rn: 31, imm: 0x170, mode: PairMode::Offset, log2_width: 4 })
+        );
+        // ldp q0, q3, [sp], #0x20 (keystone 0xacc10fe0, post)
+        assert_eq!(
+            decode(0, 0xACC10FE0),
+            Some(Insn::LdpSimd { vt: 0, vt2: 3, rn: 31, imm: 0x20, mode: PairMode::Post, log2_width: 4 })
+        );
+        // ldpsw x0, x2, [sp, #8] (keystone 0x69410be0)
+        assert_eq!(
+            decode(0, 0x69410BE0),
+            Some(Insn::Ldpsw { rt: 0, rt2: 2, rn: 31, imm: 8, mode: PairMode::Offset })
+        );
+        // 64-bit pairs still fine (0xa9 = ldp x8, x14, [x10])
+        assert_eq!(
+            decode(0, 0xA9403948),
+            Some(Insn::Ldp { rt: 8, rt2: 14, rn: 10, imm: 0, mode: PairMode::Offset, is64: true })
+        );
+    }
+
+    #[test]
+    fn gap_simd_single_ls() {
+        // stur q0, [sp, #0x80] (real: 0x3c8803e0)
+        assert_eq!(
+            decode(0, 0x3C8803E0),
+            Some(Insn::LdStSimd9 { vt: 0, rn: 31, imm9: 0x80, width_log2: 4, load: false, mode: LsMode::Unscaled })
+        );
+        // str q0, [sp, #0x300] (unsigned, keystone 0x3d80c3e0)
+        assert_eq!(
+            decode(0, 0x3D80C3E0),
+            Some(Insn::LdStSimdU { vt: 0, rn: 31, imm12: 0x30, width_log2: 4, load: false })
+        );
+        // ldr q0, [sp, #0x500] (unsigned, keystone 0x3dc143e0)
+        assert_eq!(
+            decode(0, 0x3DC143E0),
+            Some(Insn::LdStSimdU { vt: 0, rn: 31, imm12: 0x50, width_log2: 4, load: true })
+        );
+        // stur b0 / ldur b0 (keystone)
+        assert_eq!(
+            decode(0, 0x3C0023E0),
+            Some(Insn::LdStSimd9 { vt: 0, rn: 31, imm9: 2, width_log2: 0, load: false, mode: LsMode::Unscaled })
+        );
+        assert_eq!(
+            decode(0, 0x3C4023E0),
+            Some(Insn::LdStSimd9 { vt: 0, rn: 31, imm9: 2, width_log2: 0, load: true, mode: LsMode::Unscaled })
+        );
+        // str d0, [sp, #8] (keystone 0xfd0007e0)
+        assert_eq!(
+            decode(0, 0xFD0007E0),
+            Some(Insn::LdStSimdU { vt: 0, rn: 31, imm12: 1, width_log2: 3, load: false })
+        );
+    }
+
+    #[test]
+    fn gap_add_sub_extended() {
+        // add x1, x9, w8, uxtw (real: 0x8b284121)
+        assert_eq!(
+            decode(0, 0x8B284121),
+            Some(Insn::AddSubExt {
+                rd: 1, rn: 9, rm: 8, option: ExtOp::Uxtw, imm3: 0,
+                subtract: false, setflags: false, is64: true,
+            })
+        );
+        // adds x1, x9, x8, sxtx #2 (keystone 0xab28e921)
+        assert_eq!(
+            decode(0, 0xAB28E921),
+            Some(Insn::AddSubExt {
+                rd: 1, rn: 9, rm: 8, option: ExtOp::Sxtx, imm3: 2,
+                subtract: false, setflags: true, is64: true,
+            })
+        );
+        // sub w1, w9, w8, uxtb #1 (keystone 0x4b280521; S=0)
+        assert_eq!(
+            decode(0, 0x4B280521),
+            Some(Insn::AddSubExt {
+                rd: 1, rn: 9, rm: 8, option: ExtOp::Uxtb, imm3: 1,
+                subtract: true, setflags: false, is64: false,
+            })
+        );
+    }
+
+    #[test]
+    fn gap_variable_shift_ops() {
+        // lsl w10, w10, w9 (real 14.3: 0x1ac9214a — LSLV, op10b 0x08)
+        match decode(0, 0x1AC9214A) {
+            Some(Insn::ShiftReg { rd, rn, rm, op, is64 }) => {
+                assert_eq!((rd, rn, rm), (10, 10, 9));
+                assert_eq!(op, ShiftOp::Lsl);
+                assert!(!is64);
+            }
+            other => panic!("lslv not decoded: {other:?}"),
+        }
+        assert!(matches!(decode(0, 0x9AC9214A), Some(Insn::ShiftReg { is64: true, .. })));
+    }
+
+    #[test]
+    fn gap_logical_shifted_register_full() {
+        // orr w10, w10, w11 (real 14.3: 0x2a0b014a — used to be None!)
+        match decode(0, 0x2A0B014A) {
+            Some(Insn::LogicReg { rd, rn, rm, op, .. }) => {
+                assert_eq!((rd, rn, rm), (10, 10, 11));
+                assert_eq!(op, LogicOp::Orr);
+            }
+            other => panic!("orr shifted register not decoded: {other:?}"),
+        }
+        // mov x0, x1 still hits the MOV alias
+        assert_eq!(decode(0, 0xAA0103E0), Some(Insn::MovReg { rd: 0, rn: 1 }));
     }
 
     #[test]

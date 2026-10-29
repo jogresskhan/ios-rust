@@ -16,9 +16,9 @@
   },
   "engine_smoke": {
     "status": "PASS",
-    "detail": "boot-full v2: full APFS container build (System/Data/Preboot) \u2192 REAL-KERNEL STAGE (the actual T8030 iOS 13.7 kernelcache from Apple's CDN: 39 MB LZFSE decode, 6/20 T8030 patches applied to real bytes, real ADT drives device attach 59/105 peripherals, and the pure-Rust A13 interpreter executes the kernel's first real function to a clean RET\u2192HLT from __TEXT_EXEC 0xfffffff007bb0000) \u2192 launchd\u2192SpringBoard ladder \u2192 2436x1125 homescreen; PLUS 20 CPU groups with the 189-entry golden table; PLUS real TSS response parse (gs.apple.com capture). Next honest gate: kernel image rebase/fixup load (GOT pointers ship zeroed) to boot past the first indirect call."
+    "detail": "boot-full v2: full APFS container build (System/Data/Preboot) \u2192 REAL-KERNEL STAGE (the actual T8030 iOS 13.7 kernelcache from Apple's CDN: 39 MB LZFSE decode, 6/20 T8030 patches applied to real bytes, real ADT drives device attach 59/105 peripherals, and the pure-Rust A13 interpreter executes the kernel's first real function to a clean RET\u2192HLT from __TEXT_EXEC 0xfffffff007bb0000) \u2192 launchd\u2192SpringBoard ladder \u2192 2436x1125 homescreen; PLUS 20 CPU groups with the 189-entry golden table; PLUS real TSS response parse (gs.apple.com capture). Next honest gate: kernel image rebase/fixup load (GOT pointers ship zeroed) to boot past the first indirect call. RE-toolkit session: measured 90.52%\u219298.59% decode / 90.4%\u219298.6% exec on the real 18C66 kernel text after porting PAC-branches, 9-bit addressing, STP/LDP pairs+SIMD, exception class, register-offset LS, add-sub-extended, LSLV family; 3 decoder bugs fixed (MOV-alias swallow, LDP/STP opc map, SIMD LS width rule)."
   },
-  "overall_pct": 73.6,
+  "overall_pct": 74.0,
   "modules": [
     {
       "name": "qemu-util (libqemuutil port)",
@@ -37,8 +37,9 @@
     },
     {
       "name": "a13-cpu decoder",
-      "pct": 95,
-      "files": 3
+      "pct": 98,
+      "files": 3,
+      "note": "98.59% of real 18C66 __TEXT_EXEC.__text words decode (was 90.52%)"
     },
     {
       "name": "a13-cpu interpreter",
@@ -236,12 +237,13 @@
     },
     {
       "name": "a13-cpu isa/simd/crypto",
-      "pct": 85
+      "pct": 90
     },
     {
       "name": "a13-cpu ISA parity (20 groups, ARMv8.4-A)",
-      "pct": 85,
-      "files": 4
+      "pct": 90,
+      "files": 4,
+      "note": "measured on real iOS 14.3 bytes: 98.59% decode / 98.6% exec (tools/re/coverage-probe)"
     },
     {
       "name": "sandbox (SandBlaster port)",
@@ -356,6 +358,11 @@
     {
       "name": "real-kernel boot stage (boot-full [2.5/4])",
       "pct": 75
+    },
+    {
+      "name": "RE toolkit (tools/re: oracle, mask_discover, coverage-probe, ghidra headless)",
+      "pct": 100,
+      "files": 18
     }
   ],
   "permanent_gaps": [
@@ -381,8 +388,8 @@
     }
   ],
   "tests": {
-    "total": 132,
-    "passing": 132
+    "total": 352,
+    "passing": 352
   },
   "sources": [
     "ChefKiss Inferno @cc4302a (hw/ device models, AGPL-3.0/GPL-2.0)",
@@ -392,5 +399,5 @@
     "restored_external 18A5351d decompilation (RE-FINDINGS.md, checkpoint 0x0104/0x065B/0x067E contract)",
     "ARM DDI 0487 (A64 encodings)"
   ],
-  "tests_passed": 343
+  "tests_passed": 352
 }

@@ -237,6 +237,45 @@ the rebase/chained-fixup image load, then MMU + the ~10% missing ISA
 (led by the PAC-branch family), then the IRQ/peripheral completeness
 (46/105 unmodeled) before a userland attempt is even meaningful.
 
+### Layer 2.11b — the RE toolkit session: 90.5% → 98.6% measured on real 18C66 bytes
+
+The gap-fix loop from `tools/re/README.md` (oracle: capstone 5.0.7 +
+keystone; masks brute-forced by `tools/re/oracle/mask_discover.py`;
+every implementation pinned by keystone/capstone-derived `gap_*`
+golden tests) closed the top real-kernel instruction classes:
+
+| class (real-14.3 word count) | what landed | decode after |
+|---|---|---|
+| PAC-branch family (~212k): `RETAA/RETAB/BRAA/BRAB/BLRAA/BLRAB` | masks 0xD71F0800/0xD71F0C00/0xD73F0800/0xD73F0C00 (capstone-brute-forced); RETAA/RETAB exact encodings; QARMA-model auth = identity strip | 90.5 → ~95 |
+| exception class (~170k): `BRK/DCPS1-3/DRPS` | decoded; exec = clean Panic stop (xnu hits BRK only on panic paths) | |
+| pre/post-index + unscaled GPR load/store (~190k): `LDUR/STUR/… !`, `LDTR/STTR`, signed `LDRSB/SH/SW` | `LdSt9/Ldrs9` with LsMode + writeback semantics | |
+| STP/LDP fixes + SIMD pairs (~40k): 32-bit GPR pairs (opc 00), `LDPSW`, S/D/Q pairs | pair group 10100/10110, mode bits[24:23], L=bit22 (keystone-verified layout) | |
+| register-offset load/store (~20k): `STRB Wt,[Xn,Xm]`, `LDR Xt,[Xn,Xm,LSL #3]`, `LDRSW [Xn,Xm,SXTX]` | `LdStRegOff` with ExtOp extend/scale | |
+| SIMD single LS (~15k): 9-bit + unsigned, B/H/S/D/Q | width rule `load=opc&1`, `16B iff opc[1]&&size==0 else 1<<size` (keystone table) | |
+| add/sub extended register (~10k): `ADD Xd,Xn,Wm,UXTW #i` | `AddSubExt` | |
+| variable shifts (~5k): `LSLV/LSRV/ASRV/RORV` | 2-source opcodes 8–11 | **98.59%** |
+
+**3 real decoder bugs found and fixed** (each masked by synthetic tests,
+exposed by real bytes): (1) the MOV-alias arm swallowed EVERY
+logical-shifted-register form and returned None (`orr w10,w10,w11` was
+undecodable); (2) LDP/STP opc map was shifted — 32-bit pairs (opc 00)
+rejected, `LDPSW` misdecoded as 32-bit pairs, all SIMD pairs (group
+10110) unimplemented; (3) SIMD single-LS width rule wrong (Q forms
+undecodable). Measured on the full 7,966,342-word `__TEXT_EXEC.__text`:
+**decode 90.52% → 98.59%, single-insn exec 90.4% → 98.6%** (probe:
+`tools/re/coverage-probe`). Remaining honest gaps: SIMD three-same
+arithmetic (`0x4e`), SIMD bitwise/shift immediate (`0x6f/0x4f`), scalar
+FP (`0x1e`), ~51k words of literal pools (data, not instructions).
+
+Tooling added (committed for future sessions, all under `tools/re/`):
+`oracle/insn_oracle.py`, `oracle/mask_discover.py`, `coverage-probe/`
+(sweep + exec probe + histogram + word dbg), plus the campaign's
+ios-re-toolkit scripts (Ghidra headless + ExportDecompiled +
+TraceColor, Mach-O triage + ADR string scan, IPSW range extraction,
+HFSX reader, codesign verify) — see `tools/re/README.md` for the full
+playbook. Workspace test count 343 → 352 (all green); ledger headline
+73.6 → **74.0** (81 rows, honest recompute).
+
 ## Layer 2.10 — REAL-ARTIFACT gates ("use the GitHub action to make download cache", Dec 2026)
 
 Real Apple artifacts are now first-class CI fixtures (`.github/workflows/

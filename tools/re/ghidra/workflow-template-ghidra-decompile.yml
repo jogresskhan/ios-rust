@@ -1,0 +1,143 @@
+name: re-restore-ramdisk
+
+# Ghidra-headless RE pipeline (dispatch-only).
+# WHY: the restore engine (`restored`) dies with initial_engine_failure_no_return
+# before the host can start the restore — understanding its initial handshake
+# from the binary is the fastest route past the reboot loop. This job:
+#   1. pulls the restore ramdisk (038-44135-124.dmg im4p) from the official IPSW,
+#   2. mounts it and harvests the restore-stack userland binaries (restored, ASR,
+#      LaunchDaemons plists),
+#   3. runs Ghidra headless to export decompiled C for every function,
+#   4. uploads binaries + decompilation as the `re-restored-decomp` artifact.
+# The TraceColor Ghidra script generalizes the AlephSecurity ColorAddress.java
+# idea (color executed addresses from QEMU/gdb traces) for later kernel work.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: re-restore-ramdisk-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  IPSW14: https://updates.cdn-apple.com/2020SummerSeed/fullrestores/001-35886/5FE9BE2E-17F8-41C8-96BB-B76E2B225888/iPhone11,8,iPhone12,1_14.0_18A5351d_Restore.ipsw
+  RAMDISK_MEMBER: 038-44135-124.dmg
+
+jobs:
+  decompile:
+    name: Extract restore userland + Ghidra decompile (mac)
+    runs-on: macos-26
+    timeout-minutes: 120
+    steps:
+      - name: Checkout toolkit
+        uses: actions/checkout@v7
+
+      - name: Java 21 (Ghidra requirement)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install tools (ipsw CLI, pyimg4)
+        run: |
+          brew install ipsw
+          python3 -m pip install -q --break-system-packages pyimg4 pyliblzfse pyasn1 pyasn1-modules 2>/dev/null \
+            || python3 -m pip install -q --user pyimg4 pyliblzfse pyasn1 pyasn1-modules
+          ipsw version
+
+      - name: Download IPSW, pull the restore-ramdisk member
+        run: |
+          set -euo pipefail
+          curl -sL "$IPSW14" -o "$RUNNER_TEMP/ipsw.zip"
+          python3 - "$RUNNER_TEMP/ipsw.zip" "$RAMDISK_MEMBER" "$RUNNER_TEMP/ramdisk.im4p" <<'PY'
+          import sys, zipfile
+          zpath, member, out = sys.argv[1], sys.argv[2], sys.argv[3]
+          z = zipfile.ZipFile(zpath)
+          names = [n for n in z.namelist() if n.endswith(member)]
+          assert names, f"member {member} not in IPSW"
+          with z.open(names[0]) as s, open(out, "wb") as d:
+              while True:
+                  b = s.read(1 << 24)
+                  if not b:
+                      break
+                  d.write(b)
+          print("pulled", names[0], "->", out)
+          PY
+
+      - name: im4p payload -> mountable HFS image
+        run: |
+          set -euo pipefail
+          python3 -m pyimg4 im4p extract -i "$RUNNER_TEMP/ramdisk.im4p" -o "$RUNNER_TEMP/rd.hfs.dmg" 2>&1 | sed 's/^/[pyimg4] /' || true
+          MAGIC=$(dd if="$RUNNER_TEMP/rd.hfs.dmg" bs=4 count=1 2>/dev/null | xxd -p)
+          echo "payload magic: $MAGIC (koly = UDIF, ready)"
+          if [ ! -s "$RUNNER_TEMP/rd.hfs.dmg" ] || [ "$MAGIC" != "6b6f6c79" ]; then
+            echo "[fallback] pyimg4 payload not a UDIF — trying ipsw CLI extraction"
+            ipsw img4 extract "$RUNNER_TEMP/ramdisk.im4p" --output "$RUNNER_TEMP/rd2.dmg" || true
+            if [ -s "$RUNNER_TEMP/rd2.dmg" ]; then
+              MAGIC2=$(dd if="$RUNNER_TEMP/rd2.dmg" bs=4 count=1 2>/dev/null | xxd -p)
+              echo "ipsw payload magic: $MAGIC2"
+              [ "$MAGIC2" = "6b6f6c79" ] && cp "$RUNNER_TEMP/rd2.dmg" "$RUNNER_TEMP/rd.hfs.dmg"
+            fi
+          fi
+          MAGIC=$(dd if="$RUNNER_TEMP/rd.hfs.dmg" bs=4 count=1 2>/dev/null | xxd -p)
+          [ "$MAGIC" = "6b6f6c79" ] || { echo "FATAL: no mountable UDIF produced"; exit 1; }
+
+      - name: Mount ramdisk, harvest restore-stack userland
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/rdmnt" re-restore
+          hdiutil attach "$RUNNER_TEMP/rd.hfs.dmg" -readonly -mountpoint "$RUNNER_TEMP/rdmnt" -nobrowse
+          RD="$RUNNER_TEMP/rdmnt"
+          echo "--- restore-relevant binaries ---"
+          find "$RD" \( -name "restored*" -o -name "ASR*" -o -name "asr" \
+             -o -name "mobilestorage*" -o -name "fprusertool*" \) -type f 2>/dev/null | tee re-restore/found.txt
+          while IFS= read -r B; do
+            cp "$B" "re-restore/$(basename "$B")" 2>/dev/null || true
+          done < re-restore/found.txt
+          file re-restore/* | sed 's/^/[bin] /'
+          echo "--- restore LaunchDaemons ---"
+          ls "$RD/System/Library/LaunchDaemons" 2>/dev/null | grep -iE "restor|asr|mobile" || true
+          cp "$RD"/System/Library/LaunchDaemons/com.apple.restored* re-restore/ 2>/dev/null || true
+          hdiutil detach "$RD" || true
+          du -sh re-restore
+
+      - name: Ghidra headless — decompile every function
+        run: |
+          set -uo pipefail
+          brew install --cask ghidra || true
+          GHIDRA="$(find /opt/homebrew/Caskroom/ghidra /usr/local/Caskroom/ghidra -name analyzeHeadless 2>/dev/null | head -1 || true)"
+          if [ -z "$GHIDRA" ]; then
+            echo "[fallback] cask missing — downloading Ghidra release"
+            URL=$(curl -s https://api.github.com/repos/NationalSecurityAgency/ghidra/releases/latest | python3 -c "import json,sys; [print(a['browser_download_url']) for a in json.load(sys.stdin)['assets'] if a['name'].endswith('_PUBLIC.zip')]" | head -1)
+            curl -sL "$URL" -o "$RUNNER_TEMP/ghidra.zip"
+            unzip -q "$RUNNER_TEMP/ghidra.zip" -d "$RUNNER_TEMP/gh"
+            GHIDRA=$(find "$RUNNER_TEMP/gh" -name analyzeHeadless | head -1)
+          fi
+          echo "Ghidra at: $GHIDRA"
+          mkdir -p decomp
+          for B in re-restore/restored re-restore/ASR re-restore/asr re-restore/restored_external; do
+            [ -f "$B" ] || continue
+            N=$(basename "$B")
+            echo "=== decompiling $N ==="
+            "$GHIDRA" "$RUNNER_TEMP/ghproj" "proj-$N" -import "$B" -overwrite \
+              -analysisTimeoutPerFile 900 \
+              -scriptPath "$GITHUB_WORKSPACE/tools" \
+              -postScript ExportDecompiled.java "$GITHUB_WORKSPACE/decomp/$N" \
+              > "$RUNNER_TEMP/ghidra-$N.log" 2>&1 || echo "ghidra failed for $N (log kept)"
+            tail -5 "$RUNNER_TEMP/ghidra-$N.log" || true
+          done
+          find decomp -name "*.c" | wc -l | sed 's/^/decompiled functions: /'
+
+      - name: Upload RE evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: re-restored-decomp
+          path: |
+            re-restore/
+            decomp/
+          retention-days: 30
+          if-no-files-found: warn

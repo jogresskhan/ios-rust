@@ -62,9 +62,36 @@ unknown flags are accepted-and-ignored so existing lane scripts keep working).
 | `devicecheck` | **DeviceCheck token internals** (andrd3v/dcdev RE): token buffer layout, ECDH-P256 → HKDF-SHA256 → AES-256-GCM, MESU/humbug endpoints, entitlements fixture | working |
 | `xnu` | **XNU ARM64 ABI KB**: 423 BSD syscalls, 63 Mach traps, errno, `boot_args`, early-boot call order, SVC/VM/port constants (xnu-7195.141.2 + darwin-abi.h) | data-complete |
 | `sandbox` | **SandBlaster port** (cellebrite-labs/sandblaster → Rust): binary sandbox-profile container (legacy 0x8000 + iOS 18 headers), 8-byte operation nodes, graph walk → **SBPL decompiler** | 75 |
-| `a13-cpu` ISA parity | **all 20 `soc_t8030::CPU_INSTRUCTIONS` groups decode+execute in pure Rust** (LSE atomics, RDM, FCMA, JSCVT, FP16, ASIMD RDM, DOTPROD, SHA512, SHA3, SM3/SM4, AES/PMULL, CRC32, PAC, BTI, CSV2/3, AMUv1, MPAM, TLBI RANGE, DGH/DOT, FCADD) — goldens from Capstone/Keystone oracles, per-group retire counters | 85 |
+| `a13-cpu` ISA parity | **all 20 `soc_t8030::CPU_INSTRUCTIONS` groups decode+execute in pure Rust** (LSE atomics, RDM, FCMA, JSCVT, FP16, ASIMD RDM, DOTPROD, SHA512, SHA3, SM3/SM4, AES/PMULL, CRC32, PAC, BTI, CSV2/3, AMUv1, MPAM, TLBI RANGE, DGH/DOT, FCADD) — goldens from Capstone/Keystone oracles, per-group retire counters;
+  **measured 98.59% decode / 98.6% exec on real iOS 14.3 kernel text**
+  (was 90.5% before the tools/re gap-fix sessions) | 90 |
 | `boot-full` | **full-system pipeline**: IPSW → full-root APFS (System/Data/Preboot) → A13 boot ladder → launchd → **SpringBoard** homescreen (2436×1125 BMP) | 80 |
 | `host-linux` | **Linux host integration** (ios-emulator-linux + darwin-vm): capability check (KVM/RAM/APFS/tools), dep manifest, reference QEMU command builder | working |
+
+## Reverse-engineering toolkit (`tools/re/`) — read me if you are an AI
+
+`tools/re/README.md` is the **playbook**: how to pull real Apple fixtures
+(IPSW range requests), how the decode pipeline works, the proven
+gap-fix loop that took the real iOS 14.3 kernel from **90.5% → 98.6%**
+decode/exec coverage on the a13-cpu, and the Ghidra headless recipe.
+Highlights:
+
+* `tools/re/oracle/mask_discover.py` — brute-forces the A64 encoding space
+  through capstone and emits the exact `if (w & MASK) == VALUE` pairs for
+  `crates/a13-cpu/src/decode.rs`. Never hand-split instruction bits.
+* `tools/re/oracle/insn_oracle.py` — keystone-assemble → capstone-decode
+  ground truth; `--fuzz MNEMONIC` enumerates register encodings.
+* `tools/re/coverage-probe/` — standalone honest-coverage probe: decode
+  sweep + single-insn exec probe + unimplemented-class histogram against
+  any real kernelcache (`cargo build --release && ./target/release/
+  ios-rust-coverage-probe fixtures/kernelcache.release.iphone12b`).
+* `tools/re/ghidra/` — bulletproof `analyzeHeadless` wrapper,
+  per-function decompiled-C export, QEMU-trace coloring, and the
+  proven `-processor AARCH64:LE:AppleArmv8k:applearm64k` recipe.
+* `tools/re/macho/`, `tools/re/extraction/`, `tools/re/findings/` —
+  Mach-O triage + ADR string xrefs, keyless IPSW/HFSX extraction, and the
+  written `restored_external` RE evidence (copied from
+  20kiwy/ios-re-toolkit).
 
 ## CPU instruction parity (named, as required)
 

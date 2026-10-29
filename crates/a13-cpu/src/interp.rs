@@ -266,6 +266,56 @@ impl Interpreter {
         }
     }
 
+    /// Vector memory read of `bytes` (1/2/4/8/16) as a little-endian u128.
+    #[inline]
+    fn load_vec(&mut self, addr: u64, bytes: u16) -> u128 {
+        if bytes <= 8 {
+            self.mem.load(addr, bytes as u8) as u128
+        } else {
+            let lo = self.mem.load(addr, 8);
+            let hi = self.mem.load(addr + 8, (bytes - 8) as u8);
+            ((hi as u128) << 64) | lo as u128
+        }
+    }
+
+    /// Vector memory write of the low `bytes` of `val`.
+    #[inline]
+    fn store_vec(&mut self, addr: u64, bytes: u16, val: u128) {
+        if bytes <= 8 {
+            self.mem.store(addr, bytes as u8, val as u64);
+        } else {
+            self.mem.store(addr, 8, val as u64);
+            self.mem.store(addr + 8, (bytes - 8) as u8, (val >> 64) as u64);
+        }
+    }
+
+    /// Low `bytes` of Vt (partial-register SIMD loads/stores leave the
+    /// remaining bits of Vt untouched, per the architecture).
+    #[inline]
+    fn read_vec_low(&self, vt: u8, bytes: u16) -> u128 {
+        if bytes >= 16 {
+            self.v.v[vt as usize]
+        } else {
+            self.v.v[vt as usize] & ((1u128 << (8 * bytes as u32)) - 1)
+        }
+    }
+
+    #[inline]
+    fn write_vec_low(&mut self, vt: u8, bytes: u16, val: u128) {
+        if bytes >= 16 {
+            self.v.v[vt as usize] = val;
+        } else {
+            let keep = !((1u128 << (8 * bytes as u32)) - 1);
+            self.v.v[vt as usize] = (self.v.v[vt as usize] & keep) | val;
+        }
+    }
+
+    /// Sign-extend a 32-bit loaded value to 64 bits.
+    #[inline]
+    fn sext32(v: u64) -> u64 {
+        (v as u32 as i32) as i64 as u64
+    }
+
     fn cond(&self, c: Cond) -> bool {
         let (n, z, cc, v) = (
             self.nzcv & N != 0,
@@ -532,6 +582,182 @@ impl Interpreter {
                 if mode == PairMode::Pre || mode == PairMode::Post {
                     self.set_rsp(rn, (base as i64 + imm) as u64);
                 }
+            }
+            Insn::Ldpsw { rt, rt2, rn, imm, mode } => {
+                let base = self.rsp(rn);
+                let addr = match mode {
+                    PairMode::Offset | PairMode::NonTemporal | PairMode::Pre => {
+                        (base as i64 + imm) as u64
+                    }
+                    PairMode::Post => base,
+                };
+                let a = Self::sext32(self.mem.load(addr, 4));
+                let b = Self::sext32(self.mem.load(addr + 4, 4));
+                self.set_r(rt, a);
+                self.set_r(rt2, b);
+                if mode == PairMode::Pre || mode == PairMode::Post {
+                    self.set_rsp(rn, (base as i64 + imm) as u64);
+                }
+            }
+            Insn::LdpSimd { vt, vt2, rn, imm, mode, log2_width } => {
+                let base = self.rsp(rn);
+                let addr = match mode {
+                    PairMode::Offset | PairMode::NonTemporal | PairMode::Pre => {
+                        (base as i64 + imm) as u64
+                    }
+                    PairMode::Post => base,
+                };
+                let sz = 1u16 << log2_width;
+                self.v.v[vt as usize] = self.load_vec(addr, sz);
+                self.v.v[vt2 as usize] = self.load_vec(addr + sz as u64, sz);
+                if mode == PairMode::Pre || mode == PairMode::Post {
+                    self.set_rsp(rn, (base as i64 + imm) as u64);
+                }
+            }
+            Insn::StpSimd { vt, vt2, rn, imm, mode, log2_width } => {
+                let base = self.rsp(rn);
+                let addr = match mode {
+                    PairMode::Offset | PairMode::NonTemporal | PairMode::Pre => {
+                        (base as i64 + imm) as u64
+                    }
+                    PairMode::Post => base,
+                };
+                let sz = 1u16 << log2_width;
+                self.store_vec(addr, sz, self.v.v[vt as usize]);
+                self.store_vec(addr + sz as u64, sz, self.v.v[vt2 as usize]);
+                if mode == PairMode::Pre || mode == PairMode::Post {
+                    self.set_rsp(rn, (base as i64 + imm) as u64);
+                }
+            }
+            Insn::LdSt9 { rt, rn, imm9, size_log2, load, mode } => {
+                let base = self.rsp(rn);
+                let addr = match mode {
+                    LsMode::Unscaled | LsMode::Unpriv | LsMode::Pre => {
+                        (base as i64 + imm9) as u64
+                    }
+                    LsMode::Post => base,
+                };
+                let sz = 1u8 << size_log2;
+                if load {
+                    let v = self.mem.load(addr, sz);
+                    self.set_r(rt, v);
+                } else {
+                    self.mem.store(addr, sz, self.r(rt));
+                }
+                if matches!(mode, LsMode::Pre | LsMode::Post) {
+                    self.set_rsp(rn, (base as i64 + imm9) as u64);
+                }
+            }
+            Insn::Ldrs9 { rt, rn, imm9, size_log2, mode, dest64 } => {
+                let base = self.rsp(rn);
+                let addr = match mode {
+                    LsMode::Unscaled | LsMode::Unpriv | LsMode::Pre => {
+                        (base as i64 + imm9) as u64
+                    }
+                    LsMode::Post => base,
+                };
+                let sz = 1u8 << size_log2;
+                let raw = self.mem.load(addr, sz);
+                let sh = 64 - 8 * sz;
+                let v = ((raw << sh) as i64 >> sh) as u64;
+                self.set_r(rt, if dest64 { v } else { v & 0xFFFF_FFFF });
+                if matches!(mode, LsMode::Pre | LsMode::Post) {
+                    self.set_rsp(rn, (base as i64 + imm9) as u64);
+                }
+            }
+            Insn::LdStRegOff { rt, rn, rm, option, scaled, size_log2, load, sign_ext, dest64 } => {
+                let base = self.rsp(rn);
+                let idx = option.apply(self.r(rm)) << if scaled { size_log2 as u64 } else { 0 };
+                let addr = base.wrapping_add(idx);
+                let sz = 1u8 << size_log2;
+                if load && sign_ext {
+                    let raw = self.mem.load(addr, sz);
+                    let sh = 64 - 8 * sz;
+                    let v = ((raw << sh) as i64 >> sh) as u64;
+                    self.set_r(rt, if dest64 { v } else { v & 0xFFFF_FFFF });
+                } else if load {
+                    let v = self.mem.load(addr, sz);
+                    self.set_r(rt, v);
+                } else {
+                    self.mem.store(addr, sz, self.r(rt));
+                }
+            }
+            Insn::LdStSimd9 { vt, rn, imm9, width_log2, load, mode } => {
+                let base = self.rsp(rn);
+                let addr = match mode {
+                    LsMode::Unscaled | LsMode::Unpriv | LsMode::Pre => {
+                        (base as i64 + imm9) as u64
+                    }
+                    LsMode::Post => base,
+                };
+                let sz = 1u16 << width_log2;
+                if load {
+                    let val = self.load_vec(addr, sz);
+                    self.write_vec_low(vt, sz, val);
+                } else {
+                    let val = self.read_vec_low(vt, sz);
+                    self.store_vec(addr, sz, val);
+                }
+                if matches!(mode, LsMode::Pre | LsMode::Post) {
+                    self.set_rsp(rn, (base as i64 + imm9) as u64);
+                }
+            }
+            Insn::LdStSimdU { vt, rn, imm12, width_log2, load } => {
+                let addr = self.rsp(rn) + ((imm12 as u64) << width_log2);
+                let sz = 1u16 << width_log2;
+                if load {
+                    let val = self.load_vec(addr, sz);
+                    self.write_vec_low(vt, sz, val);
+                } else {
+                    let val = self.read_vec_low(vt, sz);
+                    self.store_vec(addr, sz, val);
+                }
+            }
+            Insn::RetA { .. } => {
+                // QARMA-model auth: our interpreter runs with its own key
+                // schedule, so the authenticated strip is identity here.
+                self.pc = self.r(30);
+                return Ok(());
+            }
+            Insn::BrAuth { rn, link, .. } => {
+                let target = self.r(rn);
+                if link {
+                    self.x[30] = pc + 4;
+                }
+                self.pc = target;
+                return Ok(());
+            }
+            Insn::Brk { .. } | Insn::Dcps { .. } | Insn::Drps => {
+                // Software breakpoint / debug-state exception: the guest
+                // halts here (xnu release kernels hit BRK only on panic
+                // paths, so reaching one is a genuine boot finding).
+                return Err(StopReason::Panic);
+            }
+            Insn::AddSubExt { rd, rn, rm, option, imm3, subtract, setflags, is64 } => {
+                let a = self.rsp(rn);
+                let b = option.apply(self.r(rm)) << imm3 as u64;
+                if setflags {
+                    let r = self.add_with_flags(a, b, true, is64, subtract);
+                    self.set_rsp(rd, r);
+                } else if subtract {
+                    let r = a.wrapping_sub(b);
+                    self.set_rsp(rd, if is64 { r } else { r & 0xFFFF_FFFF });
+                } else {
+                    let r = a.wrapping_add(b);
+                    self.set_rsp(rd, if is64 { r } else { r & 0xFFFF_FFFF });
+                }
+            }
+            Insn::ShiftReg { rd, rn, rm, op, is64 } => {
+                let bits: u64 = if is64 { 64 } else { 32 };
+                let a = self.rsp(rn);
+                let s = self.r(rm) % bits;
+                let r = match op {
+                    ShiftOp::Lsl => a << s,
+                    ShiftOp::Lsr => a >> s,
+                    ShiftOp::Asr => ((a as i64) >> s) as u64,
+                    ShiftOp::Ror => a.rotate_right(s as u32),
+                };
+                self.set_rsp(rd, if is64 { r } else { r & 0xFFFF_FFFF });
             }
             Insn::Mrs { rt, sysreg } => {
                 let v = self.read_sysreg(sysreg);

@@ -1,0 +1,10 @@
+[package]
+name = "ios-rust-coverage-probe"
+version = "0.1.0"
+edition = "2021"
+description = "Standalone honest-coverage probe: decode sweep + single-insn exec probe of the a13-cpu decoder against a real kernelcache"
+
+[dependencies]
+a13-cpu = { path = "../../crates/a13-cpu" }
+kernelcache = { path = "../../crates/kernelcache" }
+vm-core = { path = "../../crates/vm-core" }

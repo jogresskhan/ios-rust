@@ -179,7 +179,7 @@ pub struct BootRealReport {
     pub poison_stores: Vec<(u64, u64, u64)>,
     pub poison_count: u64,
     /// panic() entries: (insn, x0 fmt, x1, x2, x3), first 64 + total count.
-    pub panic_calls: Vec<(u64, u64, u64, u64, u64)>,
+    pub panic_calls: Vec<(u64, u64, u64, u64, u64, u64)>,
     pub panic_call_count: u64,
     /// Post-mortem: bytes at thread_starts PA, bootstrap L2 tables.
     pub mem_probe: Vec<String>,
@@ -202,7 +202,7 @@ fn u64le(buf: &[u8], off: usize) -> Result<u64, String> {
 
 /// Top-level Mach-O scan: segments + entry point (the kernelcache is one
 /// contiguous MH_EXECUTE prelinked image).
-fn parse_kernel(img: &[u8]) -> Result<(u64, u64, Vec<(String, u64, u64)>), String> {
+fn parse_kernel(img: &[u8]) -> Result<(u64, u64, Vec<(String, u64, u64, u64)>), String> {
     let hdr = MachHeader::parse(img)?;
     let mut segs = Vec::new();
     let mut entry = 0u64;
@@ -218,8 +218,9 @@ fn parse_kernel(img: &[u8]) -> Result<(u64, u64, Vec<(String, u64, u64)>), Strin
                     .map(|&c| c as char)
                     .collect();
                 let vmaddr = u64le(img, off + 24)?;
-                let _vmsize = u64le(img, off + 32)?;
-                segs.push((name, vmaddr, cmdsize as u64));
+                let vmsize = u64le(img, off + 32)?;
+                let filesize = u64le(img, off + 48)?;
+                segs.push((name, vmaddr, vmsize, filesize));
             }
             LC_UNIXTHREAD => {
                 if cmdsize >= UNIXTHREAD_PC_OFF + 8 {
@@ -293,6 +294,59 @@ fn patch_boot_cpu_running(dt: &mut [u8]) -> usize {
     n
 }
 
+/// REAL-DATA BUG #25 fix — iBoot-equivalent DeviceTree placeholder
+/// processing. The IPSW blob ships 87 properties whose length word has
+/// bit31 SET (measured: regulatory-model-number, serial-number,
+/// mac-address-*, *-color … — every one an identity/metadata string whose
+/// data is a SysCfg REFERENCE like b"syscfg/SrNm/0x20,zeroes/"). On real
+/// hardware iBoot resolves those from the SysCfg partition before the
+/// kernel ever sees the tree; the raw kernel-side DT walker
+/// (0xfffffff008136fd4) adds the RAW length (bit31 set → 0x80000011) and
+/// its own bounds check panics
+/// "Device tree pointer outside of device tree region" (0x…73adec0 — the
+/// M4 blocker, measured at insn 8,135,397). We have no SysCfg device, so
+/// the honest iBoot-equivalent-without-SysCfg transform: CLEAR the flag
+/// bit on the staged copy — the kernel reads each property's own in-blob
+/// reference bytes (no values invented, the limit is visible in the
+/// banner if the kernel prints them). Structure per crates/adt
+/// (parse_flat): node = {u32 nprops, u32 nchildren}, prop = {name[32],
+/// u32 len, data[len] 4-aligned}, children pre-order. Returns the number
+/// of flags cleared; the walk must consume the blob EXACTLY.
+fn dt_clear_placeholder_flags(dt: &mut [u8]) -> Result<usize, String> {
+    const PLACEHOLDER: u32 = 1 << 31;
+    let mut cleared = 0usize;
+    fn walk(dt: &mut [u8], off: usize, cleared: &mut usize) -> Result<usize, String> {
+        if off + 8 > dt.len() {
+            return Err(format!("ADT node header past end @ {off:#x}"));
+        }
+        let rd = |dt: &[u8], p: usize| -> u32 { u32::from_le_bytes(dt[p..p + 4].try_into().unwrap()) };
+        let nprops = rd(dt, off) as usize;
+        let nchildren = rd(dt, off + 4) as usize;
+        let mut p = off + 8;
+        for _ in 0..nprops {
+            if p + 36 > dt.len() {
+                return Err(format!("ADT prop header past end @ {p:#x}"));
+            }
+            let raw = rd(dt, p + 32);
+            let len = (raw & 0x7FFF_FFFF) as usize;
+            if raw & PLACEHOLDER != 0 {
+                dt[p + 32..p + 36].copy_from_slice(&(len as u32).to_le_bytes());
+                *cleared += 1;
+            }
+            p = (p + 36 + len + 3) & !3;
+        }
+        for _ in 0..nchildren {
+            p = walk(dt, p, cleared)?;
+        }
+        Ok(p)
+    }
+    let end = walk(dt, 0, &mut cleared)?;
+    if end != dt.len() {
+        return Err(format!("ADT walk consumed {end} of {} bytes", dt.len()));
+    }
+    Ok(cleared)
+}
+
 struct BusMem(Bus);
 impl MemAccess for BusMem {
     fn load(&mut self, addr: u64, size: u8) -> u64 {
@@ -356,6 +410,14 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
     println!(
         "[stage] DeviceTree boot-cpu: {waiting_nodes} \"waiting\" nodes, first (cpu0) → \"running\""
     );
+    // REAL-DATA BUG #25 (see dt_clear_placeholder_flags): clear the 87
+    // bit31 placeholder-length flags iBoot would have resolved from SysCfg.
+    let placeholders = dt_clear_placeholder_flags(&mut dt_blob)
+        .map_err(|e| format!("DT placeholder pass: {e}"))?;
+    println!(
+        "[stage] DeviceTree placeholders: {placeholders} bit31 length flags cleared \
+         (iBoot SysCfg pass — values stay the blob's own reference bytes)"
+    );
 
     // ---- 3) machine assembly (iBoot equivalent) ----
     // Staging layout computed from the REAL sizes (BUG #22 — see
@@ -374,9 +436,30 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
     let mut machine = T8030Machine::new(effective_dram_mb());
     let devices_attached = machine.attach_from_adt(&adt);
     let serial = machine.serial.clone();
+    let machine_irq_line = machine.irq_line.clone();
     let mut bus = std::mem::replace(&mut machine.bus, Bus::new());
 
     bus.write_raw(LOAD_PA, &img);
+    // REAL-DATA BUG #26 — iBoot-equivalent BSS zero-fill. The flat
+    // `write_raw` above stages the whole FILE, but segments with
+    // vmsize > filesize (BSS) must be ZERO beyond their file bytes. The
+    // real image's __DATA has a 0x63638-byte BSS tail; our flat write put
+    // the next file bytes there — the embedded IOCatalogue personalities
+    // plist text (b"pple.iokit.IOUSBHostFami...") — so the kernel's DT
+    // cursor global at BSS 0x…9adf638 read plist ASCII as a POINTER and
+    // the IOCatalogue path deref-faulted (far = 0x696d614674736f48,
+    // measured @ insn 8,148,893 — the post-bug-#25 blocker).
+    for (name, vmaddr, vmsize, filesize) in segs.iter() {
+        if vmsize > filesize {
+            let bss_pa = LOAD_PA + (vmaddr + filesize - link_base);
+            let n = (vmsize - filesize) as usize;
+            bus.write_raw(bss_pa, &vec![0u8; n]);
+            println!(
+                "[stage] BSS zero-fill: {name} vm {vmaddr:#x} · {} B beyond file bytes",
+                n
+            );
+        }
+    }
     bus.write_raw(layout.dt_pa, &dt_blob);
     let ba = build_boot_args(
         LINK_BASE,
@@ -395,6 +478,8 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
     // ---- 4) CPU state: the iBoot→xnu handoff ----
     let entry_pa = LOAD_PA + (entry - link_base);
     let mut cpu = Interpreter::new(Box::new(BusMem(bus)));
+    // M4: bind the machine's AIC→CPU shared IRQ line.
+    cpu.irq_line = Some(machine_irq_line);
     cpu.set_reset_vector(entry_pa);
     cpu.x[0] = layout.ba_pa; // boot_args pointer (physical, MMU off)
     cpu.x[30] = PAUSE_PA;
@@ -402,12 +487,27 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
     cpu.trace_enabled = true;
     // M4: give the cpu_data[0] discovery scan the kernel's __DATA window
     // (PA = load PA + segment offset from the link base).
-    if let Some((_, data_va, _)) = segs.iter().find(|(n, _, _)| n == "__DATA") {
+    if let Some((_, data_va, _, _)) = segs.iter().find(|(n, _, _, _)| n == "__DATA") {
         let pa = LOAD_PA + (data_va - link_base);
         cpu.cpu_data_scan = Some((pa, pa + 0x300_000));
     }
     // KVA identity for the discovery seed: VA = PA + virtBase − physBase.
     cpu.kva_base = LINK_BASE - LOAD_PA;
+    // M4-b: PA aliases for VA store-watches — pre-MMU stores use PHYSICAL
+    // addresses, post-MMU the same global is the KVA. Watch both forms.
+    {
+        let pa_aliases: Vec<u64> = cpu
+            .watch_store_vas
+            .iter()
+            .map(|&kva| LOAD_PA + (kva.wrapping_sub(LINK_BASE)))
+            .collect();
+        cpu.watch_store_vas.extend(pa_aliases);
+    }
+    // M4-b guardrail: an exception entry with SP below __TEXT_EXEC means
+    // the exception stack descended into the kernel image (named stop).
+    if let Some((_, text_exec_va, _, _)) = segs.iter().find(|(n, _, _, _)| *n == "__TEXT_EXEC") {
+        cpu.text_floor_kva = Some(*text_exec_va);
+    }
     // M4 debug: capture the kernel's boot-stack-pointer stores (cpu_data
     // init fingerprint) — printed in the report.
     cpu.stack_write_watch = true;
@@ -443,6 +543,7 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
     let stop_pc: Option<u64> = match res.stop {
         StopReason::UnknownInsn { pc, .. } => Some(pc),
         StopReason::TranslationFault { pc, .. } => Some(pc),
+        StopReason::ExceptionRecursion { elr, .. } => Some(elr),
         _ => None,
     };
 
@@ -599,6 +700,11 @@ pub fn print_report(r: &BootRealReport) {
             format!("TranslationFault({kind}, {detail}) va={va:#x} pc={pc:#x}")
         }
         StopReason::Wfi => "Wfi (idle park, no armed timer deadline)".to_string(),
+        StopReason::ExceptionRecursion { detail, elr, far, cycles } => format!(
+            "ExceptionRecursion({detail}) elr={elr:#x} far={far:#x} cycles={cycles} \
+             — guardrail: the guest re-entered the same exception or its \
+             exception stack descended into __TEXT_EXEC"
+        ),
         other => format!("{other:?}"),
     };
     println!();
@@ -686,8 +792,8 @@ pub fn print_report(r: &BootRealReport) {
             r.panic_call_count,
             r.panic_calls.len()
         );
-        for (insn, x0, x1, x2, x3) in r.panic_calls.iter().take(12) {
-            println!("    insn={insn} x0={x0:#x} x1={x1:#x} x2={x2:#x} x3={x3:#x}");
+        for (insn, x0, x1, x2, x3, lr) in r.panic_calls.iter().take(12) {
+            println!("    insn={insn} x0={x0:#x} x1={x1:#x} x2={x2:#x} x3={x3:#x} lr={lr:#x}");
         }
     } else {
         println!("M4-b panic() calls: none");

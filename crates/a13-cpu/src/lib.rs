@@ -77,6 +77,13 @@ pub enum StopReason {
     /// to the guest's VBAR_EL1 (M4 exception delivery) — the run loop must
     /// continue from the new PC.
     ExceptionTaken,
+    /// M4-b guardrail: the guest re-entered the same exception ≥96 times
+    /// (kind/esr/far/elr all identical, no retired insn between) or an
+    /// exception entry caught SP below __TEXT_EXEC — a closed exception
+    /// report loop that would otherwise silently zero the kernel image
+    /// (the measured session-H 24 MB text/data zeroing). NOT a model
+    /// change: the guest really is stuck; the named stop makes it visible.
+    ExceptionRecursion { detail: &'static str, elr: u64, far: u64, cycles: u64 },
 }
 
 #[derive(Clone, Debug)]
@@ -91,7 +98,10 @@ pub struct RunResult {
 
 impl RunResult {
     pub fn stopped_cleanly(&self) -> bool {
-        !matches!(self.stop, StopReason::Panic | StopReason::UnknownInsn { .. })
+        !matches!(
+            self.stop,
+            StopReason::Panic | StopReason::UnknownInsn { .. } | StopReason::ExceptionRecursion { .. }
+        )
     }
 }
 

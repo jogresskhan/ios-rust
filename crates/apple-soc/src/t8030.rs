@@ -7,12 +7,13 @@
 //! at its real MMIO base — the "one IPSW" boot contract. A fallback map
 //! covers headless smoke tests.
 
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use vm_core::{Bus, Device, Ram};
 
 use crate::{
-    aic::Aic,
+    aic::{Aic, AicTimebase},
     aes::AesEngine,
     ans2_nvme::Ans2Nvme,
     aop::Aop,
@@ -59,20 +60,23 @@ pub fn effective_dram_mb() -> u64 {
         .unwrap_or(DEFAULT_DRAM_MB)
 }
 
-/// Headless test map. Bases are the well-known T8030/D79AP values;
+/// Headless test map — REAL n104ap (18C66) bases from the ADT census
+/// (tools/re/notes/m5-adt-census.md; the old values were pre-census guesses,
+/// several wrong: wdt/ans/sart/pmgr/gpio were D79AP-era or invented).
 /// `attach_from_adt` overrides at runtime with the IPSW's real map.
 pub const FALLBACK_MAP: &[(&str, u64, u64)] = &[
-    // (name, base, size) — from xnu T8030 D79AP devicetree (ADT wins at runtime)
+    // (name, base, size) — measured on DeviceTree.n104ap (iOS 14.2)
     ("aic", 0x23B100000, 0x8000),
+    ("aic-timebase", 0x23B108000, 0x1000),
     ("uart0", 0x235200000, 0x4000),
-    ("wdt", 0x235290000, 0x4000),
-    ("dart-ans", 0x233228000, 0x8000),
-    ("ans2-nvme", 0x27BCC4000, 0x10000),
-    ("adp-v4", 0x228200000, 0x8000),
-    ("mipi-dsi", 0x228430000, 0x4000),
-    ("sart", 0x23321C000, 0x4000),
-    ("pmgr", 0x23B070000, 0x8000),
-    ("gpio", 0x23D100000, 0x4000),
+    ("wdt", 0x23D2B0000, 0x4000),
+    ("ans2-nvme", 0x277400000, 0xC000),
+    ("adp-v4", 0x230000000, 0x2FC000),
+    ("mipi-dsi", 0x230400000, 0xC0000),
+    ("sart", 0x27AC50000, 0x8000),
+    ("pmgr", 0x23B000000, 0x100000),
+    ("gpio", 0x23C100000, 0x100000),
+    ("smc", 0x23E400000, 0x20000),
 ];
 
 pub struct T8030Machine {
@@ -84,6 +88,8 @@ pub struct T8030Machine {
     pub unimplemented_devices: Vec<(String, u64, u64, Vec<String>)>,
     pub display: AdpV4,
     pub dram_mb: u64,
+    /// M4: the AIC→CPU shared IRQ line (the Interpreter polls this).
+    pub irq_line: Arc<AtomicBool>,
 }
 
 impl T8030Machine {
@@ -110,6 +116,7 @@ impl T8030Machine {
             unimplemented_devices: Vec::new(),
             display,
             dram_mb,
+            irq_line: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -117,7 +124,12 @@ impl T8030Machine {
     pub fn attach_fallback(&mut self) {
         for (name, base, size) in FALLBACK_MAP {
             let dev: Box<dyn Device> = match *name {
-                "aic" => Box::new(Aic::new(640)),
+                "aic" => {
+                    let mut a = Aic::new();
+                    a.set_irq_line(self.irq_line.clone());
+                    Box::new(a)
+                }
+                "aic-timebase" => Box::new(AicTimebase { counter: 0 }),
                 "uart0" => Box::new(S3cUart::new(0, self.serial.clone())),
                 "wdt" => Box::new(AppleWdt::new()),
                 "dart-ans" => Box::new(Dart::new("dart-ans")),
@@ -160,7 +172,12 @@ impl T8030Machine {
             match kind {
                 Some(k) => {
                     let dev: Box<dyn Device> = match k {
-                        "aic" => Box::new(Aic::new(640)),
+                        "aic" => {
+                            let mut a = Aic::new();
+                            a.set_irq_line(self.irq_line.clone());
+                            Box::new(a)
+                        }
+                        "aic-timebase" => Box::new(AicTimebase { counter: 0 }),
                         "s3c-uart" => Box::new(S3cUart::new(0, self.serial.clone())),
                         "apple-wdt" => Box::new(AppleWdt::new()),
                         "dart" => Box::new(Dart::new("dart-adp")),
@@ -273,7 +290,12 @@ fn classify(compat_first: &str, compat_all: &[String], node_name: &str) -> Optio
     let hay = format!("{}|{}|{}", compat_first, compat_all.join(","), node_name);
     let h = hay.to_lowercase();
     let m = |p: &str| h.contains(p);
-    if m("aic") {
+    // the aic-timebase node shares the aic compatible — split on its
+    // device_type="timer" name FIRST (sub-agent census: it was being
+    // misclassified as a second AIC).
+    if node_name.contains("timebase") || (m("aic") && m("timer")) {
+        Some("aic-timebase")
+    } else if m("aic") {
         Some("aic")
     } else if m("uart") || m("s3c") {
         Some("s3c-uart")
@@ -358,7 +380,7 @@ mod tests {
         assert_eq!(n, 1);
         // real base from the tree
         assert_eq!(
-            m.devices_attached.iter().find(|(nm, _, _)| *nm == "aic").unwrap().1,
+            m.devices_attached.iter().find(|(nm, _, _)| *nm == "apple-aic-v1").unwrap().1,
             0x23B100000
         );
     }
@@ -369,8 +391,8 @@ mod tests {
         let mut aic = adt::AdtNode { name: "aic".into(), ..Default::default() };
         aic.set_prop_string("compatible", "aic,1\0");
         let mut reg = Vec::new();
-        reg.extend_from_slice(&0x23B100000u64.to_be_bytes());
-        reg.extend_from_slice(&0x8000u64.to_be_bytes());
+        reg.extend_from_slice(&0x23B100000u64.to_le_bytes());
+        reg.extend_from_slice(&0x8000u64.to_le_bytes());
         aic.set_prop_bytes("reg", reg);
         armio.children.push(aic);
         root.children.push(armio);

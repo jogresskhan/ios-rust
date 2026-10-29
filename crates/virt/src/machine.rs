@@ -29,13 +29,16 @@ pub struct Machine {
     pub uart_console: devices::uart::ConsoleSink,
 }
 
+/// AIC v1 parity (devices::aic::Aic — measured against AIC.h + the on-device kext).
+pub const AIC_PARITY_PCT: u8 = 72;
+
 /// Symbolic attach points — indexed by name so the ledger can track them.
 pub const ATTACH_ORDER: &[&str] = &["aic", "uart", "wdt", "dart", "ans", "adp", "mipi"];
 
 impl Machine {
     pub fn new(config: MachineConfig) -> Self {
         let bus = Bus::new();
-        let aic = std::sync::Arc::new(std::sync::Mutex::new(Aic::new(640, 1)));
+        let aic = std::sync::Arc::new(std::sync::Mutex::new(Aic::new()));
         let uart_console: devices::uart::ConsoleSink =
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         Self { bus, config, aic, uart_console }
@@ -70,7 +73,7 @@ impl Machine {
     /// Which modeled devices are in (name, parity%) — for the run banner.
     pub fn parity_report(&self) -> Vec<(&'static str, u8)> {
         vec![
-            ("aic-v2", devices::aic::PARITY_PCT),
+            ("aic-v1", AIC_PARITY_PCT),
             ("dart", devices::dart::PARITY_PCT),
             ("adp-v4", devices::disp_pipe::PARITY_PCT),
             ("mipi-dsi", devices::mipi_dsi::PARITY_PCT),

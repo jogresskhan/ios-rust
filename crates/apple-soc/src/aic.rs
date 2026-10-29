@@ -1,185 +1,268 @@
-//! aic — Apple Interrupt Controller (AIC v2) — port of Inferno
-//! `hw/intc/apple_aic.c`. Register map is exact; arbitration modeled for
-//! one visible CPU (the machine runs one guest core in the Rust port).
+//! aic — Apple Interrupt Controller (AIC v1) for the T8030 machine.
+//!
+//! Register map from the REAL kernel's own `pexpert/pexpert/arm/AIC.h`
+//! (xnu-7195.121.3, the exact iOS 14.2-era source), byte-validated against
+//! the on-device AIC kext (`com.apple.driver.AppleInterruptController`,
+//! code at 0x…988e000) and the pexpert mapping path (gPicBase = the ADT
+//! "interrupt-controller"/master reg = 0x23B100000 on n104ap).
+//!
+//! The previous version of this file claimed a "v2" map (WHOAMI 0x2004,
+//! ENABLE 0x4100, SW_SET 0x4D00 …) — REAL-DATA BUG: those offsets were
+//! never validated against the real boot; T8030 ships the classic v1
+//! block below (AIC.h, verified line-by-line).
+//!
+//! IACK protocol: read `Iack` → `(die<<24)|(type<<16)|num` with
+//! auto-ack + auto-mask; 0 = nothing pending. EOI = write the IRQ bit to
+//! `IntMaskClr` (re-unmask). Boot init masks ALL (the driver's first
+//! mask-loop). Timer FIQs bypass AIC entirely (xnu samples CNTV_CTL
+//! ISTATUS directly — sleh_fiq, measured).
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use vm_core::Device;
 
-pub const REG_AIC_REV: u64 = 0x0000;
-pub const REG_AIC_CAP0: u64 = 0x0004;
-pub const REG_AIC_CAP1: u64 = 0x0008;
-pub const REG_AIC_RST: u64 = 0x000C;
-pub const REG_AIC_GLB_CFG: u64 = 0x0010;
-pub const REG_AIC_WHOAMI: u64 = 0x2000;
-pub const REG_AIC_IACK: u64 = 0x2004;
-// BITSET/BITCLR banks for ENABLE/PEND per group of 32 IRQs.
-pub const REG_AIC_INTERRUPT_ENABLE: u64 = 0x4100;
-pub const REG_AIC_INTERRUPT_PEND: u64 = 0x4180;
-pub const REG_AIC_SW_SET: u64 = 0x4D00;
-pub const REG_AIC_SW_CLR: u64 = 0x4D80;
+pub const AIC_SIZE: u64 = 0x8000;
+pub const TIMEBASE_SIZE: u64 = 0x1000;
 
-const MAX_IRQ: usize = 640;
+const N_IRQS: usize = 1024;
+const WORDS: usize = N_IRQS / 64;
+
+/// vec types in the Iack word (AIC.h kAICIackVecType*).
+const VEC_EXT: u64 = 1;
+const VEC_IPI: u64 = 4;
+
+/// AIC parity against the real driver (map + IACK/EOI/IPI/mask live;
+/// outstanding: multi-CPU routing, FIQ steering, timebase alarm semantics).
+pub const AIC_PARITY_PCT: u8 = 72;
 
 pub struct Aic {
-    pub num_irqs: u32,
-    enabled: [u64; MAX_IRQ / 64],
-    pending_hw: [u64; MAX_IRQ / 64],
-    pending_sw: [u64; MAX_IRQ / 64],
+    /// Raw hw pending state (HwIntMon window).
+    hw_pending: [u64; WORDS],
+    /// Masked IRQs (IntMaskSet sets, IntMaskClr clears; boot = all set).
+    masked: [u64; WORDS],
+    /// Software-generated interrupts (SwGen windows + IPI sends).
+    sw_pending: [u64; WORDS],
+    /// Per-IRQ target CPU bitmaps (TgtDst).
+    tgt: Vec<u64>,
+    /// The timebase counter (MainTim; the aic-timebase page mirrors it).
+    timebase: u64,
+    /// Shared IRQ line into the CPU (raised when any unmasked pending).
+    irq_line: Option<Arc<AtomicBool>>,
+    /// Parity counters.
+    pub iack_count: u64,
+    pub eoi_count: u64,
     pub unknown_reads: u64,
     pub unknown_writes: u64,
 }
 
 impl Aic {
-    pub fn new(num_irqs: u32) -> Self {
-        Aic {
-            num_irqs: num_irqs.min(640),
-            enabled: [0; MAX_IRQ / 64],
-            pending_hw: [0; MAX_IRQ / 64],
-            pending_sw: [0; MAX_IRQ / 64],
+    pub fn new() -> Self {
+        Self {
+            hw_pending: [0; WORDS],
+            masked: [!0u64; WORDS], // boot init: all masked
+            sw_pending: [0; WORDS],
+            tgt: vec![0; N_IRQS],
+            timebase: 0,
+            irq_line: None,
+            iack_count: 0,
+            eoi_count: 0,
             unknown_reads: 0,
             unknown_writes: 0,
         }
     }
 
-    /// Device-side IRQ line assertion (QEMU: apple_aic_set_sw / hw irq).
+    /// Bind the shared IRQ line the CPU polls (a13-cpu `irq_line`).
+    pub fn set_irq_line(&mut self, line: Arc<AtomicBool>) {
+        self.irq_line = Some(line);
+        self.rearm();
+    }
+
+    fn rearm(&mut self) {
+        let any = self
+            .hw_pending
+            .iter()
+            .zip(&self.masked)
+            .any(|(&p, &m)| p & !m != 0)
+            || self.sw_pending.iter().any(|&p| p != 0);
+        if let Some(line) = &self.irq_line {
+            line.store(any, Ordering::Relaxed);
+        }
+    }
+
+    /// Device driver interface: level-change an hw IRQ line.
     pub fn set_irq(&mut self, num: u32, level: bool) {
         let (w, b) = ((num / 64) as usize, num % 64);
         if level {
-            self.pending_hw[w] |= 1 << b;
+            self.hw_pending[w] |= 1 << b;
         } else {
-            self.pending_hw[w] &= !(1 << b);
+            self.hw_pending[w] &= !(1 << b);
         }
+        self.rearm();
     }
 
     pub fn any_pending(&self) -> bool {
-        (0..(self.num_irqs / 64) as usize)
-            .any(|w| (self.pending_hw[w] | self.pending_sw[w]) & self.enabled[w] != 0)
+        self.hw_pending
+            .iter()
+            .zip(&self.masked)
+            .any(|(&p, &m)| p & !m != 0)
+            || self.sw_pending.iter().any(|&p| p != 0)
     }
 
-    fn read_bank(&self, base_off: u64, off: u64) -> u64 {
-        let idx = ((off - base_off) / 4) as usize;
-        let w = (idx / 2) as usize;
-        match w {
-            _ if w < MAX_IRQ / 64 => match base_off {
-                REG_AIC_INTERRUPT_ENABLE => self.enabled[w],
-                REG_AIC_INTERRUPT_PEND => self.pending_hw[w] | self.pending_sw[w],
-                REG_AIC_SW_SET => self.pending_sw[w],
-                _ => 0,
-            },
-            _ => 0,
+    /// The IACK word: lowest-numbered unmasked pending IRQ (deterministic —
+    /// single core). Auto-ack + auto-mask per the AIC protocol.
+    fn iack(&mut self) -> u64 {
+        for w in 0..WORDS {
+            let ext = self.hw_pending[w] & !self.masked[w];
+            if ext != 0 {
+                let bit = ext.trailing_zeros();
+                let irq = (w * 64) as u32 + bit;
+                self.hw_pending[w] &= !(1 << bit);
+                self.masked[w] |= 1 << bit;
+                self.iack_count += 1;
+                self.rearm();
+                return (VEC_EXT << 16) | irq as u64;
+            }
         }
+        for w in 0..WORDS {
+            if self.sw_pending[w] != 0 {
+                let bit = self.sw_pending[w].trailing_zeros();
+                let irq = (w * 64) as u32 + bit;
+                self.sw_pending[w] &= !(1 << bit);
+                self.iack_count += 1;
+                self.rearm();
+                return (VEC_IPI << 16) | irq as u64;
+            }
+        }
+        0
     }
 
-    fn write_bank(&mut self, base_off: u64, off: u64, val: u64) {
-        // SET bank = first 0x80 bytes, CLR bank = second 0x80 (real AIC layout)
-        let off = off - base_off; // make region-relative
-        let (set, word_idx) = if off < 0x80 {
-            (true, (off / 4) as usize)
-        } else {
-            (false, ((off - 0x80) / 4) as usize)
-        };
-        let w = word_idx;
-        if w >= MAX_IRQ / 64 {
-            return;
-        }
-        match base_off {
-            REG_AIC_INTERRUPT_ENABLE => {
-                if set {
-                    self.enabled[w] |= val;
-                } else {
-                    self.enabled[w] &= !val;
-                }
-            }
-            REG_AIC_SW_SET => {
-                if set {
-                    self.pending_sw[w] |= val;
-                } else {
-                    self.pending_sw[w] &= !val;
-                }
-            }
-            REG_AIC_SW_CLR => {
-                if set {
-                    self.pending_sw[w] |= val;
-                }
-            }
-            _ => {}
-        }
-    }
+}
 
-    pub fn regs_documented() -> &'static [(&'static str, u64)] {
-        &[
-            ("REV", REG_AIC_REV),
-            ("CAP0", REG_AIC_CAP0),
-            ("CAP1", REG_AIC_CAP1),
-            ("RST", REG_AIC_RST),
-            ("GLB_CFG", REG_AIC_GLB_CFG),
-            ("WHOAMI", REG_AIC_WHOAMI),
-            ("IACK", REG_AIC_IACK),
-            ("ENABLE_SET", REG_AIC_INTERRUPT_ENABLE),
-            ("PEND", REG_AIC_INTERRUPT_PEND),
-            ("SW_SET", REG_AIC_SW_SET),
-            ("SW_CLR", REG_AIC_SW_CLR),
-        ]
+impl Default for Aic {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl Device for Aic {
     fn name(&self) -> &'static str {
-        "aic"
+        "apple-aic-v1"
     }
+
     fn read(&mut self, off: u64, _size: u8) -> u64 {
         match off {
-            REG_AIC_REV => 0x1, // aic,1
-            REG_AIC_CAP0 => self.num_irqs.min(640) as u64,
-            REG_AIC_CAP1 => 0x0,
-            REG_AIC_WHOAMI => 0x0, // CPU0
-            REG_AIC_IACK => {
-                for w in 0..(self.num_irqs / 64) as usize {
-                    let pend = (self.pending_hw[w] | self.pending_sw[w]) & self.enabled[w];
-                    if pend != 0 {
-                        let b = pend.trailing_zeros();
-                        let irq = (w * 64) as u32 + b;
-                        // ack: clear the pending latch; a level device
-                        // re-asserts by calling set_irq again (no live
-                        // line tracking in this census model).
-                        self.pending_sw[w] &= !(1 << b);
-                        self.pending_hw[w] &= !(1 << b);
-                        return irq as u64;
-                    }
-                }
-                0xFFFF_FFFF // spurious
+            0x0000 => 1,                        // AicRev
+            0x0004 => N_IRQS as u64,            // Cap0: IRQ count
+            0x0008 => 0,                        // Cap1
+            0x000C => 0,                        // Rst
+            0x0010 => 0,                        // GlbCfg
+            0x0020 => self.timebase as u32 as u64, // MainTimLo
+            0x0028 => (self.timebase >> 32) & 0xFFFF, // MainTimHi
+            0x2000 | 0x5000 => 0,               // WhoAmI = cpu0
+            0x2004 | 0x5004 => self.iack(),     // Iack (auto-ack+mask)
+            0x2018 | 0x5018 => 0,               // TmrIntStat (FIQ bypasses AIC)
+            o if (0x3000..0x4000).contains(&o) => {
+                let n = ((o - 0x3000) / 4) as usize;
+                self.tgt.get(n).copied().unwrap_or(0)
             }
-            off if (REG_AIC_INTERRUPT_ENABLE..REG_AIC_INTERRUPT_ENABLE + 0x100).contains(&off) => {
-                self.read_bank(REG_AIC_INTERRUPT_ENABLE, off)
+            o if (0x4000..0x4080).contains(&o) => {
+                self.sw_pending.get(((o - 0x4000) / 4) as usize).copied().unwrap_or(0)
             }
-            off if (REG_AIC_INTERRUPT_PEND..REG_AIC_INTERRUPT_PEND + 0x100).contains(&off) => {
-                self.read_bank(REG_AIC_INTERRUPT_PEND, off)
+            o if (0x4100..0x4180).contains(&o) => {
+                self.masked.get(((o - 0x4100) / 4) as usize).copied().unwrap_or(0)
             }
-            off if (REG_AIC_SW_SET..REG_AIC_SW_SET + 0x100).contains(&off) => {
-                self.read_bank(REG_AIC_SW_SET, off)
+            o if (0x4200..0x4280).contains(&o) => {
+                self.hw_pending.get(((o - 0x4200) / 4) as usize).copied().unwrap_or(0)
             }
+            o if (0x5000..0x5080).contains(&o) => match o & 0x7F {
+                0x04 => self.iack(), // per-CPU alias Iack
+                _ => 0,
+            },
             _ => {
                 self.unknown_reads += 1;
                 0
             }
         }
     }
+
     fn write(&mut self, off: u64, _size: u8, val: u64) {
         match off {
-            REG_AIC_RST => {
-                self.enabled = [0; MAX_IRQ / 64];
-                self.pending_hw = [0; MAX_IRQ / 64];
-                self.pending_sw = [0; MAX_IRQ / 64];
+            // IPI send/ack (the fast-IPI sysreg path covers xnu's use; the
+            // MMIO windows map to SW pending bits 576+cpu).
+            0x2008 | 0x5008 => {
+                for cpu in 0..32u64 {
+                    if val & (1 << cpu) != 0 {
+                        let irq = 576 + cpu as u32;
+                        self.sw_pending[(irq / 64) as usize] |= 1 << (irq % 64);
+                    }
+                }
+                self.rearm();
             }
-            off if (REG_AIC_INTERRUPT_ENABLE..REG_AIC_INTERRUPT_ENABLE + 0x100).contains(&off) => {
-                self.write_bank(REG_AIC_INTERRUPT_ENABLE, off, val)
+            0x200C | 0x500C => {
+                for w in 0..WORDS {
+                    self.sw_pending[w] &= !val;
+                }
+                self.rearm();
             }
-            off if (REG_AIC_SW_SET..REG_AIC_SW_SET + 0x100).contains(&off) => {
-                self.write_bank(REG_AIC_SW_SET, off, val)
+            0x2014 | 0x5014 => self.timebase = val, // TmrCnt
+            0x2010 | 0x5010 | 0x2018 | 0x5018 | 0x201C | 0x501C | 0x2020 | 0x5020 => {}
+            o if (0x3000..0x4000).contains(&o) => {
+                let n = ((o - 0x3000) / 4) as usize;
+                if n < N_IRQS {
+                    self.tgt[n] = val & 0xFFFF;
+                }
             }
-            off if (REG_AIC_SW_CLR..REG_AIC_SW_CLR + 0x100).contains(&off) => {
-                self.write_bank(REG_AIC_SW_CLR, off, val)
+            o if (0x4000..0x4080).contains(&o) => {
+                if let Some(slot) = self.sw_pending.get_mut(((o - 0x4000) / 4) as usize) {
+                    *slot |= val;
+                }
+                self.rearm();
+            }
+            o if (0x4080..0x4100).contains(&o) => {
+                if let Some(slot) = self.sw_pending.get_mut(((o - 0x4080) / 4) as usize) {
+                    *slot &= !val;
+                }
+                self.rearm();
+            }
+            o if (0x4100..0x4180).contains(&o) => {
+                if let Some(slot) = self.masked.get_mut(((o - 0x4100) / 4) as usize) {
+                    *slot |= val;
+                }
+                self.rearm();
+            }
+            // IntMaskClr = the EOI path (re-unmask)
+            o if (0x4180..0x4200).contains(&o) => {
+                if let Some(slot) = self.masked.get_mut(((o - 0x4180) / 4) as usize) {
+                    *slot &= !val;
+                }
+                self.eoi_count += val.count_ones() as u64;
+                self.rearm();
             }
             _ => self.unknown_writes += 1,
+        }
+    }
+}
+
+/// The aic-timebase page (AIC+0x1000; the ADT's second reg window,
+/// device_type="timer", mapped by pexpert as gTimerBase). MainTimLo/Hi.
+pub struct AicTimebase {
+    pub counter: u64,
+}
+
+impl Device for AicTimebase {
+    fn name(&self) -> &'static str {
+        "aic-timebase"
+    }
+    fn read(&mut self, off: u64, _size: u8) -> u64 {
+        match off {
+            0x20 => self.counter as u32 as u64,
+            0x28 => (self.counter >> 32) & 0xFFFF,
+            _ => 0,
+        }
+    }
+    fn write(&mut self, off: u64, _size: u8, val: u64) {
+        if off == 0x20 {
+            self.counter = (self.counter & !0xFFFF_FFFF) | (val & 0xFFFF_FFFF);
         }
     }
 }
@@ -187,12 +270,38 @@ impl Device for Aic {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
-    fn enable_iack_order() {
-        let mut a = Aic::new(640);
-        a.set_irq(5, true);
-        a.write(REG_AIC_INTERRUPT_ENABLE, 4, 1 << 5); // enable bit for irq5 (word 0)
-        assert_eq!(a.read(REG_AIC_IACK, 4), 5);
-        assert_eq!(a.read(REG_AIC_IACK, 4), 0xFFFF_FFFF); // acked
+    fn aic_h_v1_map_iack_auto_mask_eoi() {
+        let mut aic = Aic::new();
+        // boot init: everything masked
+        assert_eq!(aic.read(0x4100, 4), !0u64);
+        // device raises IRQ 541 (the max n104ap ADT IRQ) — masked → no IACK
+        aic.set_irq(541, true);
+        assert_eq!(aic.read(0x2004, 4), 0, "masked IRQ must not IACK");
+        // unmask via IntMaskClr
+        aic.write(0x4180 + 8 * 4, 4, 1u64 << (541 % 64));
+        assert_eq!(aic.read(0x2004, 4), (VEC_EXT << 16) | 541);
+        // auto-ack + auto-mask: second IACK reads 0
+        assert_eq!(aic.read(0x2004, 4), 0);
+        // EOI re-unmasks
+        aic.write(0x4180 + 8 * 4, 4, 1u64 << (541 % 64));
+        assert_eq!(aic.eoi_count, 2);
+    }
+
+    #[test]
+    fn aic_ipi_windows_vec_type() {
+        let mut aic = Aic::new();
+        aic.write(0x2008, 4, 1 << 2); // IPI to cpu2 → sw IRQ 578
+        assert_eq!(aic.read(0x2004, 4), (VEC_IPI << 16) | 578);
+    }
+
+    #[test]
+    fn aic_target_and_monitor_windows() {
+        let mut aic = Aic::new();
+        aic.write(0x3000 + 4 * 60, 4, 1); // timer IRQ 60 → cpu0
+        assert_eq!(aic.read(0x3000 + 4 * 60, 4), 1);
+        aic.set_irq(60, true);
+        assert_eq!(aic.read(0x4200, 4) & (1 << 60), 1 << 60);
     }
 }

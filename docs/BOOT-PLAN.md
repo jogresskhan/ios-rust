@@ -274,20 +274,80 @@ xnu builds its own page tables during early boot; the interpreter must walk them
    T0SZ=T1SZ=25, TBI0=1, IPS=40-bit) and now surfaced live in the boot
    report's MMU config line.]**
 
-## M4 — IRQ / AIC / timers  [ ] (session H 2026-10-30: vectoring live, kernel handles its own aborts; gate NOT cleared — see evidence)
+## M4 — IRQ / AIC / timers  [ ] (session I 2026-10-30: text-zeroing root-caused, TPIDR seeded, bugs #25/#26 fixed — gate NOT cleared, honest)
 
-**Session H evidence (2026-10-30, IOS_RUST_DRAM_MB=1024, log /tmp/bf-m4-ccmp.log):**
-boot-first went 8,135,842 → **10,921,780 retired insns** with the DT path
-fully unblocked and **21,270 data-aborts VECTORED to the kernel's own
-handler** (sync-abort → VBAR+0x200 with ESR/FAR/ELR/SPSR synthesis,
-DAIF masking; exc_taken 21270 · FIQ 0 · IRQ 0 · WFI 0). The terminal
-stop is now `UnknownInsn 0x0 @ 0xfffffff00816c458`: the kernel's own
-remap loop eventually fetches zeros — the stop-pc re-walk shows a stale
-TLB entry returning PA 0x80216c458 (the CORRECT text PA) whose bytes are
-zero, i.e. the kernel itself zeroed its text page during the
-abort-driven mapping storm (next block's RE target: which kernel write
-lands on the text PA, and whether a pmap table-page allocation we feed
-is wrong). Four REAL-DATA bugs found+fixed this session:
+**Session I evidence (2026-10-30, IOS_RUST_DRAM_MB=1024, /tmp/bf-bug26.log):**
+boot-first panic-point 8,135,842 → **8,194,993 retired insns** with
+`panic() calls: none`; stop = `ExceptionRecursion(identical-exception-loop)
+elr=0x…816c38c far=0x100 cycles=96` — the kernel's exception-report
+formatter refault loop, now entered WITHOUT a panic via a garbage
+array-base write (`str w19,[x9]` @0x…7b8cd70, x9 = madd(x19,x25,
+[x24+0x14]) = 0xfffe00ee488b0058; first abort insn 8,181,649, esr
+0x96000050 = write + L1 translation fault). Next block RE target: the
+constructor of that array object (x24 provenance).
+
+**Session-H stop ROOT-CAUSED (notes/m4-text-zeroing-re.md):** NOT a remap
+storm, NOT a stale TLB — a recursive exception-report stack overflow:
+DT-pointer panic (see bug #25) → panic_impl percpu deref with TPIDR_EL1=0
+→ unhandled-exception reporter (@0x…81607b8, `bl 0x…816c458`) → formatter
+refault (`ldr x11,[x10,#0x100]` @0x…816c38c) → 21,270 cycles × 0x4F0
+stack descent zeroing ~24 MB of __DATA/__TEXT_EXEC. The "stale TLB /
+remap storm" wording below is retired; the real VBAR_EL1 vector table is
+0xfffffff008160000 (the 0x…8165000 stub is `b .` slots).
+
+**Session I model changes (all measured, 4 new goldens):**
+* **TPIDR_EL1 honest seed** — the kernel's own cpu_data_init stores
+  intstack_top (0x98e4658) at cpu_data[0]+0x4f8 ⇒ base 0x9a4aac8;
+  `discover_cpu_data0` (guest-bytes fingerprint scan) existed but had
+  ZERO call sites (M4-B timeout casualty). Now called lazily at the
+  first `mrs tpidr_el1` while 0; measured live seed
+  tpidr = 0xfffffff009a4aac8. The percpu abort storm is gone.
+* **Undefined-instruction vectoring** — the kernel ships deliberate
+  0xE7FFDEFF markers (ARM GDB trap, 2 file sites in the panic path);
+  real HW raises EC=UNCATEGORIZED (ESR 0x0200_0000 — ISS==0 per the
+  vendored sleh.c:694 assert) and the kernel's handle_uncategorized
+  routes to DebuggerCall. Model: undecodable + live VBAR + budget →
+  VBAR+0x200; pre-VBAR keeps the terminal stop.
+* **Named-stop guardrails** — `ExceptionRecursion` at ≥96 identical
+  (kind,esr,far,elr) re-entries (the storm cycled 21,270 times) or
+  exception entry with SP below the real __TEXT_EXEC base.
+
+**Two REAL-DATA bugs found+fixed this session:**
+
+* **#25 DT placeholder lengths** — the IPSW blob ships 87 properties with
+  bit31 SET in the length word (identity/metadata; data = SysCfg
+  references like b"syscfg/SrNm/0x20,zeroes/"). iBoot resolves them from
+  the SysCfg partition pre-handoff; the raw kernel DT walker
+  (0x…8136fd4) added the RAW length and its own bounds check panicked —
+  THE panic firing at insn 8,135,397 in every recent run. Fix:
+  iBoot-equivalent-without-SysCfg flag-clear pass on the staged copy
+  (walk consumes the blob exactly; 87 cleared). Honest limit: the
+  kernel reads each placeholder's own reference bytes as the value.
+* **#26 __DATA BSS not zero-filled** — the harness flat-wrote the whole
+  kernel file; __DATA's BSS tail (737,280 B) got the NEXT file bytes
+  (the embedded IOCatalogue personalities plist text), so the kernel's
+  cursor at BSS 0x…9adf638 read "HostFami" ASCII as a pointer
+  (far=0x696d614674736f48 @ insn 8,148,893). Fix: iBoot-equivalent
+  per-segment BSS zero-fill after staging.
+
+**Honest limits carried forward:** M4 acceptance NOT met (8.19M < 10M,
+stop is not a WFI park); identity placeholders stay unresolved reference
+strings (no SysCfg device); AIC v1 + timer-FIQ models landed but see 0
+device accesses pre-stop (M5 census); PAR/AT S1E1R + PAR_EL1 still
+absent; permission/AF/XN enforcement still gated. cargo test --workspace:
+**403 passed / 0 failed** (IOS_RUST_DRAM_MB=768 on the 3 GiB host —
+honest workaround, unchanged behavior on 4+ GiB hosts). **S3 snapshot
+NOT taken:** sandbox reset wiped ~/.config/ios-rust/s3.env — vault is
+stale at ≤ 1f9ec59 until credentials are re-posted.
+
+1. Model `apple-aic` v1 (devices crate has a stub): event reg, IPI regs,
+   pending-set/clear, mask; wire to `vm-core::irq::IrqController`.
+2. Generic timer: CNTFRQ/CNTP/CNTV emulation, deadline → IRQ 29 (cntv) — the
+   heartbeat xnu's sched needs.
+3. **Acceptance:** boot-first reaches a WFI-and-resumes loop (stop=WFI no longer
+   terminal; timer IRQ wakes it); ≥ 10M insns retired.
+
+**Session H REAL-DATA bugs (kept for the ledger — #20-#24):**
 
 * **#20 boot_args DeviceTreeP** — the M2-era builder wrote the DT pointer
   at +0x28/+0x30 (inside Boot_Video); the kernel reads deviceTreeP@0x60 /
@@ -333,18 +393,19 @@ tools/re/notes/m4-aic-timer-re.md — capstone, 318 lines):** the timer
 deadline path is **FIQ, not IRQ 29** (sleh_fiq reads CNTV_CTL ISTATUS;
 BOOT-PLAN's "IRQ 29" corrected here); CNTFRQ never read (24 MHz from
 pe_identify_machine defaults, no /cpus timebase prop exists); VBAR_EL1
-early = 0xfffffff008165000; machine_idle @0x81699a0 = the only idle WFI;
+early = 0xfffffff008165000 (session-I correction: that address is the
+BOOT STUB table — `b .` slots; the real vector table the kernel runs is
+0xfffffff008160000); machine_idle @0x81699a0 = the only idle WFI;
 AIC v1 offsets per pexpert AIC.h (kext does the init, not pexpert).
 
-**Honest limits carried forward:** M4 acceptance NOT met (no WFI loop
-yet — the kernel stops in the remap storm at 10.9M); AIC model still the
-stub (AIC.h offsets documented, kext driver RE pending); PAR/AT S1E1R +
-PAR_EL1 still absent (kvtophys sites will need them once the remap storm
-is past); permission/AF/XN enforcement still gated on this vectoring
-(now EXISTS — enforcement can land next). cargo test --workspace:
-**394 passed / 0 failed** (DRAM_MB=768 — the 4 GiB default window cannot
-allocate on the 3 GiB host; the env knob is the honest workaround,
-default behavior unchanged on big hosts).
+**Honest limits carried forward (session H — superseded by session I's
+list above; kept verbatim minus the retired storm wording):** M4
+acceptance NOT met (no WFI loop yet); PAR/AT S1E1R + PAR_EL1 still
+absent (kvtophys sites will need them); permission/AF/XN enforcement
+still gated on vectoring (now EXISTS — enforcement can land next).
+cargo test at session H: **394 passed / 0 failed** (DRAM_MB=768 — the
+4 GiB default window cannot allocate on the 3 GiB host; the env knob is
+the honest workaround, default behavior unchanged on big hosts).
 
 1. Model `apple-aic` v1 (devices crate has a stub): event reg, IPI regs,
    pending-set/clear, mask; wire to `vm-core::irq::IrqController`.

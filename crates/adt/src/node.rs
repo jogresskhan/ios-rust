@@ -212,31 +212,66 @@ impl AdtNode {
         self.prop(name)?.as_u64()
     }
 
-    /// Parse `reg` into (addr, size) pairs. arm-io children on Apple SoCs
-    /// use address-cells=1 size-cells=1 with u64 entries; tolerate u32.
+    /// Parse `reg` into (addr, size) pairs.
+    /// REAL-DATA BUG #20 fix: the REAL n104ap (T8030, 18C66) flat ADT encodes
+    /// every multi-byte value LITTLE-ENDIAN — reg = (u64 LE addr, u64 LE size)
+    /// pairs (measured: #interrupt-cells = 01 00 00 00, phandles cross-resolve,
+    /// 220,204-byte tree consumes exactly; census in
+    /// tools/re/notes/m5-adt-census.md). The old BE-first heuristic decoded
+    /// e.g. AIC as 0x103B/0x1000 instead of 0x23B100000/0x8000 — every
+    /// arm-io runtime base was garbage.
+    /// Strategy: try LE-u64 pairs first; sane addresses on Apple SoCs are
+    /// < 2^40 and sizes < 2^36. If that fails, fall back to LE-u32 pairs
+    /// (address-cells=1 trees), then BE (legacy synthesized trees).
     pub fn reg_entries(&self) -> Vec<(u64, u64)> {
         let Some(data) = self.prop_bytes("reg") else {
             return Vec::new();
         };
-        let mut out = Vec::new();
-        let all_u32 = data.len() % 8 != 0
-            || data
-                .chunks_exact(8)
-                .any(|c| u64::from_be_bytes(c.try_into().unwrap()) > 0x4_0000_0000);
-        if all_u32 {
-            for c in data.chunks_exact(8) {
-                let a = u32::from_be_bytes(c[0..4].try_into().unwrap()) as u64;
-                let s = u32::from_be_bytes(c[4..8].try_into().unwrap()) as u64;
-                out.push((a, s));
+        let sane = |pairs: &[(u64, u64)]| {
+            !pairs.is_empty()
+                && pairs.iter().all(|&(a, s)| a < (1 << 40) && s < (1 << 36))
+        };
+        if data.len() % 16 == 0 {
+            let le64: Vec<(u64, u64)> = data
+                .chunks_exact(16)
+                .map(|c| {
+                    (
+                        u64::from_le_bytes(c[0..8].try_into().unwrap()),
+                        u64::from_le_bytes(c[8..16].try_into().unwrap()),
+                    )
+                })
+                .collect();
+            if sane(&le64) {
+                return le64;
             }
-        } else {
-            for c in data.chunks_exact(16) {
-                let a = u64::from_be_bytes(c[0..8].try_into().unwrap());
-                let s = u64::from_be_bytes(c[8..16].try_into().unwrap());
-                out.push((a, s));
+            let be64: Vec<(u64, u64)> = data
+                .chunks_exact(16)
+                .map(|c| {
+                    (
+                        u64::from_be_bytes(c[0..8].try_into().unwrap()),
+                        u64::from_be_bytes(c[8..16].try_into().unwrap()),
+                    )
+                })
+                .collect();
+            if sane(&be64) {
+                return be64;
             }
         }
-        out
+        if data.len() % 8 == 0 {
+            let le32: Vec<(u64, u64)> = data
+                .chunks_exact(8)
+                .map(|c| {
+                    (
+                        u32::from_le_bytes(c[0..4].try_into().unwrap()) as u64,
+                        u32::from_le_bytes(c[4..8].try_into().unwrap()) as u64,
+                    )
+                })
+                .collect();
+            if sane(&le32) {
+                return le32;
+            }
+        }
+        Vec::new()
     }
 
     /// `compatible` = NUL-terminated string blob (4-byte padded).
@@ -290,9 +325,10 @@ mod tests {
         armio.set_prop_string("compatible", "arm-io,t8030\0arm-io\0");
         let mut aic = AdtNode { name: "aic".into(), ..Default::default() };
         aic.set_prop_string("compatible", "aic,1\0ARM,aic\0");
+        // LE pairs — the real n104ap encoding (REAL-DATA BUG #20)
         let mut reg = Vec::new();
-        reg.extend_from_slice(&0x23B100000u64.to_be_bytes());
-        reg.extend_from_slice(&0x8000u64.to_be_bytes());
+        reg.extend_from_slice(&0x23B100000u64.to_le_bytes());
+        reg.extend_from_slice(&0x8000u64.to_le_bytes());
         aic.set_prop_bytes("reg", reg);
         armio.children.push(aic);
         root.children.push(armio);
@@ -313,5 +349,23 @@ mod tests {
         // re-serialize parses identically
         let root2 = AdtNode::parse(&root.to_bytes()).expect("reparse");
         assert_eq!(root.find("arm-io/aic").unwrap().reg_entries(), root2.find("arm-io/aic").unwrap().reg_entries());
+    }
+
+    /// REAL-DATA BUG #20 golden: the BE heuristic's misdecode, pinned.
+    #[test]
+    fn real_adt_le_reg_pairs() {
+        // The bytes the real n104ap ADT ships for /arm-io/aic:reg
+        let mut reg = Vec::new();
+        reg.extend_from_slice(&0x23B100000u64.to_le_bytes());
+        reg.extend_from_slice(&0x8000u64.to_le_bytes());
+        reg.extend_from_slice(&0x23B108000u64.to_le_bytes());
+        reg.extend_from_slice(&0x1000u64.to_le_bytes());
+        let mut aic = AdtNode { name: "aic".into(), ..Default::default() };
+        aic.set_prop_bytes("reg", reg);
+        assert_eq!(
+            aic.reg_entries(),
+            vec![(0x23B100000, 0x8000), (0x23B108000, 0x1000)],
+            "LE pairs must decode the real fixture values (BE heuristic gave 0x103B-class garbage)"
+        );
     }
 }

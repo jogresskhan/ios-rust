@@ -263,6 +263,10 @@ pub struct Interpreter {
     pub fiq_taken: u64,
     pub irq_taken: u64,
     pub sync_aborts: u64,
+    /// M4-b: undefined-instruction exceptions vectored to the guest
+    /// (ESR EC=UNCATEGORIZED — the kernel's own 0xE7FFDEFF GDB-trap
+    /// markers in the panic path, measured at 2 file sites).
+    pub undefined_taken: u64,
     pub wfi_count: u64,
     pub wfi_wakeups: u64,
     /// M4: synchronous-abort vectoring budget (0 disables vectoring).
@@ -286,6 +290,27 @@ pub struct Interpreter {
     pub stack_writes: std::collections::VecDeque<(u64, u64, u64)>, // (pc, addr, val)
     /// M4: earliest insn index the failed discovery scan may retry at.
     cpu_data_scan_retry_at: u64,
+    /// M4-b (session I): consecutive IDENTICAL exceptions (kind, esr, far,
+    /// elr all equal) — the recursion detector. Real handlers make
+    /// progress; 96 identical re-entries with zero retired insns between
+    /// is a closed report loop (measured: 21,270 cycles of (elr,far)
+    /// constant, 0x4F0 stack descent each — the session-H text zeroing).
+    exc_repeat_key: Option<(&'static str, u64, u64, u64)>,
+    exc_repeat_count: u32,
+    /// M4-b: named-stop latch set by the recursion/stack guardrails —
+    /// (detail, elr, far, cycles). The run loop converts it to
+    /// StopReason::ExceptionRecursion before any further guest insn runs.
+    pub recursion_stop: Option<(&'static str, u64, u64, u64)>,
+    /// M4-b: kernel __TEXT_EXEC base KVA (set by the machine from the real
+    /// segments). An exception taken with SP below this floor means the
+    /// exception stack has descended into text — named stop instead of a
+    /// silent text zeroing.
+    pub text_floor_kva: Option<u64>,
+    /// M4-b diagnostics (env IOS_RUST_WATCH_VA, default empty): log every
+    /// store whose VA matches (pc+value) — RE aid for global corruption,
+    /// first 64 hits per address, zero behavior drift.
+    pub watch_store_vas: Vec<u64>,
+    watch_store_hits: std::collections::HashMap<u64, u32>,
     /// Diagnostic watchpoints (env IOS_RUST_WATCH="0xaddr,…" — default
     /// empty, zero behavior drift): on pc match, log pc/lr/x0..x3 to
     /// stderr. Kernel-RE breakpoint aid, not emulation semantics.
@@ -311,7 +336,7 @@ pub struct Interpreter {
     /// wrapper at 0x…987b99c): captures (insn, x0 fmt, x1, x2, x3) per
     /// call — names the ORIGINAL panic that feeds the exception storm.
     pub panic_watch_pc: Option<u64>,
-    pub panic_calls: std::collections::VecDeque<(u64, u64, u64, u64, u64)>,
+    pub panic_calls: std::collections::VecDeque<(u64, u64, u64, u64, u64, u64)>, // (insn, x0, x1, x2, x3, lr)
     pub panic_call_count: u64,
 }
 
@@ -391,12 +416,23 @@ impl Interpreter {
             vector_budget: 100_000,
             last_exception: None,
             gxf_ctx_seeded: false,
+            undefined_taken: 0,
             cpu_data_scan: None,
             cpu_data0_addr: None,
             kva_base: 0,
             stack_write_watch: false,
             stack_writes: std::collections::VecDeque::new(),
             cpu_data_scan_retry_at: 0,
+            exc_repeat_key: None,
+            exc_repeat_count: 0,
+            recursion_stop: None,
+            text_floor_kva: None,
+            watch_store_vas: std::env::var("IOS_RUST_WATCH_VA")
+                .unwrap_or_default()
+                .split(',')
+                .filter_map(|s| u64::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok())
+                .collect(),
+            watch_store_hits: std::collections::HashMap::new(),
             watch_addrs: std::env::var("IOS_RUST_WATCH")
                 .unwrap_or_default()
                 .split(',')
@@ -587,6 +623,16 @@ impl Interpreter {
     /// Translating store.
     #[inline]
     fn st(&mut self, va: u64, size: u8, val: u64) -> Result<(), StopReason> {
+        if !self.watch_store_vas.is_empty() && self.watch_store_vas.contains(&va) {
+            let c = self.watch_store_hits.entry(va).or_insert(0);
+            if *c < 64 {
+                *c += 1;
+                eprintln!(
+                    "[watch-st] insn={} pc={:#x} va={va:#x} val={val:#x} size={size} sp={:#x}",
+                    self.executed, self.pc, self.sp
+                );
+            }
+        }
         let pa = self.vaddr(va, XlateKind::Store)?;
         if size == 8 {
             // M4-b: cpu_stack_alloc fingerprint — a stack-range kernel VA
@@ -713,6 +759,40 @@ impl Interpreter {
     /// (current-EL SPx: sync 0x200, IRQ 0x280, FIQ 0x300), `esr` = 0 for
     /// IRQ/FIQ, `far` set for synchronous aborts.
     fn take_exception(&mut self, off: u64, esr: u64, far: Option<u64>, kind: &'static str) {
+        // M4-b guardrail 1 — exception recursion: the same (kind, esr, far,
+        // elr) re-entered 96 times with no retired insn between means a
+        // closed report loop (measured session-H storm: 21,270 identical
+        // cycles, each descending the exception stack 0x4F0 bytes until it
+        // zeroed 24 MB of __DATA/__TEXT_EXEC). Named stop beats a silent
+        // text zeroing; the latch is converted by the run loop.
+        let key = (kind, esr, far.unwrap_or(0), self.pc);
+        if self.exc_repeat_key == Some(key) {
+            self.exc_repeat_count += 1;
+        } else {
+            self.exc_repeat_key = Some(key);
+            self.exc_repeat_count = 1;
+        }
+        if self.exc_repeat_count >= 96 && self.recursion_stop.is_none() {
+            self.recursion_stop = Some((
+                "identical-exception-loop",
+                self.sys.elr_el1,
+                far.unwrap_or(0),
+                self.exc_repeat_count as u64,
+            ));
+        }
+        // M4-b guardrail 2 — stack descended into text: an exception entry
+        // with SP below __TEXT_EXEC means the exception stack walked into
+        // the kernel image (the session-H zeroing's terminal state).
+        if let Some(floor) = self.text_floor_kva {
+            if self.sp != 0 && self.sp < floor && self.recursion_stop.is_none() {
+                self.recursion_stop = Some((
+                    "stack-descended-into-text",
+                    self.sys.elr_el1,
+                    self.sp,
+                    self.exc_taken,
+                ));
+            }
+        }
         // SPSR_EL1 = NZCV | DAIF | M[3:0]=EL1h (0b0101)
         self.sys.spsr_el1 = ((self.nzcv as u64) << 28) | self.sys.daif | 0x5;
         self.sys.elr_el1 = self.pc;
@@ -809,6 +889,29 @@ impl Interpreter {
         let word = self.fetch(pc)?;
         self.trace_tick(pc, word);
         let Some(insn) = crate::decode::decode(pc, word) else {
+            // M4-b (session I): an undecodable word is NOT a model stop
+            // once the guest has exception vectoring — real hardware raises
+            // a SYNCHRONOUS UNDEFINED-INSTRUCTION exception (ESR
+            // EC=ESR_EC_UNCATEGORIZED=0, IL=1, ISS=0 — the ISS=0 the real
+            // kernel asserts on, tools/re/refs/xnu/sleh.c:694; delivered
+            // via handle_uncategorized → EXC_BAD_INSTRUCTION). The kernel's
+            // own text contains deliberate markers (0xE7FFDEFF, the ARM
+            // GDB trap, 2 file sites in the panic path — measured) that
+            // MUST vector, not halt. Pre-VBAR boot keeps the terminal
+            // stop (the boot stub region genuinely has no handler).
+            if self.sys.vbar_el1 != 0 && self.vector_budget > 0 {
+                self.vector_budget -= 1;
+                self.undefined_taken += 1;
+                self.abort_log.push_back((self.executed, self.pc, self.pc, 0x0200_0000));
+                if self.abort_log.len() > 512 {
+                    self.abort_log.pop_front();
+                }
+                if self.first_aborts.len() < 8 {
+                    self.first_aborts.push((self.executed, self.pc, self.pc, 0x0200_0000));
+                }
+                self.take_exception(0x200, 0x0200_0000, Some(pc), "undefined");
+                return Err(StopReason::ExceptionTaken);
+            }
             return Err(StopReason::UnknownInsn { pc, insn: word });
         };
         match insn {
@@ -4101,10 +4204,20 @@ impl Interpreter {
                 //    — a poisoned seed is worse than the honest reset state;
                 //  * the kernel's own bootstrap (cpu_bootstrap, stripped in
                 //    the public tree) sets the real value only mid-boot.
-                // Model: TPIDR_EL1 stays at its hardware reset value (0)
-                // until the guest itself writes it; the report surfaces
-                // every percpu-dependent abort so the moment the real
-                // value becomes load-bearing is visible in the trace.
+                // Session I (M4-b RE, tools/re/notes/m4-text-zeroing-re.md):
+                // cpu_data_init STORES intstack_top at cpu_data[0]+0x4f8
+                // (measured 0x98e4658 @0x9a4afc0 ⇒ base 0x9a4aac8). The
+                // honest seed is that guest-written fingerprint:
+                // discover_cpu_data0() only returns a struct whose +0x4f8
+                // the kernel itself filled with a live boot-stack KVA, so
+                // the prologue's [tpidr+0x4f8] check passes on real data.
+                // Discovered lazily at first MRS after cpu_data_init ran;
+                // the scan's 1M-insn retry cooldown covers "not yet written".
+                if self.sys.tpidr_el1 == 0 && self.cpu_data0_addr.is_none() {
+                    if let Some(pa) = self.discover_cpu_data0() {
+                        self.sys.tpidr_el1 = pa.wrapping_add(self.kva_base);
+                    }
+                }
                 self.sys.tpidr_el1
             }
             sysreg::GXF_CTX => self.sys.gxf_ctx,
@@ -4332,12 +4445,22 @@ impl CpuBackend for Interpreter {
                     mmu_live_from: self.mmu_live_from,
                 };
             }
+            // M4-b guardrail: recursion/stack latch → named stop BEFORE any
+            // further guest insn executes (covers both the sync-abort path
+            // and async FIQ/IRQ delivery from the Ok arm below).
+            if let Some((detail, elr, far, cycles)) = self.recursion_stop {
+                return RunResult {
+                    stop: StopReason::ExceptionRecursion { detail, elr, far, cycles },
+                    executed: self.executed,
+                    mmu_live_from: self.mmu_live_from,
+                };
+            }
             // M4-b: xnu panic() entry probe (pc supplied by boot_real).
             if self.panic_watch_pc == Some(self.pc) {
                 self.panic_call_count += 1;
                 if self.panic_calls.len() < 64 {
                     self.panic_calls
-                        .push_back((self.executed, self.x[0], self.x[1], self.x[2], self.x[3]));
+                        .push_back((self.executed, self.x[0], self.x[1], self.x[2], self.x[3], self.x[30]));
                 }
             }
             // Diagnostic watchpoints (env-gated, default off): log the
@@ -4380,7 +4503,9 @@ impl CpuBackend for Interpreter {
                 Err(StopReason::ExceptionTaken) => {
                     // M4: a synchronous abort vectored to the guest — the
                     // faulting insn did NOT retire; execution resumes at the
-                    // vector (pc already updated by take_exception).
+                    // vector (pc already updated by take_exception). The
+                    // M4-b recursion latch (if latched) is checked at the
+                    // top of the loop before the next guest insn.
                 }
                 Err(StopReason::Halted) => {
                     self.executed += 1;
@@ -4849,6 +4974,38 @@ mod gap_mair_tests {
         }
     }
 
+    /// Byte-backed RAM for the M4-b exception/percpu tests.
+    struct FakeRam(Vec<u8>);
+    impl FakeRam {
+        fn new(n: usize) -> Self {
+            FakeRam(vec![0u8; n])
+        }
+        fn load_code(&mut self, base: usize, code: &[u8]) {
+            self.0[base..base + code.len()].copy_from_slice(code);
+        }
+    }
+    impl MemAccess for FakeRam {
+        fn load(&mut self, addr: u64, size: u8) -> u64 {
+            let off = addr as usize;
+            let mut v = 0u64;
+            for i in 0..size as usize {
+                v |= (*self.0.get(off + i).unwrap_or(&0) as u64) << (i * 8);
+            }
+            v
+        }
+        fn store(&mut self, addr: u64, size: u8, val: u64) {
+            let off = addr as usize;
+            for i in 0..size as usize {
+                if off + i < self.0.len() {
+                    self.0[off + i] = ((val >> (i * 8)) & 0xFF) as u8;
+                }
+            }
+        }
+        fn fetch32(&mut self, addr: u64) -> u32 {
+            self.load(addr, 4) as u32
+        }
+    }
+
     fn cpu() -> Interpreter {
         Interpreter::new(Box::new(NullMem))
     }
@@ -4885,5 +5042,95 @@ mod gap_mair_tests {
         assert_eq!(m.attr_byte(1), 0x04);
         assert_eq!(m.attr_byte(3), 0x44);
         assert_eq!(m.attr_byte(7), 0x00);
+    }
+
+    /// M4-b: an undecodable word VECTORS to the guest once VBAR is live —
+    /// real hardware raises EC=UNCATEGORIZED (ESR 0x0200_0000: EC=0, IL=1,
+    /// ISS=0 — the ISS==0 the real kernel asserts, tools/re/refs/xnu/
+    /// sleh.c:694). The kernel's own 0xE7FFDEFF GDB-trap markers (2 file
+    /// sites in the panic path) depend on this. Words: keystone-verified
+    /// (`b .` = 0x14000000).
+    #[test]
+    fn undefined_insn_vectors_with_live_vbar() {
+        let mut ram = FakeRam::new(0x8000);
+        // the marker the real kernel ships in its panic path
+        ram.load_code(0x1000, &0xE7FF_DEFFu32.to_le_bytes());
+        // handler at vbar+0x200: `b .` — spins; budget stop proves the
+        // exception was TAKEN (not a terminal UnknownInsn stop)
+        ram.load_code(0x2200, &0x1400_0000u32.to_le_bytes());
+        let mut cpu = Interpreter::new(Box::new(ram));
+        cpu.set_reset_vector(0x1000);
+        cpu.sys.vbar_el1 = 0x2000;
+        let res = cpu.run(InterpBudget { max_insn: 64, max_ns: u64::MAX });
+        assert!(matches!(res.stop, StopReason::Budget), "stop={res:?}");
+        assert_eq!(cpu.undefined_taken, 1);
+        assert_eq!(cpu.exc_taken, 1);
+        assert_eq!(
+            cpu.sys.esr_el1, 0x0200_0000,
+            "EC=UNCATEGORIZED(0), IL=1, ISS=0"
+        );
+        assert_eq!(cpu.sys.elr_el1, 0x1000);
+        assert_eq!(cpu.sys.far_el1, 0x1000);
+        assert_eq!(cpu.pc, 0x2200, "resumed at vbar+0x200");
+    }
+
+    /// M4-b: BEFORE the guest installs VBAR the undefined word stays a
+    /// terminal stop (the boot-stub region has no handler) — unchanged.
+    #[test]
+    fn undefined_insn_stops_before_vbar() {
+        let mut ram = FakeRam::new(0x8000);
+        ram.load_code(0x1000, &0xE7FF_DEFFu32.to_le_bytes());
+        let mut cpu = Interpreter::new(Box::new(ram));
+        cpu.set_reset_vector(0x1000);
+        let res = cpu.run(InterpBudget { max_insn: 16, max_ns: u64::MAX });
+        assert!(
+            matches!(res.stop, StopReason::UnknownInsn { insn: 0xE7FF_DEFF, .. }),
+            "stop={res:?}"
+        );
+        assert_eq!(cpu.undefined_taken, 0);
+    }
+
+    /// M4-b: TPIDR_EL1 seeds itself from the GUEST's own cpu_data[0]
+    /// fingerprint (intstack_top written by cpu_data_init at +0x4f8,
+    /// measured 0x98e4658 @0x9a4afc0 ⇒ base 0x9a4aac8). The MRS at
+    /// 0xD538D080 is keystone-verified (`mrs x0, tpidr_el1`).
+    #[test]
+    fn tpidr_discovers_guest_written_cpu_data() {
+        let mut ram = FakeRam::new(0x8000);
+        // the guest-written fingerprint at struct base 0x3000
+        ram.load_code(0x34f8, &0xFFFF_FFF0_098E_4658u64.to_le_bytes());
+        ram.load_code(0x3500, &1u64.to_le_bytes());
+        // mrs x0, tpidr_el1 ; hlt #0
+        ram.load_code(0x1000, &0xD538_D080u32.to_le_bytes());
+        ram.load_code(0x1004, &0xD440_0000u32.to_le_bytes());
+        let mut cpu = Interpreter::new(Box::new(ram));
+        cpu.set_reset_vector(0x1000);
+        cpu.cpu_data_scan = Some((0x3000, 0x4000));
+        cpu.kva_base = 0x1000;
+        let res = cpu.run(InterpBudget { max_insn: 8, max_ns: u64::MAX });
+        assert_eq!(res.stop, StopReason::Halted);
+        assert_eq!(cpu.cpu_data0_addr, Some(0x3000));
+        assert_eq!(cpu.sys.tpidr_el1, 0x4000, "discovered PA + kva_base");
+        assert_eq!(cpu.x[0], 0x4000, "the MRS must observe the seed");
+    }
+
+    /// M4-b guardrail: ≥96 identical re-entries of the SAME exception
+    /// (kind/esr/far/pc) latch the named ExceptionRecursion stop — the
+    /// measured session-H storm cycled (elr,far) 21,270 times and zeroed
+    /// 24 MB of the kernel image before any stop fired.
+    #[test]
+    fn identical_exception_loop_latches_named_stop() {
+        let mut ram = FakeRam::new(0x8000);
+        let mut cpu = Interpreter::new(Box::new(ram));
+        cpu.sys.vbar_el1 = 0x2000;
+        for _ in 0..200 {
+            cpu.take_exception(0x200, 0x9600_0006, Some(0x4f0), "sync");
+        }
+        let (detail, _elr, far, cycles) = cpu
+            .recursion_stop
+            .expect("the latch must fire at 96 identical re-entries");
+        assert_eq!(detail, "identical-exception-loop");
+        assert_eq!(far, 0x4f0);
+        assert!(cycles >= 96);
     }
 }

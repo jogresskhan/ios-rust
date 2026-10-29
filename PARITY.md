@@ -744,3 +744,89 @@ enforcement stays an honest, tracked limit gated on M4 vectoring.
 * `cargo test --workspace`: **394 passed / 0 failed** (IOS_RUST_DRAM_MB=
   768 on the 3 GiB host — the 4 GiB default window OOMs there; knob is
   the honest workaround, unchanged behavior on 4+ GiB hosts).
+
+### 2.12b — Session I (2026-10-30): the text-zeroing root cause + TPIDR seeding + bugs #25/#26
+
+* **Session-H stop ROOT-CAUSED (notes/m4-text-zeroing-re.md, capstone + live
+  reproduction): NOT a remap storm, NOT a stale TLB.** The kernel's own
+  exception machinery ate its text by STACK OVERFLOW: the DT-pointer panic
+  (the same "Device tree pointer outside" string, firing at insn 8,135,397
+  since session H) hit `panic_impl`'s percpu deref with TPIDR_EL1=0
+  (far=0x4f0 @0x…7a585d0) → the unhandled-exception reporter
+  (@0x…81607b8: mrs esr/far → stp x29,x30 → `bl 0x…816c458` — the exact
+  session-H stop pc) → the register-dump formatter refaulted
+  (`ldr x11,[x10,#0x100]` @0x…816c38c) → 21,270 cycles × 0x4F0 stack
+  descent (0x350 iframe + saves + 0x170 formatter frame, never popped)
+  walked SP 0x9b0fff0 → through __DATA → PPLTEXT gap → __TEXT_EXEC,
+  zeroing ~24 MB — terminal `UnknownInsn 0x0` on fetch of zeroed text.
+  Rejected hypotheses (with evidence): PPL stack table 0x98a4180 (read
+  only from __PPLTEXT trampoline), poisoned-x6 arithmetic (store log
+  proves continuous descent). Doc corrections: session-H "remap storm /
+  stale TLB" wording retired; the real VBAR_EL1 vector table is
+  0xfffffff008160000 (the 0x…8165000 stub table is `b .` slots).
+* **TPIDR_EL1/cpu_data[0] — the honest seed landed:** the kernel's own
+  `cpu_data_init` stores intstack_top (0x98e4658) at cpu_data[0]+0x4f8 ⇒
+  base 0x9a4aac8 — `discover_cpu_data0` (interp.rs, the guest-bytes
+  fingerprint scan) existed but had ZERO call sites (dead code from the
+  M4-B timeout). Now called lazily at the first `mrs tpidr_el1` while 0;
+  measured live: `cpu_data[0] @ KVA 0xfffffff009a4aac8 · tpidr
+  0xfffffff009a4aac8` (+0x4f8 = 0x98e4658, depth 1). The percpu abort
+  storm is gone: `panic_impl`'s percpu deref now reads the real cpu_data.
+* **Undefined instructions now VECTOR (hardware fidelity):** the kernel
+  ships deliberate `0xE7FFDEFF` markers (the ARM GDB trap, 2 file sites
+  in the panic path, capstone-verified as undecodable A64). Real
+  hardware raises EC=UNCATEGORIZED (ESR 0x0200_0000: EC=0, IL=1, ISS=0 —
+  the ISS==0 the vendored xnu sleh.c:694 asserts), and the kernel's
+  handle_uncategorized routes it to DebuggerCall/EXC_BAD_INSTRUCTION.
+  Model: undecodable word + live VBAR + budget → VBAR+0x200 with that
+  ESR; pre-VBAR boot keeps the terminal UnknownInsn stop. 4 goldens
+  (vectoring, pre-VBAR terminal, tpidr discovery, recursion latch).
+* **Guardrails (named stops instead of silent corruption):**
+  `StopReason::ExceptionRecursion` latches at ≥96 IDENTICAL (kind, esr,
+  far, elr) re-entries (the measured storm cycled 21,270 times) and at
+  any exception entry with SP below the real __TEXT_EXEC base. Measured
+  catching at 96 cycles (~12.6k insns) where session H burned 21,270.
+* **BUG #25 (DT placeholder lengths):** the IPSW blob ships 87 properties
+  whose length word has bit31 SET (regulatory-model-number, serial-number,
+  mac-address-*, *-color … — all identity/metadata; data = SysCfg
+  REFERENCES like b"syscfg/SrNm/0x20,zeroes/"). iBoot resolves them from
+  the SysCfg partition before the kernel sees the tree; the raw kernel DT
+  walker (0x…8136fd4) adds the RAW length and its own bounds check
+  panicked — THE panic that fired at insn 8,135,397 in every recent run.
+  Fix: iBoot-equivalent-without-SysCfg pass on the staged copy
+  (`dt_clear_placeholder_flags` — walk consumes the blob EXACTLY, 87
+  cleared). Honest limit: the kernel now reads each placeholder's own
+  reference BYTES as the value (nothing invented; no SysCfg device
+  exists yet).
+* **BUG #26 (__DATA BSS not zero-filled):** the harness flat-wrote the
+  whole kernel FILE; __DATA's BSS tail (vmsize − filesize = 737,280 B)
+  received the NEXT file bytes — the embedded IOCatalogue personalities
+  plist text (b"pple.iokit.IOUSBHostFami…") — so the kernel's cursor
+  global at BSS 0x…9adf638 read plist ASCII as a POINTER
+  (far = 0x696d614674736f48 = "HostFami", measured @ insn 8,148,893
+  after bug #25 fell). Fix: iBoot-equivalent per-segment BSS zero-fill
+  after staging.
+* **Measured (IOS_RUST_DRAM_MB=1024):** boot-first panic-point 8,135,842
+  → 8,149,172 (post-#25) → 8,162,237 (87 flags cleared) → **8,194,993
+  insns**, `panic() calls: none`, stop =
+  `ExceptionRecursion(identical-exception-loop) elr=0x…816c38c far=0x100
+  cycles=96` — the formatter refault loop now entered WITHOUT a panic
+  via a garbage array-base write: `str w19,[x9]` @0x…7b8cd70, x9 =
+  madd(x19,x25,[x24+0x14]) = 0xfffe00ee488b0058 (array object base
+  garbage — NEXT BLOCK RE target: the constructor of that object; first
+  abort of the run at insn 8,181,649, esr 0x96000050 write + L1
+  translation fault). M4 acceptance (WFI-and-resume ≥10M): NOT cleared —
+  8.19M < 10M and the stop is not a WFI park.
+* AIC v1 (AIC.h map), ADT LE reg + irq_line wiring from the M4-B/M5
+  census work committed pre-session (uncommitted-from-timeout batch
+  landed here tested: AicTimebase page, t8030 attach classification,
+  machine.rs aic-v1 parity 72%).
+* `cargo test --workspace`: **403 passed / 0 failed** (IOS_RUST_DRAM_MB=
+  768 on the 3 GiB host, honest workaround unchanged).
+* **S3 snapshot NOT taken this session:** sandbox reset #4 wiped
+  ~/.config/ios-rust/s3.env — the vault's newest bundle is ≤ 1f9ec59, so
+  sessions 6fffd65/8f6c345 and this one are unbacked until the
+  credentials are re-posted (script reads AWS_ACCESS_KEY_ID +
+  AWS_SECRET_ACCESS_KEY from the environment after sourcing s3.env;
+  S3_ENDPOINT_URL/S3_REGION optional with idrivee2 defaults — see
+  notes/s3-ops-20261030.md).

@@ -3,7 +3,7 @@
  "target_soc": "Apple T8030 (A13 Bionic)",
  "machine": "apple-t8030",
  "cpu": "apple-a13 (Lightning x2 + Thunder x4, ARMv8.4-A, AArch64-only)",
- "generated": "2026-10-30 (session H: M4 vectoring live, bugs #20-#24, boot 8.14M\u219210.92M insns w/ 21,270 vectored kernel aborts; M4 gate NOT cleared)",
+ "generated": "2026-10-30 (session I: TPIDR seed + undefined-vectoring + bugs #25/#26; boot-first 8,194,993 insns, panic-free; 403 tests 0 failed; S3 snapshot blocked \u2014 s3.env lost in sandbox reset #4)",
  "rubric": {
   "100": "proven by CI/test artifact",
   "90": "implemented + verified",
@@ -405,14 +405,19 @@
   },
   {
    "name": "boot-first lane (irestore SHA-384 staging \u2192 FIRST BOOT on real 18C66 bytes)",
-   "pct": 90,
+   "pct": 80,
    "files": 1,
-   "note": "session F: runs the REAL iBoot handoff (boot_args, LC_UNIXTHREAD entry, MMU off) \u2014 measured 8,135,842 insns retired, new named stop; was 9 insns/no-state"
+   "note": "session I measured: panic-free to 8,194,993 real insns (was panic @8,135,397 since session H). Fixed: bug #25 (87 bit31 DT placeholder lengths \u2014 iBoot SysCfg pass), bug #26 (__DATA BSS 737,280 B zero-fill \u2014 plist text leaked into BSS cursors). Model: TPIDR_EL1 seeded from the kernel's own cpu_data fingerprint (dead discover_cpu_data0 re-wired), undefined-insn vectoring (EC=UNCATEGORIZED ESR 0x02000000 per vendored sleh.c), ExceptionRecursion named-stop guardrails. Stop now: formatter refault loop via garbage array-base write @0x7b8cd70 (next-block RE target). M4 gate (WFI-resume >=10M) NOT cleared \u2014 honest."
   },
   {
    "name": "a13-cpu mmu (stage-1 walker + TLB)",
    "pct": 90,
    "note": "session G measured: 4K/16K granule L0..L3 walks golden-pinned (bug #19 fixed: TTBR no longer granule-masked \u2014 truncated start tables are architectural); MAIR attr indirection decoded + measured (459 normal L2-block leaves on real run, misroute 0/0); loud-fail on 64K/reserved/TG0!=TG1 and T0SZ=0; TBI decoded flag-gated; honest limits: AP/XN/AF enforcement deferred to M4 vectoring, wholesale TLBI (no ASID), no stage 2 / 52-bit PA (fails loudly)"
+  },
+  {
+   "name": "a13-cpu exceptions (vectoring + undefined + guardrails)",
+   "pct": 85,
+   "note": "session I: sync-abort vectoring (session H) + undefined-instruction vectoring with ESR EC=UNCATEGORIZED (0xE7FFDEFF GDB-trap markers in the real kernel text \u2014 4 goldens: vectoring/pre-VBAR/tpidr-discovery/recursion-latch) + ExceptionRecursion named stop (>=96 identical re-entries or SP below __TEXT_EXEC) + TPIDR_EL1 lazy discovery from guest-written cpu_data fingerprint. Real vector table located at 0xfffffff008160000 (the 0x8165000 stub is b. slots)."
   }
  ],
  "permanent_gaps": [

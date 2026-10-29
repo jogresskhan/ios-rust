@@ -20,6 +20,7 @@ pub mod decode;
 pub mod gxf;
 pub mod interp;
 pub mod isa;
+pub mod mmu;
 pub mod simd;
 
 #[cfg(test)]
@@ -62,6 +63,9 @@ pub enum StopReason {
     Halted,
     Panic,
     UnknownInsn { pc: u64, insn: u32 },
+    /// Stage-1 MMU walk failed (invalid descriptor, out-of-range VA, …).
+    /// The kernel built tables we could not walk — dump and investigate.
+    TranslationFault { pc: u64, va: u64, kind: &'static str, detail: &'static str },
 }
 
 #[derive(Clone, Debug)]
@@ -81,6 +85,16 @@ pub trait MemAccess: Send {
     fn load(&mut self, addr: u64, size: u8) -> u64;
     fn store(&mut self, addr: u64, size: u8, val: u64);
     fn fetch32(&mut self, addr: u64) -> u32;
+    /// Bulk read for post-mortem diagnostics (default: word loop).
+    fn read_bytes(&mut self, addr: u64, buf: &mut [u8]) {
+        for (i, chunk) in buf.chunks_mut(8).enumerate() {
+            let a = addr + (i * 8) as u64;
+            let v = self.load(a, 8);
+            for (j, b) in chunk.iter_mut().enumerate() {
+                *b = ((v >> (j * 8)) & 0xFF) as u8;
+            }
+        }
+    }
 }
 
 

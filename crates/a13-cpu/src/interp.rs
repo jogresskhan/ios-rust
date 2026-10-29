@@ -15,8 +15,11 @@
 
 use crate::crypto;
 use crate::decode::*;
+use crate::mmu::{Mmu, XlateKind};
 use crate::simd::{self, Vregs};
 use crate::{CpuBackend, InterpBudget, MemAccess, RunResult, StopReason};
+
+use std::collections::HashMap;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SystemRegs {
@@ -77,6 +80,25 @@ pub mod sysreg {
     pub const CNTVCT_EL0: u16 = enc(1, 3, 14, 0, 2);
     pub const ELR_EL1: u16 = enc(1, 0, 4, 0, 1);
     pub const SPSR_EL1: u16 = enc(1, 0, 4, 0, 0);
+    // --- early-boot window (verified against the real 18C66 start.s) ---
+    pub const MAIR_EL1: u16 = enc(1, 0, 10, 2, 0);
+    pub const MIDR_EL1: u16 = enc(1, 0, 0, 0, 0);
+    pub const MPIDR_EL1: u16 = enc(1, 0, 0, 0, 5);
+    pub const CNTFRQ_EL0: u16 = enc(1, 3, 14, 0, 0);
+    pub const CNTPCT_EL0: u16 = enc(1, 3, 14, 0, 1);
+    pub const CTR_EL0: u16 = enc(1, 3, 0, 0, 1);
+    pub const CURRENT_EL: u16 = enc(1, 0, 4, 2, 2);
+    pub const ID_AA64MMFR0_EL1: u16 = enc(1, 0, 0, 7, 0);
+    pub const ID_AA64MMFR1_EL1: u16 = enc(1, 0, 0, 7, 1);
+    pub const TPIDR_EL1: u16 = enc(1, 0, 13, 0, 2);
+    pub const TPIDR_EL0: u16 = enc(1, 3, 13, 0, 2);
+    pub const TPIDRRO_EL0: u16 = enc(1, 3, 13, 0, 3);
+    /// Apple `s3_4_c15_c0_4` — start.s polls bit 1 before touching the
+    /// core (boot-stage handshake). Modeled: reads OR-in bit 1.
+    pub const APPLE_BOOT_STAGE: u16 = enc(1, 4, 15, 0, 4);
+    /// OSLAR_EL1 — keystone: `msr oslar_el1, xzr` = d510109f →
+    /// (op0raw 1, op1 0, CRn 1, CRm 0, op2 4).
+    pub const OSLAR_EL1: u16 = enc(1, 0, 1, 0, 4);
     // Apple GXF system regs (a13_gxf.c model)
     pub const GXF_CONFIG_EL1: u16 = enc(1, 0, 15, 1, 1);
     pub const GXF_STATUS_EL1: u16 = enc(1, 0, 15, 1, 2);
@@ -164,6 +186,22 @@ pub struct Interpreter {
     ns_budget_used: u64,
     pub unknown_sysreg_writes: u64,
     pub unknown_sysreg_reads: u64,
+    /// Stage-1 MMU (walker + TLB) — armed when the kernel flips SCTLR.M.
+    pub mmu: Mmu,
+    /// Generic storage for Apple-custom / unarchitected sysreg encodings
+    /// (mrs/orr/msr round-trips must preserve values or the kernel hangs).
+    sysreg_store: HashMap<u16, u64>,
+    /// SPSel flag (single-bank SP model: SP_EL0/SP_EL1 share `sp`).
+    pub sp_sel: bool,
+    /// First N unknown-sysreg encodings, for the honest report.
+    pub unknown_sysreg_seen: Vec<u16>,
+    /// Optional instruction trace ring (pc, word, x regs snapshot) — boot
+    /// debugging.
+    pub trace_enabled: bool,
+    pub trace: std::collections::VecDeque<(u64, u32, Vec<u64>, u32)>,
+    /// Post-mortem: last (pc, insn, new_sp) that changed SP — finds a lost
+    /// stack pointer fast.
+    pub last_sp_change: Option<(u64, u32, u64)>,
 }
 
 const N: u32 = 1 << 3;
@@ -223,7 +261,26 @@ impl Interpreter {
             ns_budget_used: 0,
             unknown_sysreg_writes: 0,
             unknown_sysreg_reads: 0,
+            mmu: Mmu::new(),
+            sysreg_store: HashMap::new(),
+            sp_sel: false,
+            unknown_sysreg_seen: Vec::new(),
+            trace_enabled: false,
+            trace: std::collections::VecDeque::new(),
+            last_sp_change: None,
         }
+    }
+
+    /// Record (pc, word, regs) into the bounded trace ring when enabled.
+    #[inline]
+    fn trace_tick(&mut self, pc: u64, word: u32) {
+        if !self.trace_enabled {
+            return;
+        }
+        if self.trace.len() >= 24 {
+            self.trace.pop_front();
+        }
+        self.trace.push_back((pc, word, self.x.to_vec(), self.nzcv));
     }
 
     pub fn mem(&mut self) -> &mut dyn MemAccess {
@@ -260,32 +317,81 @@ impl Interpreter {
     #[inline]
     fn set_rsp(&mut self, n: u8, v: u64) {
         if n == 31 {
+            if v != self.sp {
+                self.last_sp_change = Some((self.pc, 0, v));
+            }
             self.sp = v;
         } else {
             self.x[n as usize] = v;
         }
     }
 
+    /// Translate a VA through the stage-1 MMU (pass-through while off).
+    #[inline]
+    fn vaddr(&mut self, va: u64, kind: XlateKind) -> Result<u64, StopReason> {
+        if !self.mmu.enabled {
+            return Ok(va);
+        }
+        self.mmu
+            .translate(&mut *self.mem, va, kind)
+            .map_err(|(v, detail)| StopReason::TranslationFault {
+                pc: self.pc,
+                va: v,
+                kind: kind.as_str(),
+                detail,
+            })
+    }
+
+    /// Translating load (physical pass-through while SCTLR.M is clear).
+    /// Masks to the access width so a device that ignores `size` can never
+    /// leak neighboring bytes into a narrow register load.
+    #[inline]
+    fn ld(&mut self, va: u64, size: u8) -> Result<u64, StopReason> {
+        let pa = self.vaddr(va, XlateKind::Load)?;
+        let v = MemAccess::load(&mut *self.mem, pa, size);
+        let bytes = (size as u32).clamp(1, 8);
+        Ok(if bytes >= 8 {
+            v
+        } else {
+            v & ((1u64 << (bytes * 8)) - 1)
+        })
+    }
+
+    /// Translating store.
+    #[inline]
+    fn st(&mut self, va: u64, size: u8, val: u64) -> Result<(), StopReason> {
+        let pa = self.vaddr(va, XlateKind::Store)?;
+        MemAccess::store(&mut *self.mem, pa, size, val);
+        Ok(())
+    }
+
+    /// Translating instruction fetch.
+    #[inline]
+    fn fetch(&mut self, va: u64) -> Result<u32, StopReason> {
+        let pa = self.vaddr(va, XlateKind::Fetch)?;
+        Ok(MemAccess::fetch32(&mut *self.mem, pa))
+    }
+
     /// Vector memory read of `bytes` (1/2/4/8/16) as a little-endian u128.
     #[inline]
-    fn load_vec(&mut self, addr: u64, bytes: u16) -> u128 {
+    fn load_vec(&mut self, addr: u64, bytes: u16) -> Result<u128, StopReason> {
         if bytes <= 8 {
-            self.mem.load(addr, bytes as u8) as u128
+            Ok(self.ld(addr, bytes as u8)? as u128)
         } else {
-            let lo = self.mem.load(addr, 8);
-            let hi = self.mem.load(addr + 8, (bytes - 8) as u8);
-            ((hi as u128) << 64) | lo as u128
+            let lo = self.ld(addr, 8)?;
+            let hi = self.ld(addr + 8, (bytes - 8) as u8)?;
+            Ok(((hi as u128) << 64) | lo as u128)
         }
     }
 
     /// Vector memory write of the low `bytes` of `val`.
     #[inline]
-    fn store_vec(&mut self, addr: u64, bytes: u16, val: u128) {
+    fn store_vec(&mut self, addr: u64, bytes: u16, val: u128) -> Result<(), StopReason> {
         if bytes <= 8 {
-            self.mem.store(addr, bytes as u8, val as u64);
+            self.st(addr, bytes as u8, val as u64)
         } else {
-            self.mem.store(addr, 8, val as u64);
-            self.mem.store(addr + 8, (bytes - 8) as u8, (val >> 64) as u64);
+            self.st(addr, 8, val as u64)?;
+            self.st(addr + 8, (bytes - 8) as u8, (val >> 64) as u64)
         }
     }
 
@@ -353,7 +459,11 @@ impl Interpreter {
             (res, cf, vf)
         } else {
             let res = a.wrapping_add(b).wrapping_add(carry_in as u64);
-            let cf = res < a;
+            // Carry-out must respect the operation width: for 32-bit ADDS
+            // C = (a+b+c) >= 2^32 (the u64 sum never wraps, so `res < a`
+            // could never fire — real-data bug #10 follow-up, found on the
+            // 18C66 boot path).
+            let cf = if is64 { res < a } else { res > 0xFFFF_FFFF };
             let vf = ((a ^ res) & (b ^ res)) >> (if is64 { 63 } else { 31 }) & 1 == 1;
             (res, cf, vf)
         };
@@ -390,7 +500,8 @@ impl Interpreter {
 
     fn step(&mut self) -> Result<(), StopReason> {
         let pc = self.pc;
-        let word = self.mem.fetch32(pc);
+        let word = self.fetch(pc)?;
+        self.trace_tick(pc, word);
         let Some(insn) = crate::decode::decode(pc, word) else {
             return Err(StopReason::UnknownInsn { pc, insn: word });
         };
@@ -436,11 +547,19 @@ impl Interpreter {
                 }
             }
             Insn::AddSubReg { rd, rn, rm, kind, imm6, subtract, setflags, is64 } => {
-                let a = self.rsp(rn);
+                // S=1: Rd=31 is XZR (CMP/CMP-shifted) — the result must be
+                // DISCARDED, never written to SP (QEMU op_add_sub_reg: is_cmp
+                // path). Real-data bug #10: `cmp x1, x2, lsl #2` clobbered SP
+                // with the comparison result and zeroed the kernel stack.
+                // Rn=31 reads ZR only on the compare path, SP otherwise.
+                let a = if setflags && rd == 31 { self.r(rn) } else { self.rsp(rn) };
                 let b = self.shift(self.r(rm), kind, imm6, is64);
                 if setflags {
-                    let r = self.add_with_flags(a, b, true, is64, subtract);
-                    self.set_rsp(rd, r);
+                    // carry-in: ADCS only. ADDS gets 0; SUBS uses it as the
+                    // borrow-in (!C → b - 1) — bug #10b: ADDS was computing
+                    // a+b+1 on real 18C66 bytes.
+                    let r = self.add_with_flags(a, b, subtract, is64, subtract);
+                    self.set_r(rd, r);
                 } else if subtract {
                     self.set_rsp(rd, a.wrapping_sub(b));
                 } else {
@@ -472,6 +591,16 @@ impl Interpreter {
                 let a = self.r(rn);
                 let b = (imm12 as u64) << if shift { 12 } else { 0 };
                 self.add_with_flags(a, b, true, is64, true);
+            }
+            Insn::CmnImm { rn, imm12, shift, is64 } => {
+                let a = self.r(rn);
+                let b = (imm12 as u64) << if shift { 12 } else { 0 };
+                self.add_with_flags(a, b, false, is64, false);
+            }
+            Insn::CmnReg { rn, rm, kind, imm6, is64 } => {
+                let a = self.r(rn);
+                let b = self.shift(self.r(rm), kind, imm6, is64);
+                self.add_with_flags(a, b, false, is64, false);
             }
             Insn::CmpReg { rn, rm, kind, imm6, is64 } => {
                 let a = self.r(rn);
@@ -541,17 +670,17 @@ impl Interpreter {
             Insn::LdrImmU { rt, rn, imm12, size_log2 } => {
                 let addr = self.rsp(rn) + ((imm12 as u64) << size_log2);
                 let sz = 1u8 << size_log2;
-                let v = self.mem.load(addr, sz);
+                let v = self.ld(addr, sz)?;
                 self.set_r(rt, v);
             }
             Insn::StrImmU { rt, rn, imm12, size_log2 } => {
                 let addr = self.rsp(rn) + ((imm12 as u64) << size_log2);
                 let sz = 1u8 << size_log2;
-                self.mem.store(addr, sz, self.r(rt));
+                self.st(addr, sz, self.r(rt))?;
             }
             Insn::LdrLit { rt, imm, is64 } => {
                 let addr = (pc as i64 + imm) as u64;
-                let v = self.mem.load(addr, if is64 { 8 } else { 4 });
+                let v = self.ld(addr, if is64 { 8 } else { 4 })?;
                 self.set_r(rt, v);
             }
             Insn::Ldp { rt, rt2, rn, imm, mode, is64 } => {
@@ -562,8 +691,8 @@ impl Interpreter {
                     PairMode::Post => base,
                 };
                 let sz = if is64 { 8 } else { 4 };
-                let a = self.mem.load(addr, sz);
-                let b = self.mem.load(addr + sz as u64, sz);
+                let a = self.ld(addr, sz)?;
+                let b = self.ld(addr + sz as u64, sz)?;
                 self.set_r(rt, a);
                 self.set_r(rt2, b);
                 if mode == PairMode::Pre || mode == PairMode::Post {
@@ -578,8 +707,8 @@ impl Interpreter {
                     PairMode::Post => base,
                 };
                 let sz = if is64 { 8 } else { 4 };
-                self.mem.store(addr, sz, self.r(rt));
-                self.mem.store(addr + sz as u64, sz, self.r(rt2));
+                self.st(addr, sz, self.r(rt))?;
+                self.st(addr + sz as u64, sz, self.r(rt2))?;
                 if mode == PairMode::Pre || mode == PairMode::Post {
                     self.set_rsp(rn, (base as i64 + imm) as u64);
                 }
@@ -592,8 +721,8 @@ impl Interpreter {
                     }
                     PairMode::Post => base,
                 };
-                let a = Self::sext32(self.mem.load(addr, 4));
-                let b = Self::sext32(self.mem.load(addr + 4, 4));
+                let a = Self::sext32(self.ld(addr, 4)?);
+                let b = Self::sext32(self.ld(addr + 4, 4)?);
                 self.set_r(rt, a);
                 self.set_r(rt2, b);
                 if mode == PairMode::Pre || mode == PairMode::Post {
@@ -609,8 +738,8 @@ impl Interpreter {
                     PairMode::Post => base,
                 };
                 let sz = 1u16 << log2_width;
-                self.v.v[vt as usize] = self.load_vec(addr, sz);
-                self.v.v[vt2 as usize] = self.load_vec(addr + sz as u64, sz);
+                self.v.v[vt as usize] = self.load_vec(addr, sz)?;
+                self.v.v[vt2 as usize] = self.load_vec(addr + sz as u64, sz)?;
                 if mode == PairMode::Pre || mode == PairMode::Post {
                     self.set_rsp(rn, (base as i64 + imm) as u64);
                 }
@@ -624,8 +753,8 @@ impl Interpreter {
                     PairMode::Post => base,
                 };
                 let sz = 1u16 << log2_width;
-                self.store_vec(addr, sz, self.v.v[vt as usize]);
-                self.store_vec(addr + sz as u64, sz, self.v.v[vt2 as usize]);
+                self.store_vec(addr, sz, self.v.v[vt as usize])?;
+                self.store_vec(addr + sz as u64, sz, self.v.v[vt2 as usize])?;
                 if mode == PairMode::Pre || mode == PairMode::Post {
                     self.set_rsp(rn, (base as i64 + imm) as u64);
                 }
@@ -640,10 +769,10 @@ impl Interpreter {
                 };
                 let sz = 1u8 << size_log2;
                 if load {
-                    let v = self.mem.load(addr, sz);
+                    let v = self.ld(addr, sz)?;
                     self.set_r(rt, v);
                 } else {
-                    self.mem.store(addr, sz, self.r(rt));
+                    self.st(addr, sz, self.r(rt))?;
                 }
                 if matches!(mode, LsMode::Pre | LsMode::Post) {
                     self.set_rsp(rn, (base as i64 + imm9) as u64);
@@ -658,7 +787,7 @@ impl Interpreter {
                     LsMode::Post => base,
                 };
                 let sz = 1u8 << size_log2;
-                let raw = self.mem.load(addr, sz);
+                let raw = self.ld(addr, sz)?;
                 let sh = 64 - 8 * sz;
                 let v = ((raw << sh) as i64 >> sh) as u64;
                 self.set_r(rt, if dest64 { v } else { v & 0xFFFF_FFFF });
@@ -672,16 +801,208 @@ impl Interpreter {
                 let addr = base.wrapping_add(idx);
                 let sz = 1u8 << size_log2;
                 if load && sign_ext {
-                    let raw = self.mem.load(addr, sz);
+                    let raw = self.ld(addr, sz)?;
                     let sh = 64 - 8 * sz;
                     let v = ((raw << sh) as i64 >> sh) as u64;
                     self.set_r(rt, if dest64 { v } else { v & 0xFFFF_FFFF });
                 } else if load {
-                    let v = self.mem.load(addr, sz);
+                    let v = self.ld(addr, sz)?;
                     self.set_r(rt, v);
                 } else {
-                    self.mem.store(addr, sz, self.r(rt));
+                    self.st(addr, sz, self.r(rt))?;
                 }
+            }
+            Insn::VLogic3 { rd, rn, rm, size, u, q } => {
+                // Element-wise bitwise, lane width 1 byte, lanes = 16 (Q=1)
+                // or 8 (Q=0); the upper half of Vd is UNCHANGED for Q=0.
+                let lanes = if q { 16 } else { 8 };
+                let a = self.v.v[rn as usize];
+                let b = self.v.v[rm as usize];
+                let r: u128 = match (size, u) {
+                    (0, false) => a & b, // AND
+                    (1, false) => a & !b, // BIC
+                    (2, false) => a | b, // ORR
+                    (3, false) => a | !b, // ORN
+                    (0, true) => a ^ b, // EOR
+                    (1, true) => (a & b) | (!a & b), // BSL (dst is the mask)
+                    (2, true) => (a & !b) | (!a & b), // BIT
+                    (3, true) => a ^ !b, // EON
+                    _ => 0,
+                };
+                let keep = if lanes * 8 >= 128 {
+                    0 // .16b writes the whole 128-bit register
+                } else {
+                    !((1u128 << (lanes * 8)) - 1)
+                };
+                self.v.v[rd as usize] = (self.v.v[rd as usize] & keep)
+                    | (r & !keep);
+            }
+            Insn::VReduce { rd, rn, size, op, q } => {
+                // Across-lane reduce: element width = 1 << size bytes
+                // (size 00 → bytes), lane count = (16 if Q else 8) >> size.
+                // Result (element-width) written to the low bytes of Vd;
+                // remaining Vd bits UNCHANGED per the architecture.
+                let eb = 1u64 << size;
+                let lanes = ((if q { 16 } else { 8 }) as u64) >> size;
+                let full = self.v.v[rn as usize];
+                let mut acc: i128 = match op {
+                    VReduceOp::Addv => 0,
+                    VReduceOp::Sminv => i128::from(i64::from_ne_bytes(
+                        (full as u64).to_ne_bytes())),
+                    VReduceOp::Uminv => u128::from(full) as i128,
+                    VReduceOp::Smaxv => i128::MIN,
+                    VReduceOp::Umaxv => 0,
+                };
+                let mut uacc: u128 = match op {
+                    VReduceOp::Uminv => u128::MAX,
+                    VReduceOp::Umaxv => 0,
+                    _ => 0,
+                };
+                let mut signed_acc: i128 = match op {
+                    VReduceOp::Sminv => i128::MAX,
+                    VReduceOp::Smaxv => i128::MIN,
+                    _ => 0,
+                };
+                let mut first = true;
+                for l in 0..lanes {
+                    let shift = l * eb * 8;
+                    let mask = (1u128 << (eb * 8)) - 1;
+                    let raw = ((full >> shift) & mask) as u64;
+                    let signed = ((raw << (64 - eb * 8)) as i64) >> (64 - eb * 8);
+                    match op {
+                        VReduceOp::Addv => acc += raw as i128,
+                        VReduceOp::Uminv => uacc = uacc.min(raw as u128),
+                        VReduceOp::Umaxv => uacc = uacc.max(raw as u128),
+                        VReduceOp::Sminv => {
+                            signed_acc = if first { signed as i128 } else { signed_acc.min(signed as i128) }
+                        }
+                        VReduceOp::Smaxv => {
+                            signed_acc = if first { signed as i128 } else { signed_acc.max(signed as i128) }
+                        }
+                    }
+                    first = false;
+                }
+                let out: u128 = match op {
+                    VReduceOp::Addv => acc as u128,
+                    VReduceOp::Uminv | VReduceOp::Umaxv => uacc,
+                    VReduceOp::Sminv | VReduceOp::Smaxv => signed_acc as u128,
+                };
+                // DDI 0487 leaves the rest of Vd UNDEFINED for across-lane
+                // reduces; Apple cores ZERO-extend and the real kernel's
+                // idiom `uminv b1, v0.16b; fmov w2, s1; cbnz w2` (memscan at
+                // 0x…8169df4, 18C66) only works when the full low element —
+                // and everything above it — reads as zero. Zero the register.
+                self.v.v[rd as usize] = out;
+            }
+            Insn::FmovGprVec { rt, rn, is64, to_vec } => {
+                // Bit-exact move between GPR and scalar FP register (the low
+                // Vn element). 32-bit: w/s; 64-bit: x/d.
+                if to_vec {
+                    let v = self.r(rt);
+                    let bytes = if is64 { 8 } else { 4 };
+                    let keep = !((1u128 << (bytes * 8)) - 1);
+                    self.v.v[rn as usize] =
+                        (self.v.v[rn as usize] & keep) | ((v as u128) & !keep);
+                } else {
+                    let bytes = if is64 { 8 } else { 4 };
+                    let mask = (1u128 << (bytes * 8)) - 1;
+                    self.set_r(rt, (self.v.v[rn as usize] & mask) as u64);
+                }
+            }
+            Insn::V3SameInt { rd, rn, rm, size, u, q, op } => {
+                use crate::decode::V3Op;
+                let eb = 1u64 << size; // element bytes (1/2/4/8)
+                let total = if q { 16u64 } else { 8 };
+                let lanes = total / eb;
+                let a = self.v.v[rn as usize];
+                let b = self.v.v[rm as usize];
+                let mask = (1u128 << (eb * 8)) - 1;
+                let mut r: u128 = 0;
+                let mut pair: Vec<(u128, u128)> = Vec::new();
+                for l in 0..lanes {
+                    let sh = l * eb * 8;
+                    let av = (a >> sh) & mask;
+                    let bv = (b >> sh) & mask;
+                    pair.push((av, bv));
+                }
+                let lanes_h = (lanes / 2).max(1);
+                for l in 0..lanes {
+                    let sh = l * eb * 8;
+                    // signed views (element width)
+                    let bits = eb * 8;
+                    let sext = |v: u128| -> i128 {
+                        let m = 1i128 << (bits - 1);
+                        ((v as i128) & ((m << 1) - 1)) - (((v as i128) & m) << 1)
+                    };
+                    let out: u128 = match op {
+                        V3Op::Add => pair[l as usize].0.wrapping_add(pair[l as usize].1) & mask,
+                        V3Op::Sub => pair[l as usize].0.wrapping_sub(pair[l as usize].1) & mask,
+                        V3Op::Cmgt => {
+                            if sext(pair[l as usize].0) > sext(pair[l as usize].1) { mask } else { 0 }
+                        }
+                        V3Op::Cmhi => {
+                            if pair[l as usize].0 > pair[l as usize].1 { mask } else { 0 }
+                        }
+                        V3Op::Cmge => {
+                            if sext(pair[l as usize].0) >= sext(pair[l as usize].1) { mask } else { 0 }
+                        }
+                        V3Op::Cmhs => {
+                            if pair[l as usize].0 >= pair[l as usize].1 { mask } else { 0 }
+                        }
+                        V3Op::Cmeq => {
+                            if pair[l as usize].0 == pair[l as usize].1 { mask } else { 0 }
+                        }
+                        V3Op::Cmtst => {
+                            if (pair[l as usize].0 & pair[l as usize].1) != 0 { mask } else { 0 }
+                        }
+                        V3Op::Smin => {
+                            (sext(pair[l as usize].0).min(sext(pair[l as usize].1)) as u128) & mask
+                        }
+                        V3Op::Umin => pair[l as usize].0.min(pair[l as usize].1) & mask,
+                        V3Op::Smax => {
+                            (sext(pair[l as usize].0).max(sext(pair[l as usize].1)) as u128) & mask
+                        }
+                        V3Op::Umax => pair[l as usize].0.max(pair[l as usize].1) & mask,
+                        V3Op::Mul => pair[l as usize].0.wrapping_mul(pair[l as usize].1) & mask,
+                        // pairwise: lane l of the result folds elements
+                        // 2l, 2l+1 of the SOURCE (per-lane pairing)
+                        V3Op::Smaxp | V3Op::Umaxp | V3Op::Sminp | V3Op::Uminp => {
+                            let i0 = (l * 2) as usize;
+                            let i1 = (l * 2 + 1) as usize;
+                            if i1 as u64 >= lanes {
+                                0
+                            } else {
+                                let (x, y) = (pair[i0].0, pair[i1].0);
+                                match op {
+                                    V3Op::Smaxp => (sext(x).max(sext(y)) as u128) & mask,
+                                    V3Op::Umaxp => x.max(y) & mask,
+                                    V3Op::Sminp => (sext(x).min(sext(y)) as u128) & mask,
+                                    V3Op::Uminp => x.min(y) & mask,
+                                    _ => 0,
+                                }
+                            }
+                        }
+                    };
+                    r |= out << sh;
+                    let _ = lanes_h;
+                }
+                self.v.v[rd as usize] = r;
+            }
+            Insn::MoviVec64 { rd, q, imm8 } => {
+                // cmode 111x: each imm8 bit expands to a byte of the 64-bit
+                // immediate (measured vs capstone); replicated per D lane.
+                let mut imm64: u64 = 0;
+                for i in 0..8 {
+                    if (imm8 >> i) & 1 == 1 {
+                        imm64 |= 0xFFu64 << (8 * i);
+                    }
+                }
+                self.v.v[rd as usize] = if q {
+                    (imm64 as u128) | ((imm64 as u128) << 64)
+                } else {
+                    // Q=0 writes D[0]; upper half UNDEF per DDI → zero.
+                    imm64 as u128
+                };
             }
             Insn::LdStSimd9 { vt, rn, imm9, width_log2, load, mode } => {
                 let base = self.rsp(rn);
@@ -693,11 +1014,11 @@ impl Interpreter {
                 };
                 let sz = 1u16 << width_log2;
                 if load {
-                    let val = self.load_vec(addr, sz);
+                    let val = self.load_vec(addr, sz)?;
                     self.write_vec_low(vt, sz, val);
                 } else {
                     let val = self.read_vec_low(vt, sz);
-                    self.store_vec(addr, sz, val);
+                    self.store_vec(addr, sz, val)?;
                 }
                 if matches!(mode, LsMode::Pre | LsMode::Post) {
                     self.set_rsp(rn, (base as i64 + imm9) as u64);
@@ -707,11 +1028,11 @@ impl Interpreter {
                 let addr = self.rsp(rn) + ((imm12 as u64) << width_log2);
                 let sz = 1u16 << width_log2;
                 if load {
-                    let val = self.load_vec(addr, sz);
+                    let val = self.load_vec(addr, sz)?;
                     self.write_vec_low(vt, sz, val);
                 } else {
                     let val = self.read_vec_low(vt, sz);
-                    self.store_vec(addr, sz, val);
+                    self.store_vec(addr, sz, val)?;
                 }
             }
             Insn::RetA { .. } => {
@@ -735,11 +1056,17 @@ impl Interpreter {
                 return Err(StopReason::Panic);
             }
             Insn::AddSubExt { rd, rn, rm, option, imm3, subtract, setflags, is64 } => {
-                let a = self.rsp(rn);
+                // S=1: Rd=31 is XZR — discard (CMP-extended). Real-data bug
+                // #10 (THE boot stopper): `cmp x17, w16, uxtw` wrote its
+                // comparison result into SP via set_rsp(31, …), zeroing the
+                // kernel stack mid-boot → `str xzr, [sp, #8]` faulted at
+                // 0xfffffff007ff97ac. Rn=31 → ZR on the compare path.
+                let a = if setflags && rd == 31 { self.r(rn) } else { self.rsp(rn) };
                 let b = option.apply(self.r(rm)) << imm3 as u64;
                 if setflags {
-                    let r = self.add_with_flags(a, b, true, is64, subtract);
-                    self.set_rsp(rd, r);
+                    // carry-in: ADCS only (see AddSubReg — bug #10b).
+                    let r = self.add_with_flags(a, b, subtract, is64, subtract);
+                    self.set_r(rd, r);
                 } else if subtract {
                     let r = a.wrapping_sub(b);
                     self.set_rsp(rd, if is64 { r } else { r & 0xFFFF_FFFF });
@@ -749,8 +1076,10 @@ impl Interpreter {
                 }
             }
             Insn::ShiftReg { rd, rn, rm, op, is64 } => {
+                // Data-processing (2 source): register 31 is ZR for BOTH
+                // operands — SP is never addressable here.
                 let bits: u64 = if is64 { 64 } else { 32 };
-                let a = self.rsp(rn);
+                let a = self.r(rn);
                 let s = self.r(rm) % bits;
                 let r = match op {
                     ShiftOp::Lsl => a << s,
@@ -758,7 +1087,7 @@ impl Interpreter {
                     ShiftOp::Asr => ((a as i64) >> s) as u64,
                     ShiftOp::Ror => a.rotate_right(s as u32),
                 };
-                self.set_rsp(rd, if is64 { r } else { r & 0xFFFF_FFFF });
+                self.set_r(rd, if is64 { r } else { r & 0xFFFF_FFFF });
             }
             Insn::Mrs { rt, sysreg } => {
                 let v = self.read_sysreg(sysreg);
@@ -792,7 +1121,7 @@ impl Interpreter {
                 let size = 1u8 << size_log2;
                 let addr = self.r(rn);
                 let src = self.r(rs) & self.size_mask(size_log2);
-                let old = self.mem.load(addr, size);
+                let old = self.ld(addr, size)?;
                 let new = match op {
                     AtomicOp::Add => old.wrapping_add(src),
                     AtomicOp::Clr => old & !src,
@@ -810,7 +1139,7 @@ impl Interpreter {
                     AtomicOp::UMax => if old > src { old } else { src },
                     AtomicOp::UMin => if old < src { old } else { src },
                 };
-                self.mem.store(addr, size, new);
+                self.st(addr, size, new)?;
                 self.set_r(rt, old); // return the OLD value
             }
             Insn::Cas { rt, rs, rn, size_log2, .. } => {
@@ -819,9 +1148,9 @@ impl Interpreter {
                 let addr = self.r(rn);
                 let cmp = self.r(rt) & self.size_mask(size_log2);
                 let new = self.r(rs) & self.size_mask(size_log2);
-                let old = self.mem.load(addr, size);
+                let old = self.ld(addr, size)?;
                 if old == cmp {
-                    self.mem.store(addr, size, new);
+                    self.st(addr, size, new)?;
                 } else {
                     self.set_r(rt, old);
                 }
@@ -830,10 +1159,10 @@ impl Interpreter {
                 self.group_exec[0] += 1;
                 let size = 1u8 << size_log2;
                 let addr = self.rsp(rn);
-                let a = self.mem.load(addr, size);
+                let a = self.ld(addr, size)?;
                 self.set_r(rt, a);
                 if pair {
-                    let b = self.mem.load(addr + size as u64, size);
+                    let b = self.ld(addr + size as u64, size)?;
                     self.set_r(rt2, b);
                 }
             }
@@ -841,24 +1170,24 @@ impl Interpreter {
                 self.group_exec[0] += 1;
                 let size = 1u8 << size_log2;
                 let addr = self.rsp(rn);
-                self.mem.store(addr, size, self.r(rt));
+                self.st(addr, size, self.r(rt))?;
                 if pair {
-                    self.mem.store(addr + size as u64, size, self.r(rt2));
+                    self.st(addr + size as u64, size, self.r(rt2))?;
                 }
                 self.set_r(rs, 0); // exclusive success (single core)
             }
             Insn::Ldar { rt, rn, size_log2 } => {
                 self.group_exec[0] += 1;
-                let val = self.mem.load(self.rsp(rn), 1u8 << size_log2);
+                let val = self.ld(self.rsp(rn), 1u8 << size_log2)?;
                 self.set_r(rt, val);
             }
             Insn::Stlr { rt, rn, size_log2 } => {
                 self.group_exec[0] += 1;
-                self.mem.store(self.rsp(rn), 1u8 << size_log2, self.r(rt));
+                self.st(self.rsp(rn), 1u8 << size_log2, self.r(rt))?;
             }
             Insn::Ldapr { rt, rn, size_log2 } => {
                 self.group_exec[0] += 1;
-                let val = self.mem.load(self.rsp(rn), 1u8 << size_log2);
+                let val = self.ld(self.rsp(rn), 1u8 << size_log2)?;
                 self.set_r(rt, val);
             }
             // ==================== CRC32 (group 11) ====================
@@ -1009,39 +1338,70 @@ impl Interpreter {
                 let dst = self.r(rd);
                 match kind {
                     BfmKind::Bfm => {
-                        let width: u64 = (bits as u64).wrapping_sub(imms as u64).wrapping_sub(1);
-                        let hi = if imms == 63 { 0 } else { !0u64 >> (imms + 1) };
-                        let lo = !0u64 >> (bits - 1 - imms); // ones(width)
-                        let wmask = (hi ^ lo) & mask;
-                        let dst_val = (dst & !wmask & mask)
-                            | (((src >> immr) | (src << (bits - immr))) & wmask);
-                        self.set_r(rd, dst_val & mask);
+                        // Insert: dst[immr+width-1 : immr] = src[width-1:0]
+                        // (wrapping rotate), all other dst bits preserved.
+                        // `imms` encodes ~width: width = bits - imms - 1.
+                        let width: u32 = bits - (imms & (bits - 1)) - 1;
+                        if width == 0 {
+                            self.set_r(rd, dst);
+                        } else {
+                            let ones = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
+                            let sh = immr % bits;
+                            let field = src & ones;
+                            let (placed, wm) = if is64 {
+                                (field.rotate_right(sh), ones.rotate_right(sh))
+                            } else {
+                                (
+                                    ((field as u32).rotate_right(sh)) as u64,
+                                    ((ones as u32).rotate_right(sh)) as u64,
+                                )
+                            };
+                            self.set_r(rd, ((dst & !wm) | (placed & wm)) & mask);
+                        }
                     }
                     BfmKind::Sbfm => {
-                        // dst = ROR(src, immr) sign-extended from bit imms
-                        let rot = src.rotate_right(immr % bits as u32);
-                        let v = if imms == bits - 1 {
-                            rot
-                        } else {
+                        // Signed: extract width = imms-immr+1 bits from immr
+                        // and sign-extend. W-form extracting through bit 31
+                        // sign-extends into the upper word.
+                        if (imms as u32) < immr.min(bits - 1) {
+                            // s < r: rotate-model fallback (LSL/ASR alias
+                            // territory — rare on the boot path)
+                            let rot = src.rotate_right(immr % bits);
                             let sign_bit = (rot >> imms) & 1;
-                            let mut ext = rot & ((1u64 << (imms + 1)) - 1);
+                            let mut v = rot & ((1u64 << (imms + 1)) - 1);
                             if sign_bit == 1 {
-                                ext |= !0u64 << (imms + 1);
+                                v |= (!0u64) << (imms + 1);
                             }
-                            ext
-                        };
-                        self.set_r(rd, v & mask);
+                            self.set_r(rd, v & mask);
+                        } else {
+                            let width = imms - immr + 1;
+                            let ones = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
+                            let field = (src >> immr) & ones;
+                            let sign = (field >> (width - 1)) & 1;
+                            let mut v = field;
+                            if sign == 1 {
+                                v |= !ones;
+                            }
+                            if !is64 && width == 32 && sign == 1 {
+                                v |= 0xFFFF_FFFF_0000_0000;
+                            }
+                            self.set_r(rd, v);
+                        }
                     }
                     BfmKind::Ubfm => {
-                        let rot = src.rotate_right(immr % bits as u32);
-                        let w = if imms >= bits - 1 {
-                            rot
+                        // Unsigned: LSR alias (imms == bits-1), LSL alias
+                        // (s < r → dst = src << (bits-immr)), else UBFX:
+                        // dst = (src >> immr) & ones(imms-immr+1).
+                        if imms == bits - 1 {
+                            self.set_r(rd, (src >> (immr.min(bits - 1))) & mask);
+                        } else if (imms as u32) < immr.min(bits - 1) {
+                            let sh = (bits as u64) - (immr.min(bits - 1) as u64);
+                            self.set_r(rd, src.wrapping_shl(sh as u32) & mask);
                         } else {
-                            rot & ((1u64 << (imms + 1)) - 1)
-                        };
-                        // UBFM with imms+1==immr → LSL alias
-                        let w = if imms + 1 == immr { src << (bits - immr) } else { w };
-                        self.set_r(rd, w & mask);
+                            let width = imms - immr + 1;
+                            let ones = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
+                            self.set_r(rd, ((src >> immr) & ones) & mask);
+                        }
                     }
                 }
             }
@@ -1081,6 +1441,13 @@ impl Interpreter {
                 } else {
                     self.nzcv = (nzcv as u32) << 0; // direct NZCV copy (bits 3..0)
                 }
+            }
+            Insn::MsrSpsel { use_sp } => {
+                // single-bank SP model: the flag is tracked for honesty but
+                // SP_EL0/SP_EL1 share `self.sp` (matches the boot window —
+                // start.s switches banks right before loading the stack it
+                // then uses through the same `sp`).
+                self.sp_sel = use_sp;
             }
             Insn::MsrImm { daifclr, imm4 } => {
                 let bits = (imm4 as u64) << 6; // DAIF bits D[9] A[8] I[7] F[6]
@@ -1145,6 +1512,7 @@ impl Interpreter {
                 let base = v & 0xF_FFFF_FFFF;
                 let _ = op;
                 self.last_tlbi_range = Some((base, scale, num));
+                self.mmu.flush();
             }
             // ==================== SIMD / FP16 / crypto (groups 2,3,4,5,6,7,8,9,10,19) ====================
             Insn::Vdot { vd, vn, vm, unsigned, q, two_s } => {
@@ -1465,7 +1833,7 @@ impl Interpreter {
                 let addr = self.rsp(rn) + ((imm12 as u64) << 4);
                 let mut v = 0u128;
                 for i in 0..16 {
-                    let b = self.mem.load(addr + i, 1);
+                    let b = self.ld(addr + i, 1)?;
                     v |= (b as u128) << (i * 8);
                 }
                 self.v.v[rt as usize] = v;
@@ -1475,18 +1843,18 @@ impl Interpreter {
                 let v = self.v.v[rt as usize];
                 for i in 0..16 {
                     let b = ((v >> (i * 8)) & 0xFF) as u64;
-                    self.mem.store(addr + i, 1, b);
+                    self.st(addr + i, 1, b)?;
                 }
             }
             Insn::VldrD { rt, rn, imm12 } => {
                 let addr = self.rsp(rn) + ((imm12 as u64) << 3);
-                let lo = self.mem.load(addr, 8);
+                let lo = self.ld(addr, 8)?;
                 self.v.v[rt as usize] = lo as u128;
             }
             Insn::VstrD { rt, rn, imm12 } => {
                 let addr = self.rsp(rn) + ((imm12 as u64) << 3);
                 let lo = self.v.v[rt as usize] as u64;
-                self.mem.store(addr, 8, lo);
+                self.st(addr, 8, lo)?;
             }
             // ==================== FP16 scalar (groups 3/4) ====================
             Insn::Fjcvtzs { rd, rn } => {
@@ -1698,8 +2066,38 @@ impl Interpreter {
                         return self.sys.amevcntr0[n as usize];
                     }
                 }
+                // Early-boot named surface (verified vs the real start.s)
+                match enc {
+                    // T8030 (A13): implementer 0x61, variant 1, arch 0xF,
+                    // part 0x120, rev 0 — variant≠0 skips the stepping-halt
+                    sysreg::MIDR_EL1 => return 0x611F_0120,
+                    sysreg::MPIDR_EL1 => return 0x8000_0000, // core 0, MT=0
+                    sysreg::CNTFRQ_EL0 => return 24_000_000, // Apple 24 MHz
+                    sysreg::CNTPCT_EL0 => return self.ns_budget_used / 40,
+                    sysreg::CTR_EL0 => return 0x8444_C004,
+                    sysreg::CURRENT_EL => return 0x4, // EL1
+                    // 40-bit PA, 4K+16K granules, 48-bit VA
+                    sysreg::ID_AA64MMFR0_EL1 => {
+                        return (2 << 0) // PARange = 40-bit
+                            | (1 << 20)  // TGran16 supported
+                            | (0xF << 24) // TGran64 unsupported
+                            | (5 << 32) // TSH = 48-bit
+                    }
+                    sysreg::ID_AA64MMFR1_EL1 => return 0,
+                    // start.s boot-stage poll: bit 1 must read as set
+                    sysreg::APPLE_BOOT_STAGE => {
+                        return *self.sysreg_store.get(&enc).unwrap_or(&0) | 0b10
+                    }
+                    sysreg::MAIR_EL1 => return *self.sysreg_store.get(&enc).unwrap_or(&0),
+                    sysreg::OSLAR_EL1 => return 0,
+                    _ => {}
+                }
                 self.unknown_sysreg_reads += 1;
-                0
+                if self.unknown_sysreg_seen.len() < 64 && !self.unknown_sysreg_seen.contains(&enc) {
+                    self.unknown_sysreg_seen.push(enc);
+                }
+                // generic round-trip storage (Apple-custom regs)
+                *self.sysreg_store.get(&enc).unwrap_or(&0)
             }
         }
     }
@@ -1717,10 +2115,22 @@ impl Interpreter {
             self.group_exec[15] += 1;
         }
         match enc {
-            sysreg::SCTLR_EL1 => self.sys.sctlr_el1 = v,
-            sysreg::TTBR0_EL1 => self.sys.ttbr0_el1 = v,
-            sysreg::TTBR1_EL1 => self.sys.ttbr1_el1 = v,
-            sysreg::TCR_EL1 => self.sys.tcr_el1 = v,
+            sysreg::SCTLR_EL1 => {
+                self.sys.sctlr_el1 = v;
+                self.mmu.set_enabled(v & 1 == 1);
+            }
+            sysreg::TTBR0_EL1 => {
+                self.sys.ttbr0_el1 = v;
+                self.mmu.set_ttbr0(v);
+            }
+            sysreg::TTBR1_EL1 => {
+                self.sys.ttbr1_el1 = v;
+                self.mmu.set_ttbr1(v);
+            }
+            sysreg::TCR_EL1 => {
+                self.sys.tcr_el1 = v;
+                self.mmu.set_tcr(v);
+            }
             sysreg::CPACR_EL1 => self.sys.cpacr_el1 = v,
             sysreg::DAIF => self.sys.daif = v,
             sysreg::VBAR_EL1 => self.sys.vbar_el1 = v,
@@ -1748,13 +2158,47 @@ impl Interpreter {
             // MPAM
             sysreg::MPAM0_EL1 => self.sys.mpam0_el1 = v,
             sysreg::MPAM1_EL1 => self.sys.mpam1_el1 = v,
+            // MAIR: stored, attributes not enforced (honest gap)
+            sysreg::MAIR_EL1 => {}
+            // OSLAR (debug OS lock): unlock write, no effect
+            sysreg::OSLAR_EL1 => {}
+            // TLBI (op0=1, CRn=8): full software-TLB invalidate. The
+            // Apple range variant (Insn::TlbiRange) flushes separately.
+            _ if (enc >> 14) & 1 == 0 && (enc >> 7) & 0xF == 8 => {
+                self.mmu.flush();
+                self.group_exec[17] += 1;
+            }
+            // Cache maintenance (op0=1, CRn=7): no cache model — except
+            // DC ZVA, which really zeroes the 64-byte aligned line.
+            _ if (enc >> 14) & 1 == 0 && (enc >> 7) & 0xF == 7 => {
+                let crm = (enc >> 3) & 0xF;
+                let op2 = enc & 7;
+                if crm == 4 && op2 == 1 {
+                    let va = v & !63;
+                    for off in (0..64).step_by(8) {
+                        if self.st(va + off, 8, 0).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
             // ID registers + MPAMIDR are read-only
             sysreg::MPAMIDR_EL1
             | sysreg::ID_AA64ISAR0_EL1
             | sysreg::ID_AA64ISAR1_EL1
             | sysreg::ID_AA64PFR0_EL1
             | sysreg::ID_AA64MMFR2_EL1 => {}
-            _ => self.unknown_sysreg_writes += 1,
+            _ => {
+                self.unknown_sysreg_writes += 1;
+                if self.unknown_sysreg_seen.len() < 64
+                    && !self.unknown_sysreg_seen.contains(&enc)
+                {
+                    self.unknown_sysreg_seen.push(enc);
+                }
+                // generic Apple-custom storage: mrs/orr/msr round-trips
+                // must preserve values (start.s spins on some of them)
+                self.sysreg_store.insert(enc, v);
+            }
         }
     }
 

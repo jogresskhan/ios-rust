@@ -164,6 +164,29 @@ pub enum Insn {
     EorImm { rd: u8, rn: u8, imm: u64, setflags: bool, is64: bool },
     /// CMP (immediate) — SUBS XZR, Rn, #imm.
     CmpImm { rn: u8, imm12: u32, shift: bool, is64: bool },
+    /// AdvSIMD three-same integer (per-lane ADD/SUB, compares CM*,
+    /// S/UMIN/MAX (+P pairwise), MUL) — width from size, U splits signed/
+    /// unsigned variants. Boot: `cmhi v0.16b, …` @ 0x…8169e04 (18C66 memscan).
+    V3SameInt { rd: u8, rn: u8, rm: u8, size: u8, u: bool, q: bool, op: V3Op },
+    /// AdvSIMD three-same logical (U=0: AND/BIC/ORR/ORN; U=1: EOR/BSL/BIT/EON)
+    /// — size field selects the op within the U family; Q selects .16b/.8b.
+    /// Boot: `orr v0.16b, v0.16b, v1.16b` @ 0x…8169de8 (real 18C66 memscan).
+    VLogic3 { rd: u8, rn: u8, rm: u8, size: u8, u: bool, q: bool },
+    /// Across-lane reduces — {S,U}MINV/{S,U}MAXV/ADDV, size selects the
+    /// result width (00=B, 01=H). Boot: `uminv b1, v0.16b` @ 0x…8169df4.
+    VReduce { rd: u8, rn: u8, size: u8, op: VReduceOp, q: bool },
+    /// Scalar FP ↔ GPR move — `fmov w2, s1` / `fmov d0, x3` (int←scalar) and
+    /// `fmov s0, w3` / `fmov d0, x3` (scalar←int). Boot: `fmov w2, s1` @ 0x…8169df8.
+    FmovGprVec { rt: u8, rn: u8, is64: bool, to_vec: bool },
+    /// MOVI (vector, 64-bit lanes — cmode 111x): immh=0, opcode=111001,
+    /// bit11=0. imm8 = bits[9:5] | (immb<<5) and the 64-bit immediate
+    /// EXPANDS each imm8 bit into a byte (bit i → byte i = 0xFF/0x00) —
+    /// measured 12/12 against capstone incl. `movi v0.2d, #0xffffffffffffffff`
+    /// (0x6F07E7E0, real 18C66 boot @ 0x…7b8cbf4).
+    MoviVec64 { rd: u8, q: bool, imm8: u8 },
+    /// CMN (register/immediate) — `adds wzr/xzr, xn, …` (add-flags test).
+    CmnImm { rn: u8, imm12: u32, shift: bool, is64: bool },
+    CmnReg { rn: u8, rm: u8, kind: ShiftKind, imm6: u32, is64: bool },
     /// CMP (register) — SUBS XZR, Rn, Rm{,shift}.
     CmpReg { rn: u8, rm: u8, kind: ShiftKind, imm6: u32, is64: bool },
     /// B — `imm` is the sign-extended byte offset from the B's own PC.
@@ -349,6 +372,9 @@ pub enum Insn {
     Ccmp { rn: u8, rm_imm: u8, nzcv: u8, cond: Cond, ccmn: bool, is64: bool },
     /// MSR (immediate): DAIFSet/DAIFClr.
     MsrImm { daifclr: bool, imm4: u8 },
+    /// MSR (immediate) SPSel — `msr spsel, #0/#1` (keystone: d50040bf /
+    /// d50041bf; the stack-select bit is instruction bit 8).
+    MsrSpsel { use_sp: bool },
     // ------------------------------------------------------------------
     // PAC (v8.3 pointer authentication — ARM hint-space group 0xDA)
     // ------------------------------------------------------------------
@@ -661,6 +687,38 @@ pub enum FpType {
 /// Decode one 32-bit A64 word. `pc` is the address of the instruction
 /// (kept in the signature for API symmetry and future literal-pool work;
 /// all PC-relative immediates are stored relative to it).
+/// AdvSIMD three-same integer op (opcode bits[15:10] + U).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum V3Op {
+    Add,
+    Sub,
+    Cmgt,
+    Cmhi,
+    Cmge,
+    Cmhs,
+    Cmeq,
+    Cmtst,
+    Smin,
+    Umin,
+    Smax,
+    Umax,
+    Smaxp,
+    Umaxp,
+    Sminp,
+    Uminp,
+    Mul,
+}
+
+/// Across-lane reduce op (bits[17:16] + U + opcode bits[15:10]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VReduceOp {
+    Sminv,
+    Uminv,
+    Smaxv,
+    Umaxv,
+    Addv,
+}
+
 pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
     let is64 = w >> 31 == 1;
 
@@ -714,7 +772,20 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
     if (w & 0xFFF0_0000) == 0xD530_0000 {
         return Some(Insn::Mrs { rt: reg(w, 0), sysreg: sysreg_bits(w) });
     }
-    if (w & 0xFFF0_0000) == 0xD510_0000 {
+    // MSR (register) op0=3 lives at 0xD510_xxxx; the TLBI/AT/DC/IC space
+    // (op0=1 — real TLBI VMALLE1 = d508871f, DC ZVA = d50b7420, keystone
+    // verified) shares the L=0 SYS encoding at 0xD508-0xD50F and flows
+    // through the same write_sysreg path (flush/no-op arms there). The
+    // Apple v8.4 TLBI-range words are decoded later by exact match —
+    // exclude them here or this branch would swallow them.
+    let is_tlbi_range = matches!(
+        w & 0xFFFF_FFE0,
+        0xD508_8220 | 0xD508_8520 | 0xD508_8620 | 0xD508_82E0 | 0xD508_85E0 | 0xD508_86E0
+            | 0xD508_8260 | 0xD508_8560 | 0xD508_8660
+    );
+    if !is_tlbi_range
+        && ((w & 0xFFF0_0000) == 0xD510_0000 || (w & 0xFFF8_0000) == 0xD508_0000)
+    {
         return Some(Insn::Msr { sysreg: sysreg_bits(w), rt: reg(w, 0) });
     }
 
@@ -781,7 +852,14 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
         let rn = reg(w, 5);
         let rd = reg(w, 0);
         if setflags && rd == 31 {
-            return Some(Insn::CmpImm { rn, imm12, shift, is64 });
+            // Rd=WZR: SUBS→CMP (subtract) / ADDS→CMN (compare-negative).
+            // start.s's chain terminator is `adds wzr, w12, #1` — decoding
+            // that as CMP inverted the test and the fixup walk ran away.
+            return if subtract {
+                Some(Insn::CmpImm { rn, imm12, shift, is64 })
+            } else {
+                Some(Insn::CmnImm { rn, imm12, shift, is64 })
+            };
         }
         return Some(if subtract {
             Insn::SubImm { rd, rn, imm12, shift, setflags, is64 }
@@ -825,7 +903,11 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
         let rn = reg(w, 5);
         let rm = reg(w, 16);
         if setflags && rd == 31 {
-            return Some(Insn::CmpReg { rn, rm, kind, imm6, is64 });
+            return if subtract {
+                Some(Insn::CmpReg { rn, rm, kind, imm6, is64 })
+            } else {
+                Some(Insn::CmnReg { rn, rm, kind, imm6, is64 })
+            };
         }
         return Some(Insn::AddSubReg {
             rd,
@@ -1460,6 +1542,12 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
         return Some(Insn::MsrImm { daifclr, imm4: ((w >> 8) & 0xF) as u8 });
     }
 
+    // --- MSR (immediate) SPSel (keystone oracle: #0=d50040bf, #1=d50041bf
+    //     → op1=0, CRm=4, value in bit 8; placed after the DAIF match) ---
+    if (w & 0xFFFF_C01F) == 0xD500_401F {
+        return Some(Insn::MsrSpsel { use_sp: (w >> 8) & 1 == 1 });
+    }
+
     // --- PAC family: 1101 1010 100 S 1 001010? (group bits31:24 = 0xDA) ---
     if (w & 0xFF00_0000) == 0xDA00_0000 && (w >> 16) & 0xFF == 0xC1 {
         if let Some(p) = decode_pac(w) {
@@ -1545,9 +1633,127 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
         });
     }
 
-    // =====================================================================
-    // AdvSIMD — three-same / crypto / FP16 / two-reg-misc / indexed
-    // =====================================================================
+    // --- AdvSIMD three-same LOGICAL: bits[28:24]==01110, bit21=1,
+    //     opcode bits[15:10]==000111. U(29)+size(23:22) pick one of
+    //     AND/BIC/ORR/ORN (U=0) or EOR/BSL/BIT/EON (U=1); Q picks .16b/.8b.
+    //     (capstone: 0x4E201C00=and, 0x4E601C00=bic, 0x4EA01C00=orr/mov,
+    //     0x4EE01C00=orn, 0x6E201C00=eor, 0x6EA01C00=bit, 0x6EE01C00=eon.)
+    if (w & 0x9F00_0000) == 0x0E00_0000
+        && (w >> 21) & 1 == 1
+        && (w & 0xFC00) == 0x1C00
+    {
+        return Some(Insn::VLogic3 {
+            rd: reg(w, 0),
+            rn: reg(w, 5),
+            rm: reg(w, 16),
+            size: ((w >> 22) & 3) as u8,
+            u: (w >> 29) & 1 == 1,
+            q: (w >> 30) & 1 == 1,
+        });
+    }
+
+    // --- AdvSIMD across-lane reduce: bits[28:24]==01110, size(23:22)==00,
+    //     bit21=1, bits[20:18]==000, opcode bits[15:10]: 101010 = MINV/MAXV
+    //     (bit16: 1=min, 0=max; U: 0=signed, 1=unsigned), 101110+bit16=ADDV.
+    //     (capstone: 0x6E31A801=uminv, 0x0E31A801=sminv, 0x6E30A801=umaxv,
+    //     0x4E30A801=smaxv, 0x4E31B801=addv.)
+    if (w & 0x9F00_0000) == 0x0E00_0000
+        && (w >> 22) & 3 == 0
+        && (w >> 21) & 1 == 1
+        && (w >> 17) & 0xF == 0b1000
+    {
+        let size = ((w >> 22) & 3) as u8; // always 0 here; kept for exec shape
+        let op = match ((w >> 10) & 0x3F, (w >> 16) & 1, (w >> 29) & 1) {
+            (0b101010, 1, 0) => VReduceOp::Sminv,
+            (0b101010, 1, 1) => VReduceOp::Uminv,
+            (0b101010, 0, 0) => VReduceOp::Smaxv,
+            (0b101010, 0, 1) => VReduceOp::Umaxv,
+            (0b101110, 1, 0) => VReduceOp::Addv,
+            _ => return None,
+        };
+        return Some(Insn::VReduce {
+            rd: reg(w, 0),
+            rn: reg(w, 5),
+            size,
+            op,
+            q: (w >> 30) & 1 == 1,
+        });
+    }
+
+    // --- AdvSIMD three-same INTEGER arithmetic/compare: bits[28:24]==01110,
+    //     bit21=1; opcode bits[15:10] + U(29) selects the op; size(23:22)
+    //     selects the element width (00=B,01=H,10=S,11=D).
+    //     (capstone: 100001=ADD/SUB, 001101=CMGT/CMHI, 001111=CMGE/CMHS,
+    //     100011=CMTST/CMEQ, 011011=SMIN/UMIN, 011001=SMAX/UMAX,
+    //     101001=SMAXP/UMAXP, 101011=SMINP/UMINP, 100111=MUL.)
+    //     Opcodes outside the map (aese/sha/sq…) fall through to decode_simd.
+    if (w & 0x9F00_0000) == 0x0E00_0000 && (w >> 21) & 1 == 1 {
+        let v3op = match ((w >> 10) & 0x3F, (w >> 29) & 1 == 1) {
+            (0b100001, false) => Some(V3Op::Add),
+            (0b100001, true) => Some(V3Op::Sub),
+            (0b001101, false) => Some(V3Op::Cmgt),
+            (0b001101, true) => Some(V3Op::Cmhi),
+            (0b001111, false) => Some(V3Op::Cmge),
+            (0b001111, true) => Some(V3Op::Cmhs),
+            (0b100011, false) => Some(V3Op::Cmtst),
+            (0b100011, true) => Some(V3Op::Cmeq),
+            (0b011011, false) => Some(V3Op::Smin),
+            (0b011011, true) => Some(V3Op::Umin),
+            (0b011001, false) => Some(V3Op::Smax),
+            (0b011001, true) => Some(V3Op::Umax),
+            (0b101001, false) => Some(V3Op::Smaxp),
+            (0b101001, true) => Some(V3Op::Umaxp),
+            (0b101011, false) => Some(V3Op::Sminp),
+            (0b101011, true) => Some(V3Op::Uminp),
+            (0b100111, false) => Some(V3Op::Mul),
+            _ => None,
+        };
+        if let Some(op) = v3op {
+            return Some(Insn::V3SameInt {
+                rd: reg(w, 0),
+                rn: reg(w, 5),
+                rm: reg(w, 16),
+                size: ((w >> 22) & 3) as u8,
+                u: (w >> 29) & 1 == 1,
+                q: (w >> 30) & 1 == 1,
+                op,
+            });
+        }
+        // fall through: crypto/two-reg-misc siblings handled by decode_simd
+    }
+
+    // --- Advanced SIMD modified/shift-imm group, MOVI zero form:
+    //     bits[28:24]==01111, immh(23:19)=0, immb(18:16)=0,
+    //     opcode(15:11)=11100, bit10=1, Rn(9:5)=0 — the word zeroes the
+    //     vector for any U/Q/Rd (keystone: movi v0.2d,#0 = 0x6F00E400,
+    //     movi v3.16b,#0 = 0x4F00E403, movi d0,#0 = 0x2F00E400).
+    //     Boot path: `movi v0.2d, #0; stur q0, …` at 0x…7b80824 (real
+    //     18C66 `start` struct-zeroing idiom). Nonzero-movi/ucvtf/fmov
+    //     siblings (bits 23:19 or 15:11 differ) stay undecoded here. ---
+    if (w & 0x9FF8_FC00) == 0x0F00_E400 {
+        let imm8 = (((w >> 5) & 0x1F) | ((w >> 16) & 7) << 5) as u8;
+        return Some(Insn::MoviVec64 { rd: reg(w, 0), q: (w >> 30) & 1 == 1, imm8 });
+    }
+
+    // --- Scalar FP ↔ GPR move (FMOD-group opcode bits[20:16]: 00110 int←fp,
+    //     00111 fp←int; bit31 = 64-bit x/d form).
+    //     (capstone: 0x1E260022=fmov w2,s1, 0x9E670060=fmov d0,x3,
+    //     0x1E270060=fmov s0,w3.) Other bits[20:16] opcodes in this mask
+    //     (fjcvtzs 0b11110, fcvtzs…) fall through to their own handlers.
+    if (w & 0x7FA0_FC00) == 0x1E20_0000
+        && ((w >> 16) & 0x1F == 0b00110 || (w >> 16) & 0x1F == 0b00111)
+    {
+        return Some(Insn::FmovGprVec {
+            rt: reg(w, 0),
+            rn: reg(w, 5),
+            is64: (w >> 31) & 1 == 1,
+            to_vec: (w >> 16) & 0x1F == 0b00111,
+        });
+    }
+
+    // --- Legacy SIMD dispatcher (three-same remainder: crypto AES/SHA,
+    //     two-reg-misc, FP16, …). My boot-path guards above took their
+    //     slice; everything else lands here. ---
     let simd_group = w & 0x9F00_0000;
     if simd_group == 0x0E00_0000 || simd_group == 0x8E00_0000 {
         if let Some(v) = decode_simd(w) {
@@ -2411,6 +2617,416 @@ mod tests {
         // Inferno disas_apple_insn: GENTER when bits[9:5]==1
         assert!(matches!(decode(0, 0x00001420), Some(Insn::Genter { .. })));
         assert!(matches!(decode(0, 0x00001400), Some(Insn::Gexit { .. })));
+    }
+
+    const HLT: u32 = 0xD440_0000; // hlt #0 — the interpreter's clean stop
+    const Z: u32 = 1 << 2;
+    const C: u32 = 1 << 1;
+
+    #[test]
+    fn gap_vlogic3_family() {
+        // capstone-verified: the 8 logical three-same ops
+        use Insn::VLogic3;
+        assert_eq!(decode(0, 0x4E20_1C00), Some(VLogic3 { rd: 0, rn: 0, rm: 0, size: 0, u: false, q: true })); // and
+        assert_eq!(decode(0, 0x4E60_1C00), Some(VLogic3 { rd: 0, rn: 0, rm: 0, size: 1, u: false, q: true })); // bic
+        assert_eq!(decode(0, 0x4EA0_1C00), Some(VLogic3 { rd: 0, rn: 0, rm: 0, size: 2, u: false, q: true })); // orr (mov alias when rn==rm)
+        assert_eq!(decode(0, 0x4EE0_1C00), Some(VLogic3 { rd: 0, rn: 0, rm: 0, size: 3, u: false, q: true })); // orn
+        assert_eq!(decode(0, 0x6E20_1C00), Some(VLogic3 { rd: 0, rn: 0, rm: 0, size: 0, u: true, q: true })); // eor
+        assert_eq!(decode(0, 0x6EA0_1C00), Some(VLogic3 { rd: 0, rn: 0, rm: 0, size: 2, u: true, q: true })); // bit
+        assert_eq!(decode(0, 0x6EE0_1C00), Some(VLogic3 { rd: 0, rn: 0, rm: 0, size: 3, u: true, q: true })); // eon
+        // Q=0 (.8b) + the REAL boot word (orr v0.16b, v0.16b, v1.16b)
+        assert_eq!(
+            decode(0, 0x0EA0_1C00),
+            Some(VLogic3 { rd: 0, rn: 0, rm: 0, size: 2, u: false, q: false })
+        );
+        assert_eq!(
+            decode(0, 0x4EA1_1C00),
+            Some(VLogic3 { rd: 0, rn: 0, rm: 1, size: 2, u: false, q: true })
+        );
+        // NEGATIVE: mul (opcode 100111) must not match
+        assert_ne!(decode(0, 0x4E20_9C00), decode(0, 0x4E20_1C00));
+    }
+
+    #[test]
+    fn gap_v3same_int_family() {
+        use Insn::V3SameInt;
+        use V3Op::*;
+        // capstone: cmhi v0.16b, v0.16b, v1.16b (the REAL boot word 0x6E213400
+        // — fields: rd=0, rn=0, rm=1, size=0, u=1, q=1)
+        assert_eq!(decode(0, 0x6E21_3400), Some(V3SameInt { rd: 0, rn: 0, rm: 1, size: 0, u: true, q: true, op: Cmhi }));
+        // capstone probes: add/sub share 100001 (U selects)
+        assert_eq!(decode(0, 0x4E21_8401), Some(V3SameInt { rd: 1, rn: 0, rm: 1, size: 0, u: false, q: true, op: Add }));
+        assert_eq!(decode(0, 0x6E21_8401), Some(V3SameInt { rd: 1, rn: 0, rm: 1, size: 0, u: true, q: true, op: Sub }));
+        // cmgt/cmge/cmeq/cmtst
+        assert_eq!(decode(0, 0x4E21_3401).map(|i| matches!(i, Insn::V3SameInt { op: Cmgt, .. })), Some(true));
+        assert_eq!(decode(0, 0x4E21_3C01).map(|i| matches!(i, Insn::V3SameInt { op: Cmge, .. })), Some(true));
+        assert_eq!(decode(0, 0x6E21_8C01).map(|i| matches!(i, Insn::V3SameInt { op: Cmeq, .. })), Some(true));
+        assert_eq!(decode(0, 0x4E21_8C01).map(|i| matches!(i, Insn::V3SameInt { op: Cmtst, .. })), Some(true));
+        // umaxp (the boot scan family) + smin/umax
+        assert_eq!(decode(0, 0x6E21_A401).map(|i| matches!(i, Insn::V3SameInt { op: Umaxp, .. })), Some(true));
+        assert_eq!(decode(0, 0x4E21_6C01).map(|i| matches!(i, Insn::V3SameInt { op: Smin, .. })), Some(true));
+        // NEGATIVE: aese (0x4E284820) must NOT take the three-same path —
+        // it falls through to decode_simd (crypto goldens depend on it)
+        assert!(matches!(decode(0, 0x4E28_4820), Some(Insn::Vaes { .. })));
+        // NEGATIVE: suqadd (0b001110) not in the map → decode_simd path
+        assert_eq!(decode(0, 0x4E21_3801), None);
+    }
+
+    #[test]
+    fn gap_v3same_int_exec() {
+        use crate::interp::Interpreter;
+        use crate::{CpuBackend, InterpBudget, MemAccess, StopReason};
+        struct Tv(Vec<u8>);
+        impl MemAccess for Tv {
+            fn load(&mut self, a: u64, s: u8) -> u64 {
+                let mut v = 0u64;
+                for i in 0..s as usize {
+                    v |= (*self.0.get(a as usize + i).unwrap_or(&0) as u64) << (i * 8);
+                }
+                v
+            }
+            fn store(&mut self, a: u64, s: u8, val: u64) {
+                for i in 0..s as usize {
+                    if (a as usize + i) < self.0.len() {
+                        self.0[a as usize + i] = (val >> (i * 8)) as u8;
+                    }
+                }
+            }
+            fn fetch32(&mut self, a: u64) -> u32 {
+                self.load(a, 4) as u32
+            }
+        }
+        // cmhi v0.16b, v0.16b, v1.16b (0x6E213400); hlt
+        let code: Vec<u32> = vec![0x6E21_3400, HLT];
+        let mut mem = vec![0u8; 0x40];
+        for (i, w) in code.iter().enumerate() {
+            mem[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
+        }
+        let mut c = Interpreter::new(Box::new(Tv(mem.clone())));
+        c.set_reset_vector(0);
+        // v0 bytes: [1, 2, 0, 4, …], v1 bytes: [0, 1, 1, 5, …]
+        let v0: u128 = 0x0400_0201; // bytes 0..8 little-endian
+        let v1: u128 = 0x0501_0100;
+        c.v.v[0] = v0;
+        c.v.v[1] = v1;
+        let res = c.run(InterpBudget { max_insn: 4, max_ns: 1_000_000_000 });
+        assert!(matches!(res.stop, StopReason::Halted), "{res:?}");
+        // byte0: 1 > 0 → ff; byte1: 2 > 1 → ff; byte2: 0 > 1 → 00; byte3: 4 > 5 → 00
+        assert_eq!(c.v.v[0] & 0xFFFF_FFFF, 0x0000_FFFF, "cmhi per-byte result");
+    }
+
+    #[test]
+    fn gap_vreduce_family() {
+        use Insn::VReduce;
+        use VReduceOp::*;
+        // capstone: uminv b1, v0.16b (the REAL boot word 0x…: 0x6E31A801)
+        assert_eq!(decode(0, 0x6E31_A801), Some(VReduce { rd: 1, rn: 0, size: 0, op: Uminv, q: true }));
+        assert_eq!(decode(0, 0x0E31_A801), Some(VReduce { rd: 1, rn: 0, size: 0, op: Sminv, q: false }));
+        assert_eq!(decode(0, 0x6E30_A801), Some(VReduce { rd: 1, rn: 0, size: 0, op: Umaxv, q: true }));
+        assert_eq!(decode(0, 0x4E30_A801), Some(VReduce { rd: 1, rn: 0, size: 0, op: Smaxv, q: true }));
+        assert_eq!(decode(0, 0x4E31_B801), Some(VReduce { rd: 1, rn: 0, size: 0, op: Addv, q: true }));
+        // NEGATIVE: the umlsl2 sibling (bits[20:18] != 0)
+        assert_eq!(decode(0, 0x6E31_A001), None);
+    }
+
+    #[test]
+    fn gap_fmov_gpr_vec() {
+        // capstone: fmov w2, s1 (the REAL boot word 0x1E260022)
+        assert_eq!(decode(0, 0x1E26_0022), Some(Insn::FmovGprVec { rt: 2, rn: 1, is64: false, to_vec: false }));
+        // capstone: fmov s0, w3 — dest scalar in bits[4:0], gpr src in bits[9:5]
+        assert_eq!(decode(0, 0x1E27_0060), Some(Insn::FmovGprVec { rt: 0, rn: 3, is64: false, to_vec: true }));
+        // capstone: fmov d0, x3
+        assert_eq!(decode(0, 0x9E67_0060), Some(Insn::FmovGprVec { rt: 0, rn: 3, is64: true, to_vec: true }));
+        // NEGATIVE: fcvtzs-family (bits[20:16] = 10000) must not match
+        assert_eq!(decode(0, 0x1E28_0022), None);
+    }
+
+    #[test]
+    fn gap_movi_vec64_family() {
+        // keystone: movi v0.2d, #0 (the REAL boot word at 0x…7b80824)
+        assert_eq!(decode(0, 0x6F00_E400), Some(Insn::MoviVec64 { rd: 0, q: true, imm8: 0 }));
+        // keystone: movi v3.16b, #0 — U=0, different Rd
+        assert_eq!(decode(0, 0x4F00_E403), Some(Insn::MoviVec64 { rd: 3, q: true, imm8: 0 }));
+        // keystone: movi d0, #0 — Q=0
+        assert_eq!(decode(0, 0x2F00_E400), Some(Insn::MoviVec64 { rd: 0, q: false, imm8: 0 }));
+        // keystone: movi v0.2d, #0xff → imm8 bit0
+        assert_eq!(decode(0, 0x6F00_E420), Some(Insn::MoviVec64 { rd: 0, q: true, imm8: 0x01 }));
+        // capstone: movi v0.2d, #0xffffffffffffffff (REAL boot word 0x6F07E7E0)
+        assert_eq!(decode(0, 0x6F07_E7E0), Some(Insn::MoviVec64 { rd: 0, q: true, imm8: 0xFF }));
+        // Rd sweep within the guard
+        assert_eq!(decode(0, 0x6F00_E41F), Some(Insn::MoviVec64 { rd: 31, q: true, imm8: 0 }));
+
+        // NEGATIVE: siblings must NOT enter the movi-zero guard
+        // (capstone: ucvtf v0.2d, v0.2d, #0x40 — immh != 0)
+        assert_ne!(decode(0, 0x6F40_E400), Some(Insn::MoviVec64 { rd: 0, q: true, imm8: 0 }));
+        // (capstone: fmov v0.2d, #8.0 — opcode bits 15:11 differ)
+        assert_ne!(decode(0, 0x6F00_F400), Some(Insn::MoviVec64 { rd: 0, q: true, imm8: 0 }));
+        // (capstone: undecodable — bit11 set)
+        assert_eq!(decode(0, 0x6F00_EC00), None);
+        // (capstone: undecodable — immh bit set)
+        assert_eq!(decode(0, 0x6F08_E400), None);
+    }
+
+    #[test]
+    fn gap_movi_vec_zero_exec() {
+        use crate::interp::Interpreter;
+        use crate::{CpuBackend, InterpBudget, MemAccess, StopReason};
+        struct Tv(Vec<u8>);
+        impl MemAccess for Tv {
+            fn load(&mut self, a: u64, s: u8) -> u64 {
+                let mut v = 0u64;
+                for i in 0..s as usize {
+                    v |= (*self.0.get(a as usize + i).unwrap_or(&0) as u64) << (i * 8);
+                }
+                v
+            }
+            fn store(&mut self, a: u64, s: u8, val: u64) {
+                for i in 0..s as usize {
+                    if (a as usize + i) < self.0.len() {
+                        self.0[a as usize + i] = (val >> (i * 8)) as u8;
+                    }
+                }
+            }
+            fn fetch32(&mut self, a: u64) -> u32 {
+                self.load(a, 4) as u32
+            }
+        }
+        // the REAL boot sequence: movi v0.2d, #0 ; stur q0, [x8, #0x4e] ; hlt
+        // (real bytes: 0x6F00E400, 0x3C018100 — capstone-verified)
+        let code: Vec<u32> = vec![0x6F00_E400, 0x3C01_8100, HLT];
+        let mut mem = vec![0u8; 0x200];
+        for (i, w) in code.iter().enumerate() {
+            mem[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
+        }
+        let mut c = Interpreter::new(Box::new(Tv(mem.clone())));
+        c.set_reset_vector(0);
+        c.x[8] = 0x100; // stur q0, [x8, #0x4e] → stores 16 B at 0x14e
+        c.v.v[0] = 0xDEAD_BEEF_CAFE_F012_3456_789A_BCDE_F018; // dirty v0
+        let res = c.run(InterpBudget { max_insn: 8, max_ns: 1_000_000_000 });
+        assert!(matches!(res.stop, StopReason::Halted), "{res:?}");
+        assert_eq!(c.v.v[0], 0, "movi v0.2d, #0 zeroes the vector");
+        // the stur q0 must have stored 16 zero bytes at x8+0x4e
+        let stored = &mem[0x14e..0x15e];
+        assert!(stored.iter().all(|&b| b == 0), "stur q0 stored zeros: {stored:02x?}");
+    }
+
+    // ==================== gap: bug #10 — flag ops must never touch SP =====
+    // Found on the REAL 18C66 boot: `cmp x17, w16, uxtw` at
+    // 0xfffffff007ff97e4 wrote its comparison result into SP through
+    // set_rsp(31, …), zeroing the kernel stack → `str xzr, [sp, #8]`
+    // faulted at 0xfffffff007ff97ac after 8.08M real instructions.
+    #[test]
+    fn gap_cmp_ext_never_writes_sp() {
+        use crate::interp::Interpreter;
+        use crate::{CpuBackend, InterpBudget, MemAccess, StopReason};
+        struct Tv(Vec<u8>);
+        impl MemAccess for Tv {
+            fn load(&mut self, a: u64, s: u8) -> u64 {
+                let mut v = 0u64;
+                for i in 0..s as usize {
+                    v |= (*self.0.get(a as usize + i).unwrap_or(&0) as u64) << (i * 8);
+                }
+                v
+            }
+            fn store(&mut self, a: u64, s: u8, val: u64) {
+                for i in 0..s as usize {
+                    if (a as usize + i) < self.0.len() {
+                        self.0[a as usize + i] = (val >> (i * 8)) as u8;
+                    }
+                }
+            }
+            fn fetch32(&mut self, a: u64) -> u32 {
+                self.load(a, 4) as u32
+            }
+        }
+        // capstone: `cmp x17, w16, uxtw` (0xEB30423F) then `hlt #0`
+        let code: Vec<u32> = vec![0xEB30_423F, HLT];
+        let mut mem = Vec::new();
+        for w in &code {
+            mem.extend_from_slice(&w.to_le_bytes());
+        }
+        let mut c = Interpreter::new(Box::new(Tv(mem)));
+        c.set_reset_vector(0);
+        c.x[17] = 0x402;
+        c.x[16] = 0x402;
+        c.sp = 0x1234_5678; // sentinel — CMP must leave it alone
+        let res = c.run(InterpBudget { max_insn: 8, max_ns: 1_000_000_000 });
+        assert!(matches!(res.stop, StopReason::Halted), "{res:?}");
+        assert_eq!(c.sp, 0x1234_5678, "CMP-extended must NEVER write SP");
+        assert_eq!(c.nzcv & Z, Z, "x17 == w16 uxtw → Z set");
+        assert_eq!(c.x[17], 0x402, "source unmodified");
+    }
+
+    #[test]
+    fn gap_cmp_shifted_never_writes_sp() {
+        use crate::interp::Interpreter;
+        use crate::{CpuBackend, InterpBudget, MemAccess, StopReason};
+        struct Tv(Vec<u8>);
+        impl MemAccess for Tv {
+            fn load(&mut self, a: u64, s: u8) -> u64 {
+                let mut v = 0u64;
+                for i in 0..s as usize {
+                    v |= (*self.0.get(a as usize + i).unwrap_or(&0) as u64) << (i * 8);
+                }
+                v
+            }
+            fn store(&mut self, a: u64, s: u8, val: u64) {
+                for i in 0..s as usize {
+                    if (a as usize + i) < self.0.len() {
+                        self.0[a as usize + i] = (val >> (i * 8)) as u8;
+                    }
+                }
+            }
+            fn fetch32(&mut self, a: u64) -> u32 {
+                self.load(a, 4) as u32
+            }
+        }
+        // capstone: `cmp x1, x2, lsl #2` (0xEB02083F) then `hlt #0`
+        let code: Vec<u32> = vec![0xEB02_083F, HLT];
+        let mut mem = Vec::new();
+        for w in &code {
+            mem.extend_from_slice(&w.to_le_bytes());
+        }
+        let mut c = Interpreter::new(Box::new(Tv(mem)));
+        c.set_reset_vector(0);
+        c.x[1] = 0x402;
+        c.x[2] = 0x100; // 0x100 << 2 = 0x400 ≠ 0x402 → C=1 (borrow), Z=0
+        c.sp = 0x1234_5678;
+        let res = c.run(InterpBudget { max_insn: 8, max_ns: 1_000_000_000 });
+        assert!(matches!(res.stop, StopReason::Halted), "{res:?}");
+        assert_eq!(c.sp, 0x1234_5678, "CMP-shifted must NEVER write SP");
+        assert_eq!(c.nzcv & Z, 0, "0x402 != 0x400 → Z clear");
+        assert_eq!(c.nzcv & C, C, "0x402 >= 0x400 → C set (no borrow)");
+    }
+
+    #[test]
+    fn gap_adds_32bit_carry_sets_c() {
+        use crate::interp::Interpreter;
+        use crate::{CpuBackend, InterpBudget, MemAccess, StopReason};
+        struct Tv(Vec<u8>);
+        impl MemAccess for Tv {
+            fn load(&mut self, a: u64, s: u8) -> u64 {
+                let mut v = 0u64;
+                for i in 0..s as usize {
+                    v |= (*self.0.get(a as usize + i).unwrap_or(&0) as u64) << (i * 8);
+                }
+                v
+            }
+            fn store(&mut self, a: u64, s: u8, val: u64) {
+                for i in 0..s as usize {
+                    if (a as usize + i) < self.0.len() {
+                        self.0[a as usize + i] = (val >> (i * 8)) as u8;
+                    }
+                }
+            }
+            fn fetch32(&mut self, a: u64) -> u32 {
+                self.load(a, 4) as u32
+            }
+        }
+        // capstone: `adds w0, w1, w2` (0x2B020020) then `hlt #0`
+        // 0xFFFFFFFF + 1 wraps at bit 31 → C=1, Z=1 (DDI 0487, ADDS 32-bit)
+        let code: Vec<u32> = vec![0x2B02_0020, HLT];
+        let mut mem = Vec::new();
+        for w in &code {
+            mem.extend_from_slice(&w.to_le_bytes());
+        }
+        let mut c = Interpreter::new(Box::new(Tv(mem)));
+        c.set_reset_vector(0);
+        c.x[1] = 0xFFFF_FFFF;
+        c.x[2] = 1;
+        c.sp = 0x1234_5678;
+        let res = c.run(InterpBudget { max_insn: 8, max_ns: 1_000_000_000 });
+        assert!(matches!(res.stop, StopReason::Halted), "{res:?}");
+        assert_eq!(c.x[0] & 0xFFFF_FFFF, 0, "w0 = (0xFFFFFFFF + 1) mod 2^32");
+        assert_eq!(c.nzcv & C, C, "carry out of bit 31 must set C (32-bit width)");
+        assert_eq!(c.nzcv & Z, Z, "result zero → Z");
+    }
+
+    #[test]
+    fn gap_adds_imm_rn31_reads_sp_even_with_flags() {
+        use crate::interp::Interpreter;
+        use crate::{CpuBackend, InterpBudget, MemAccess, StopReason};
+        struct Tv(Vec<u8>);
+        impl MemAccess for Tv {
+            fn load(&mut self, a: u64, s: u8) -> u64 {
+                let mut v = 0u64;
+                for i in 0..s as usize {
+                    v |= (*self.0.get(a as usize + i).unwrap_or(&0) as u64) << (i * 8);
+                }
+                v
+            }
+            fn store(&mut self, a: u64, s: u8, val: u64) {
+                for i in 0..s as usize {
+                    if (a as usize + i) < self.0.len() {
+                        self.0[a as usize + i] = (val >> (i * 8)) as u8;
+                    }
+                }
+            }
+            fn fetch32(&mut self, a: u64) -> u32 {
+                self.load(a, 4) as u32
+            }
+        }
+        // capstone: `adds x2, sp, #0x10` (0xB10043E2) — S=1 with a
+        // destination: Rn=31 is SP (keystone assembles xzr variant → error;
+        // QEMU op_add_sub_imm: cpu_reg_sp for the non-compare path).
+        let code: Vec<u32> = vec![0xB100_43E2, HLT];
+        let mut mem = Vec::new();
+        for w in &code {
+            mem.extend_from_slice(&w.to_le_bytes());
+        }
+        let mut c = Interpreter::new(Box::new(Tv(mem)));
+        c.set_reset_vector(0);
+        c.sp = 0x9000;
+        c.nzcv = 0; // CMN would leave Z=0 for 0x9010 — set below via result
+        let res = c.run(InterpBudget { max_insn: 8, max_ns: 1_000_000_000 });
+        assert!(matches!(res.stop, StopReason::Halted), "{res:?}");
+        assert_eq!(c.x[2], 0x9010, "adds x2, sp, #0x10 reads SP as source");
+        assert_eq!(c.sp, 0x9000, "SP itself unchanged");
+        assert_eq!(c.nzcv & Z, 0, "result 0x9010 != 0 → Z clear");
+    }
+
+    #[test]
+    fn gap_lslv_reg31_is_zr_never_sp() {
+        use crate::interp::Interpreter;
+        use crate::{CpuBackend, InterpBudget, MemAccess, StopReason};
+        struct Tv(Vec<u8>);
+        impl MemAccess for Tv {
+            fn load(&mut self, a: u64, s: u8) -> u64 {
+                let mut v = 0u64;
+                for i in 0..s as usize {
+                    v |= (*self.0.get(a as usize + i).unwrap_or(&0) as u64) << (i * 8);
+                }
+                v
+            }
+            fn store(&mut self, a: u64, s: u8, val: u64) {
+                for i in 0..s as usize {
+                    if (a as usize + i) < self.0.len() {
+                        self.0[a as usize + i] = (val >> (i * 8)) as u8;
+                    }
+                }
+            }
+            fn fetch32(&mut self, a: u64) -> u32 {
+                self.load(a, 4) as u32
+            }
+        }
+        // capstone: `lsl x5, xzr, x3` (0x9AC323E5) then `lsl xzr, x0, x1`
+        // (0x9AC1201F) then `hlt #0`. Data-processing (2 source): register
+        // 31 is ZR for BOTH operands — SP neither readable nor writable.
+        let code: Vec<u32> = vec![0x9AC3_23E5, 0x9AC1_201F, HLT];
+        let mut mem = Vec::new();
+        for w in &code {
+            mem.extend_from_slice(&w.to_le_bytes());
+        }
+        let mut c = Interpreter::new(Box::new(Tv(mem)));
+        c.set_reset_vector(0);
+        c.x[0] = 0xFF;
+        c.x[1] = 4;
+        c.x[3] = 3;
+        c.sp = 0x1234_5678;
+        let res = c.run(InterpBudget { max_insn: 8, max_ns: 1_000_000_000 });
+        assert!(matches!(res.stop, StopReason::Halted), "{res:?}");
+        assert_eq!(c.x[5], 0, "lsl x5, xzr, x3 → 0 (ZR source, not SP)");
+        assert_eq!(c.sp, 0x1234_5678, "LSLV with Rd=31 must discard, not write SP");
     }
 
     #[test]

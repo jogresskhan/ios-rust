@@ -19,14 +19,18 @@ evidence next to it). Update it at the END of every work block.
 
 ---
 
-## M1 — ISA closure: every instruction class decoded  [~]
+## M1 — ISA closure: every instruction class decoded  [~] (98.87% decode / 98.9% exec)
 
-**Progress (2026-10-29, session A):** dp-1-source family (RBIT/REV16/REV32/REV/
-CLZ/CLS, both widths), dp-3 op31 map (SMULH/UMULH), logical-ROR landed —
-**decode 98.59% → 98.69%** (7861938/7966342), exec probe 98.6% → 98.7%
-(+7,697 real words). Two more real-data bugs fixed (#8, #9 below).
-Tool added: `tools/re/oracle/bucket_discover.py` (bucket-driven mask
-derivation + validation, capstone ground truth — the SIMD families next).
+**Progress (2026-10-29, session B — boot-driven):** the boot-real campaign
+pulled SIMD families forward: MOVI-64 (bit→byte imm expansion, measured
+12/12 vs capstone), three-same logical (8 ops), three-same integer
+(ADD/SUB/CM*/MIN/MAX/P/MUL), across-lane reduces ({S,U}MINV/MAXV, ADDV
+with the Apple zero-extension semantics the kernel DEPENDS on — bug #12),
+scalar↔GPR fmov. **decode 98.69% → 98.87%** (7876635/7966342), exec probe
+98.9%. Bugs #10/#10b fixed (SP corruption via flag-setting add/sub —
+see Layer 2.11c). Remaining buckets: FP three-same (fadd/fsub/fmla,
+0x4e), shift-imm remainder (sqshlu/uqshl/sri/sli, 0x6f), scalar FP
+(0x1e), SIMD ld/st multiple (0x4c/0x3c), ~46k literal-pool words.
 
 **REAL-DATA BUG #8 (correctness!):** the dp-3 guard `(w>>22)&1==0` rejected
 UMULH (~1.5k words) AND misdecoded SMULH (op31=010) as MADD — silently wrong
@@ -58,6 +62,15 @@ every new family pinned by capstone/keystone-derived `gap_*` goldens;
 `cargo test -p a13-cpu` green.
 
 ## M2 — rebase / chained-fixups image loading  [ ]  ← THE first-boot unlock
+
+**Evidence this is the unlock (2026-10-29):** boot-real now retires
+**8,136,610 real instructions** (kernel's own thread_starts chained walk
+completes, MMU walks its own tables with 0 faults) and stops at
+`ldr w9,[x0,#4]` with `x0 = [x20+8] = NULL` @ 0x…81377b4 — the kernel
+dereferencing an **un-rebased chained-fixup pointer from `__DATA`** while
+parsing "LSSeaico…" launch-services data. The kernel's OWN thread_starts
+walk works because it rebases with its own loop; the general `__DATA`
+pointers are still OUR (iBoot's) job.
 
 The kernel's first function RETs; the first indirect call jumps through a GOT
 entry that ships ZEROED — iBoot rebases it. We must do what iBoot does:

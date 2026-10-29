@@ -158,18 +158,31 @@ impl Device for Ram {
     fn ram_mut(&mut self) -> Option<&mut Vec<u8>> {
         Some(&mut self.data)
     }
-    fn read(&mut self, off: u64, _size: u8) -> u64 {
+    fn read(&mut self, off: u64, size: u8) -> u64 {
         let o = off as usize;
         if o + 8 <= self.data.len() {
-            u64::from_le_bytes(self.data[o..o + 8].try_into().unwrap())
+            let raw = u64::from_le_bytes(self.data[o..o + 8].try_into().unwrap());
+            // honor the access width: sub-8 loads return exactly `size`
+            // bytes (zero-extended) — a 32-bit LDR must not observe the
+            // neighboring word.
+            let bytes = (size as u32).clamp(1, 8) as u32;
+            if bytes >= 8 {
+                raw
+            } else {
+                raw & ((1u64 << (bytes * 8)) - 1)
+            }
         } else {
             0
         }
     }
-    fn write(&mut self, off: u64, _size: u8, val: u64) {
+    fn write(&mut self, off: u64, size: u8, val: u64) {
         let o = off as usize;
-        if o + 8 <= self.data.len() {
-            self.data[o..o + 8].copy_from_slice(&val.to_le_bytes());
+        // honor the access width: a 32-bit STR must not clobber the
+        // neighboring word.
+        let bytes = (size as usize).clamp(1, 8);
+        if o + bytes <= self.data.len() {
+            self.data[o..o + bytes]
+                .copy_from_slice(&val.to_le_bytes()[..bytes]);
         }
     }
 }

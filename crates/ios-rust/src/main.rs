@@ -28,6 +28,7 @@ use virt::{machine_boot, Machine, MachineConfig, QemuCli, QEMU_COMPAT_VERSION};
 
 mod boot_full;
 mod boot_first;
+mod boot_real;
 mod host_restore;
 
 fn main() {
@@ -71,11 +72,41 @@ fn main() {
             }
             boot_first::run(fixtures.as_deref(), &out_dir)
         }
+        Some("boot-real") => {
+            // boot-real [fixtures-dir] [max-insn] — the REAL first boot
+            let mut fixtures = None;
+            let mut max_insn: u64 = 10_000_000;
+            for a in &args[1..] {
+                let p = Path::new(a);
+                if p.is_dir() {
+                    fixtures = Some(p.to_path_buf());
+                } else if let Ok(n) = a.parse::<u64>() {
+                    max_insn = n;
+                }
+            }
+            match boot_full::fixtures_dir()
+                .map(|d| boot_real::run(&d, max_insn))
+            {
+                Some(Ok(r)) => {
+                    boot_real::print_report(&r);
+                    0
+                }
+                Some(Err(e)) => {
+                    eprintln!("boot-real failed: {e}");
+                    4
+                }
+                None => {
+                    eprintln!("fixtures not found");
+                    2
+                }
+            }
+        }
         Some("sandbox") => cmd_sandbox(&args[1..]),
         _ => {
             eprintln!(
                 "ios-rust {} — single-binary T8030 emulator + restore pipeline\n\n\
-                 commands:\n  run      qemu-system-aarch64 compatible subset (-M apple-t8030 …)\n  restore  parse + ramdisk-variant IPSW pipeline\n  boot     restore → install → homescreen ladder (honest status)\n  boot-full  ipsw → full-root → real-kernel → springboard (fixtures-aware)\n  boot-first  irestore staging (SHA-384 verify) → FIRST BOOT on real bytes\n  parity   100%-parity ledger status\n  vault    research-S3 (list/get/put/usage)\n  selftest invariants\n  dsc      dyld shared cache reader (info/images/rebase/symbols/a2o/o2a)\n  kc       kernelcache (info/version/kexts) — LZSS/LZFSE decode\n  devices  device database + ipsw.me catalog (list/lookup/board/cpuid/t8030/ipsw-me)\n  vulns    iOS vulnerability research KB (list/show/search/mitigations/frida/tools)\n  dc       DeviceCheck token internals (demo/constants/entitlements)\n  xnu      XNU ARM64 ABI KB (syscalls/traps/errno/boot/boot-order/abi)\n  host     Linux host integration (check/deps/qemu)",
+                 commands:\n  run      qemu-system-aarch64 compatible subset (-M apple-t8030 …)\n  restore  parse + ramdisk-variant IPSW pipeline\n  boot     restore → install → homescreen ladder (honest status)\n  boot-full  ipsw → full-root → real-kernel → springboard (fixtures-aware)\n  boot-first  irestore staging (SHA-384 verify) → FIRST BOOT on real bytes
+  boot-real  the REAL first boot: real XNU handoff → real MMU → real exec\n  parity   100%-parity ledger status\n  vault    research-S3 (list/get/put/usage)\n  selftest invariants\n  dsc      dyld shared cache reader (info/images/rebase/symbols/a2o/o2a)\n  kc       kernelcache (info/version/kexts) — LZSS/LZFSE decode\n  devices  device database + ipsw.me catalog (list/lookup/board/cpuid/t8030/ipsw-me)\n  vulns    iOS vulnerability research KB (list/show/search/mitigations/frida/tools)\n  dc       DeviceCheck token internals (demo/constants/entitlements)\n  xnu      XNU ARM64 ABI KB (syscalls/traps/errno/boot/boot-order/abi)\n  host     Linux host integration (check/deps/qemu)",
                 env!("CARGO_PKG_VERSION")
             );
             2
@@ -655,7 +686,7 @@ fn cmd_dsc(args: &[String]) -> i32 {
 ///   kc kexts <file>       __PRELINK_INFO.__info inventory
 fn cmd_kernelcache(args: &[String]) -> i32 {
     let Some(cmd) = args.first() else {
-        eprintln!("kc <info|version|kexts> <kernelcache-file>");
+        eprintln!("kc <info|version|kexts|dump> <kernelcache-file>");
         return 2;
     };
     let Some(path) = args.get(1) else {
@@ -735,8 +766,29 @@ fn cmd_kernelcache(args: &[String]) -> i32 {
             }
             0
         }
+        "dump" => {
+            // kc dump <file> [out] — write the DECOMPRESSED Mach-O image so
+            // Python RE probes (capstone et al.) see the real bytes.
+            let img = match kernelcache::decompress(&data) {
+                Ok(i) => i,
+                Err(e) => {
+                    eprintln!("kc dump: {e}");
+                    return 1;
+                }
+            };
+            let out = args
+                .get(2)
+                .cloned()
+                .unwrap_or_else(|| format!("{}.decompressed", path));
+            if let Err(e) = std::fs::write(&out, &img) {
+                eprintln!("kc dump: write {out}: {e}");
+                return 1;
+            }
+            println!("{}: {} bytes → {}", path, img.len(), out);
+            0
+        }
         _ => {
-            eprintln!("kc <info|version|kexts> <file>");
+            eprintln!("kc <info|version|kexts|dump> <file>");
             2
         }
     }

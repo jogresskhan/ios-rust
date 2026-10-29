@@ -762,6 +762,7 @@ dependencies = [
  "img4",
  "ipsw",
  "kernelcache",
+ "macho",
  "plist",
  "qemu-util",
  "restore",

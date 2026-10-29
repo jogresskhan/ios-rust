@@ -417,3 +417,55 @@ pass so both stacks are green.
 The workspace average moved **54.2 → 60.6** (parity.json, 51 modules,
 132/132 tests). CI trigger repaired (`on.push.branches` was the literal
 scalar `ain]` — push builds to main never ran).
+
+### Layer 2.11c — boot-real: the REAL XNU handoff, 8.14M instructions with MMU live
+
+`ios-rust boot-real [fixtures] [max-insn]` is the honest successor to the
+synthetic ladder: the **actual Apple XNU 18C66 kernel** loaded the way iBoot
+loads it (real ADT machine assembly, real boot_args at `physBase`, LC_UNIXTHREAD
+entry at load PA), executed instruction-by-instruction by the pure-Rust A13
+core. Measured this session (release build, real 45.78 MB image):
+
+* **8,136,610 real instructions retired** before the first honest stop —
+  ~900,000× further than the previous first-boot best (9 instructions).
+* The kernel builds its own 16K-granule bootstrap page tables and flips
+  `SCTLR_EL1.M`; the new stage-1 MMU (`crates/a13-cpu/src/mmu.rs`) walks
+  **the kernel's own tables** — 460 walks, 9.1M TLB hits, **0 walk faults**
+  on the boot path.
+* The kernel executes its own `__thread_starts` DYLD_CHAINED_PTR_64-style
+  fixup walk (loop at 0x…7b802b8: slot load → `cmn w12,#1` end-marker →
+  `ldr x13,[x12]` chain → `ubfx/madd` next → `str` rebase) — completing
+  with the branch taken and the array rebuilt correctly.
+* Current stop (NEW, named): `ldr x0,[x20,#8]` → NULL → `ldr w9,[x0,#4]`
+  faults at 0x…81377b4 — the kernel dereferencing an **un-rebased
+  chained-fixup pointer from `__DATA`**. That is exactly BOOT-PLAN M2
+  (rebase/chained-fixups at load time, iBoot's job). No synthetic-anything
+  in this verdict.
+
+**REAL-DATA BUGS #10, #10b, #12** (found on the boot path, fixed, pinned by
+`gap_*` goldens): **#10** — flag-setting add/sub families (AddSubReg,
+AddSubExt) wrote their result to **SP** when Rd=31 (`cmp x17, w16, uxtw`
+at 0x…7ff97e4 zeroed the kernel stack mid-boot → `str xzr,[sp,#8]`
+fault at 0x…7ff97ac after 8.08M insns). **#10b** — ADDS/SUBS passed
+carry-in=1 (ADCS semantics) so every 32-bit register ADDS computed a+1;
+32-bit ADDS never set C (width bug in add_with_flags). **#12** —
+across-lane reduces wrote only the low byte; the kernel's
+`uminv b1, v0.16b; fmov w2, s1; cbnz w2` memscan idiom requires the
+zero-extended full element (DDI leaves it UNDEF; Apple zeroes; the real
+code depends on it — scan loop hung 80M insns without it).
+
+**SIMD families landed (all capstone/keystone-pinned, goldens in
+decode.rs):** MOVI-64 with the bit→byte immediate expansion (imm8 =
+bits[9:5]|immb<<5; measured 12/12 vs capstone incl. `movi v0.2d,
+#0xffffffffffffffff` = 0x6F07E7E0), three-same logical (AND/BIC/ORR/ORN +
+EOR/BSL/BIT/EON via size+U), three-same integer (ADD/SUB, CMGT/CMHI/
+CMGE/CMHS/CMEQ/CMTST, S/UMIN/MAX + P pairwise, MUL — per-lane exec for
+B/H/S/D), across-lane reduces ({S,U}MINV/{S,U}MAXV/ADDV), scalar↔GPR
+`fmov w2, s1` family. **Measured on the full 7,966,342-word
+`__TEXT_EXEC.__text`: decode 98.59% → 98.87%, exec probe 98.6% → 98.9%**
+(`tools/re/coverage-probe`; unknown 89,707 words, ~46k of them literal-pool
+runs). Workspace test count 352 → 363, all green.
+
+Tooling added: `tools/re/macho/bootstop_probe.py` (segment-aware VA→file
+probe for boot-stop forensics), `kc dump` (decompressed Mach-O to disk),
+SP-change tracking + nzcv in the boot-real trace.

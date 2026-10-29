@@ -1,408 +1,409 @@
 {
-  "workspace": "ios-rust",
-  "target_soc": "Apple T8030 (A13 Bionic)",
-  "machine": "apple-t8030",
-  "cpu": "apple-a13 (Lightning x2 + Thunder x4, ARMv8.4-A, AArch64-only)",
-  "generated": "2026-10-29",
-  "rubric": {
-    "100": "proven by CI/test artifact",
-    "90": "implemented + verified",
-    "75": "implemented (subset verified)",
-    "50": "state machine partial",
-    "40": "register map + core behavior",
-    "30": "map only",
-    "15": "faithful stub (matches upstream stub)",
-    "0": "missing"
+ "workspace": "ios-rust",
+ "target_soc": "Apple T8030 (A13 Bionic)",
+ "machine": "apple-t8030",
+ "cpu": "apple-a13 (Lightning x2 + Thunder x4, ARMv8.4-A, AArch64-only)",
+ "generated": "2026-10-29",
+ "rubric": {
+  "100": "proven by CI/test artifact",
+  "90": "implemented + verified",
+  "75": "implemented (subset verified)",
+  "50": "state machine partial",
+  "40": "register map + core behavior",
+  "30": "map only",
+  "15": "faithful stub (matches upstream stub)",
+  "0": "missing"
+ },
+ "engine_smoke": {
+  "status": "PASS",
+  "detail": "boot-full v2: full APFS container build (System/Data/Preboot) \u2192 REAL-KERNEL STAGE (the actual T8030 iOS 13.7 kernelcache from Apple's CDN: 39 MB LZFSE decode, 6/20 T8030 patches applied to real bytes, real ADT drives device attach 59/105 peripherals, and the pure-Rust A13 interpreter executes the kernel's first real function to a clean RET\u2192HLT from __TEXT_EXEC 0xfffffff007bb0000) \u2192 launchd\u2192SpringBoard ladder \u2192 2436x1125 homescreen; PLUS 20 CPU groups with the 189-entry golden table; PLUS real TSS response parse (gs.apple.com capture). Next honest gate: kernel image rebase/fixup load (GOT pointers ship zeroed) to boot past the first indirect call. RE-toolkit session: measured 90.52%\u219298.59% decode / 90.4%\u219298.6% exec on the real 18C66 kernel text after porting PAC-branches, 9-bit addressing, STP/LDP pairs+SIMD, exception class, register-offset LS, add-sub-extended, LSLV family; 3 decoder bugs fixed (MOV-alias swallow, LDP/STP opc map, SIMD LS width rule). boot-first lane (2026-10-29): BuildManifest identity select + SHA-384 component verification (DeviceTree == all 4 n104ap identities; KernelCache == release identities [1]/[4]) \u2192 staged install (staging-manifest.txt, status 0) \u2192 iBoot-equivalent machine assembly from the STAGED bytes \u2192 real 18C66 kernel first function: 9 insns retired from 0xfffffff007a18000, clean RET\u2192HLT. M1-ISA session (2026-10-29): bug #8 (dp-3 guard rejected UMULH AND misdecoded SMULH as MADD \u2014 wrong results on real bytes) + bug #9 (QEMU-anchored Sqrdmlah goldens were unassigned encodings) fixed; dp-1 family (RBIT/REV16/REV32/REV/CLZ/CLS both widths), dp-3 op31 map, logical-ROR landed with capstone-derived gap goldens; measured 98.59%\u219298.69% decode (7861938/7966342) / 98.6%\u219298.7% exec on real 18C66; new oracle tool bucket_discover.py; BOOT-PLAN.md (docs/) now drives the 2h-cadence campaign to homescreen."
+ },
+ "overall_pct": 74.1,
+ "modules": [
+  {
+   "name": "qemu-util (libqemuutil port)",
+   "pct": 100,
+   "files": 19
   },
-  "engine_smoke": {
-    "status": "PASS",
-    "detail": "boot-full v2: full APFS container build (System/Data/Preboot) \u2192 REAL-KERNEL STAGE (the actual T8030 iOS 13.7 kernelcache from Apple's CDN: 39 MB LZFSE decode, 6/20 T8030 patches applied to real bytes, real ADT drives device attach 59/105 peripherals, and the pure-Rust A13 interpreter executes the kernel's first real function to a clean RET\u2192HLT from __TEXT_EXEC 0xfffffff007bb0000) \u2192 launchd\u2192SpringBoard ladder \u2192 2436x1125 homescreen; PLUS 20 CPU groups with the 189-entry golden table; PLUS real TSS response parse (gs.apple.com capture). Next honest gate: kernel image rebase/fixup load (GOT pointers ship zeroed) to boot past the first indirect call. RE-toolkit session: measured 90.52%\u219298.59% decode / 90.4%\u219298.6% exec on the real 18C66 kernel text after porting PAC-branches, 9-bit addressing, STP/LDP pairs+SIMD, exception class, register-offset LS, add-sub-extended, LSLV family; 3 decoder bugs fixed (MOV-alias swallow, LDP/STP opc map, SIMD LS width rule). boot-first lane (2026-10-29): BuildManifest identity select + SHA-384 component verification (DeviceTree == all 4 n104ap identities; KernelCache == release identities [1]/[4]) \u2192 staged install (staging-manifest.txt, status 0) \u2192 iBoot-equivalent machine assembly from the STAGED bytes \u2192 real 18C66 kernel first function: 9 insns retired from 0xfffffff007a18000, clean RET\u2192HLT. M1-ISA session (2026-10-29): bug #8 (dp-3 guard rejected UMULH AND misdecoded SMULH as MADD \u2014 wrong results on real bytes) + bug #9 (QEMU-anchored Sqrdmlah goldens were unassigned encodings) fixed; dp-1 family (RBIT/REV16/REV32/REV/CLZ/CLS both widths), dp-3 op31 map, logical-ROR landed with capstone-derived gap goldens; measured 98.59%\u219298.69% decode (7861938/7966342) / 98.6%\u219298.7% exec on real 18C66; new oracle tool bucket_discover.py; BOOT-PLAN.md (docs/) now drives the 2h-cadence campaign to homescreen."
+  {
+   "name": "soc-t8030 identity",
+   "pct": 100,
+   "files": 1
   },
-  "overall_pct": 74.1,
-  "modules": [
-    {
-      "name": "qemu-util (libqemuutil port)",
-      "pct": 100,
-      "files": 19
-    },
-    {
-      "name": "soc-t8030 identity",
-      "pct": 100,
-      "files": 1
-    },
-    {
-      "name": "vm-core bus/device/framebuffer",
-      "pct": 100,
-      "files": 4
-    },
-    {
-      "name": "a13-cpu decoder",
-      "pct": 98,
-      "files": 3,
-      "note": "98.59% of real 18C66 __TEXT_EXEC.__text words decode (was 90.52%)"
-    },
-    {
-      "name": "a13-cpu interpreter",
-      "pct": 85,
-      "files": 1
-    },
-    {
-      "name": "a13-cpu gxf",
-      "pct": 40,
-      "files": 1
-    },
-    {
-      "name": "a13-cpu accel (HVF/KVM)",
-      "pct": 0,
-      "files": 1
-    },
-    {
-      "name": "adt",
-      "pct": 100,
-      "files": 3
-    },
-    {
-      "name": "macho (fileset)",
-      "pct": 40,
-      "files": 3
-    },
-    {
-      "name": "img4/im4p/der",
-      "pct": 90,
-      "files": 3
-    },
-    {
-      "name": "apple-soc: aic",
-      "pct": 55
-    },
-    {
-      "name": "apple-soc: s3c_uart",
-      "pct": 55
-    },
-    {
-      "name": "apple-soc: wdt",
-      "pct": 60
-    },
-    {
-      "name": "apple-soc: dart",
-      "pct": 55
-    },
-    {
-      "name": "apple-soc: sart",
-      "pct": 50
-    },
-    {
-      "name": "apple-soc: pmgr",
-      "pct": 45
-    },
-    {
-      "name": "apple-soc: spmi_pmu",
-      "pct": 50
-    },
-    {
-      "name": "apple-soc: nvram",
-      "pct": 55
-    },
-    {
-      "name": "apple-soc: smc",
-      "pct": 50
-    },
-    {
-      "name": "apple-soc: gpio_i2c_spi",
-      "pct": 45
-    },
-    {
-      "name": "apple-soc: ans2_nvme",
-      "pct": 75
-    },
-    {
-      "name": "apple-soc: aes",
-      "pct": 90
-    },
-    {
-      "name": "apple-soc: sep_sim",
-      "pct": 90
-    },
-    {
-      "name": "apple-soc: displaypipe (ADP v4)",
-      "pct": 50
-    },
-    {
-      "name": "apple-soc: mipi_dsi",
-      "pct": 90
-    },
-    {
-      "name": "apple-soc: typec_otg",
-      "pct": 75
-    },
-    {
-      "name": "apple-soc: apcie",
-      "pct": 75
-    },
-    {
-      "name": "apple-soc: aop",
-      "pct": 45
-    },
-    {
-      "name": "apple-soc: rtkit",
-      "pct": 45
-    },
-    {
-      "name": "apple-soc: mca",
-      "pct": 90
-    },
-    {
-      "name": "apple-soc: scaler",
-      "pct": 75
-    },
-    {
-      "name": "apple-soc: t8030 machine",
-      "pct": 90
-    },
-    {
-      "name": "ipsw (fetch/manifest/im4p/variants)",
-      "pct": 100
-    },
-    {
-      "name": "restore (stage/bootargs/trustcache/lzfse)",
-      "pct": 60
-    },
-    {
-      "name": "restore: plist_lite (libplist XML codec)",
-      "pct": 95
-    },
-    {
-      "name": "restore: usbmux host client (libusbmuxd class)",
-      "pct": 90
-    },
-    {
-      "name": "restore: restored protocol client (v14)",
-      "pct": 75
-    },
-    {
-      "name": "restore: ASR host (validation + payload push)",
-      "pct": 90
-    },
-    {
-      "name": "restore: TSS / ApImg4Ticket (libauthinstall class)",
-      "pct": 75
-    },
-    {
-      "name": "gui headless BMP",
-      "pct": 60
-    },
-    {
-      "name": "gui window",
-      "pct": 0
-    },
-    {
-      "name": "vault client",
-      "pct": 100
-    },
-    {
-      "name": "virt (CLI + machine boot ladder)",
-      "pct": 70
-    },
-    {
-      "name": "ios-rust single binary",
-      "pct": 100
-    },
-    {
-      "name": "plist (XML plist subset, standalone crate)",
-      "pct": 90
-    },
-    {
-      "name": "usbmux (usbmuxhost standalone crate)",
-      "pct": 90
-    },
-    {
-      "name": "restored (protocol client, standalone crate)",
-      "pct": 75
-    },
-    {
-      "name": "asr (client + SHA-1, standalone crate)",
-      "pct": 75
-    },
-    {
-      "name": "authinstall (TSS/IM4M standalone crate)",
-      "pct": 75
-    },
-    {
-      "name": "apfs (reader+writer standalone crate)",
-      "pct": 60
-    },
-    {
-      "name": "host restore pipeline e2e (usbmux\u2192restored\u2192ASR mock)",
-      "pct": 75
-    },
-    {
-      "name": "a13-cpu isa/simd/crypto",
-      "pct": 90
-    },
-    {
-      "name": "a13-cpu ISA parity (20 groups, ARMv8.4-A)",
-      "pct": 90,
-      "files": 4,
-      "note": "measured on real iOS 14.3 bytes: 98.59% decode / 98.6% exec (tools/re/coverage-probe)"
-    },
-    {
-      "name": "sandbox (SandBlaster port)",
-      "pct": 85,
-      "files": 5
-    },
-    {
-      "name": "boot-full full-system pipeline",
-      "pct": 80,
-      "files": 1
-    },
-    {
-      "name": "dsc prebuilt + closure (ipsw port)",
-      "pct": 80,
-      "files": 2
-    },
-    {
-      "name": "devices wave: PMGR/SMC/AES-XTS/AOP",
-      "pct": 50,
-      "files": 4
-    },
-    {
-      "name": "XTS-CTS oracle pin (tools/oracles)",
-      "pct": 100,
-      "files": 1
-    },
-    {
-      "name": "a13-cpu goldens_ext CI table",
-      "pct": 95,
-      "files": 1
-    },
-    {
-      "name": "apple-soc: buttons",
-      "pct": 75
-    },
-    {
-      "name": "apple-soc: roswell",
-      "pct": 75
-    },
-    {
-      "name": "apple-soc: mic_tempsensor",
-      "pct": 75
-    },
-    {
-      "name": "apple-soc: tempsensor (upstream stub 1:1)",
-      "pct": 60
-    },
-    {
-      "name": "apple-soc: spmi_baseband",
-      "pct": 75
-    },
-    {
-      "name": "apple-soc: chestnut (upstream stub 1:1)",
-      "pct": 60
-    },
-    {
-      "name": "apple-soc: fan53740 (upstream stub 1:1)",
-      "pct": 60
-    },
-    {
-      "name": "apple-soc: lm_backlight (upstream stub 1:1)",
-      "pct": 60
-    },
-    {
-      "name": "apple-soc: pmu_d2255",
-      "pct": 75
-    },
-    {
-      "name": "apple-soc: a7iop",
-      "pct": 75
-    },
-    {
-      "name": "apple-soc: a7iop_mailbox",
-      "pct": 75
-    },
-    {
-      "name": "apple-soc: displaypipe_v2",
-      "pct": 75
-    },
-    {
-      "name": "apple-soc: mt_spi",
-      "pct": 75
-    },
-    {
-      "name": "apple-soc: baseband",
-      "pct": 75
-    },
-    {
-      "name": "apple-soc: full Inferno device inventory (inventory.rs)",
-      "pct": 100
-    },
-    {
-      "name": "kernelcache: boot patcher (engine + T8030 table)",
-      "pct": 90
-    },
-    {
-      "name": "kernelcache: LZSS decode (xnu mkext port)",
-      "pct": 75
-    },
-    {
-      "name": "kernelcache: LZFSE (real Apple bytes)",
-      "pct": 90
-    },
-    {
-      "name": "kernelcache: version + prelink KEXT list",
-      "pct": 90
-    },
-    {
-      "name": "real-fixture CI gate (Apple CDN bytes + live TSS)",
-      "pct": 100
-    },
-    {
-      "name": "real-kernel boot stage (boot-full [2.5/4])",
-      "pct": 75
-    },
-    {
-      "name": "RE toolkit (tools/re: oracle, mask_discover, coverage-probe, ghidra headless)",
-      "pct": 100,
-      "files": 18
-    },
-    {
-      "name": "boot-first lane (irestore SHA-384 staging \u2192 FIRST BOOT on real 18C66 bytes)",
-      "pct": 75,
-      "files": 1
-    }
-  ],
-  "permanent_gaps": [
-    {
-      "name": "APFS mount",
-      "reason": "Apple restored RestoreOptions wall + AES-XTS per-device keys (see research vault parity-metrics.json)"
-    },
-    {
-      "name": "AES-XTS real keys",
-      "reason": "per-device key wall; sanctioned Dopamine path is research-only"
-    },
-    {
-      "name": "TSS signing server",
-      "reason": "Apple CA is external by design; request/response shape + IM4M validation implemented (tss.rs)"
-    },
-    {
-      "name": "baseband",
-      "reason": "proprietary, permanent for research scope"
-    },
-    {
-      "name": "camera/FaceID/SEP personal keys",
-      "reason": "permanent for research scope"
-    }
-  ],
-  "tests": {
-    "total": 352,
-    "passing": 352
+  {
+   "name": "vm-core bus/device/framebuffer",
+   "pct": 100,
+   "files": 4
   },
-  "sources": [
-    "ChefKiss Inferno @cc4302a (hw/ device models, AGPL-3.0/GPL-2.0)",
-    "ios-sweet-rust sweet-core (MIT, IM4P/ADT/Macho logic + vendored Apple LZFSE BSD-3)",
-    "qemu-sweet overlay (GPLv2+, DART walker / display path proven design)",
-    "libusbmuxd + idevicerestore asr.c + libimobiledevice restored.c (LGPL-2.1, protocol reference)",
-    "restored_external 18A5351d decompilation (RE-FINDINGS.md, checkpoint 0x0104/0x065B/0x067E contract)",
-    "ARM DDI 0487 (A64 encodings)"
-  ],
-  "tests_passed": 352
+  {
+   "name": "a13-cpu decoder",
+   "pct": 98,
+   "files": 3,
+   "note": "98.87% of real 18C66 __TEXT_EXEC.__text words decode (was 98.59%; block: SP-corruption bugs #10/#10b fixed, SIMD movi64/three-same-int/reduce/logical/fmov-gprvec landed)"
+  },
+  {
+   "name": "a13-cpu interpreter",
+   "pct": 85,
+   "files": 1,
+   "note": "boot-real: 8.14M real XNU 18C66 instructions executed with MMU live (0 walk faults); stop = first unrebased chained-fixup deref (M2 unlock)"
+  },
+  {
+   "name": "a13-cpu gxf",
+   "pct": 40,
+   "files": 1
+  },
+  {
+   "name": "a13-cpu accel (HVF/KVM)",
+   "pct": 0,
+   "files": 1
+  },
+  {
+   "name": "adt",
+   "pct": 100,
+   "files": 3
+  },
+  {
+   "name": "macho (fileset)",
+   "pct": 40,
+   "files": 3
+  },
+  {
+   "name": "img4/im4p/der",
+   "pct": 90,
+   "files": 3
+  },
+  {
+   "name": "apple-soc: aic",
+   "pct": 55
+  },
+  {
+   "name": "apple-soc: s3c_uart",
+   "pct": 55
+  },
+  {
+   "name": "apple-soc: wdt",
+   "pct": 60
+  },
+  {
+   "name": "apple-soc: dart",
+   "pct": 55
+  },
+  {
+   "name": "apple-soc: sart",
+   "pct": 50
+  },
+  {
+   "name": "apple-soc: pmgr",
+   "pct": 45
+  },
+  {
+   "name": "apple-soc: spmi_pmu",
+   "pct": 50
+  },
+  {
+   "name": "apple-soc: nvram",
+   "pct": 55
+  },
+  {
+   "name": "apple-soc: smc",
+   "pct": 50
+  },
+  {
+   "name": "apple-soc: gpio_i2c_spi",
+   "pct": 45
+  },
+  {
+   "name": "apple-soc: ans2_nvme",
+   "pct": 75
+  },
+  {
+   "name": "apple-soc: aes",
+   "pct": 90
+  },
+  {
+   "name": "apple-soc: sep_sim",
+   "pct": 90
+  },
+  {
+   "name": "apple-soc: displaypipe (ADP v4)",
+   "pct": 50
+  },
+  {
+   "name": "apple-soc: mipi_dsi",
+   "pct": 90
+  },
+  {
+   "name": "apple-soc: typec_otg",
+   "pct": 75
+  },
+  {
+   "name": "apple-soc: apcie",
+   "pct": 75
+  },
+  {
+   "name": "apple-soc: aop",
+   "pct": 45
+  },
+  {
+   "name": "apple-soc: rtkit",
+   "pct": 45
+  },
+  {
+   "name": "apple-soc: mca",
+   "pct": 90
+  },
+  {
+   "name": "apple-soc: scaler",
+   "pct": 75
+  },
+  {
+   "name": "apple-soc: t8030 machine",
+   "pct": 90
+  },
+  {
+   "name": "ipsw (fetch/manifest/im4p/variants)",
+   "pct": 100
+  },
+  {
+   "name": "restore (stage/bootargs/trustcache/lzfse)",
+   "pct": 60
+  },
+  {
+   "name": "restore: plist_lite (libplist XML codec)",
+   "pct": 95
+  },
+  {
+   "name": "restore: usbmux host client (libusbmuxd class)",
+   "pct": 90
+  },
+  {
+   "name": "restore: restored protocol client (v14)",
+   "pct": 75
+  },
+  {
+   "name": "restore: ASR host (validation + payload push)",
+   "pct": 90
+  },
+  {
+   "name": "restore: TSS / ApImg4Ticket (libauthinstall class)",
+   "pct": 75
+  },
+  {
+   "name": "gui headless BMP",
+   "pct": 60
+  },
+  {
+   "name": "gui window",
+   "pct": 0
+  },
+  {
+   "name": "vault client",
+   "pct": 100
+  },
+  {
+   "name": "virt (CLI + machine boot ladder)",
+   "pct": 70
+  },
+  {
+   "name": "ios-rust single binary",
+   "pct": 100
+  },
+  {
+   "name": "plist (XML plist subset, standalone crate)",
+   "pct": 90
+  },
+  {
+   "name": "usbmux (usbmuxhost standalone crate)",
+   "pct": 90
+  },
+  {
+   "name": "restored (protocol client, standalone crate)",
+   "pct": 75
+  },
+  {
+   "name": "asr (client + SHA-1, standalone crate)",
+   "pct": 75
+  },
+  {
+   "name": "authinstall (TSS/IM4M standalone crate)",
+   "pct": 75
+  },
+  {
+   "name": "apfs (reader+writer standalone crate)",
+   "pct": 60
+  },
+  {
+   "name": "host restore pipeline e2e (usbmux\u2192restored\u2192ASR mock)",
+   "pct": 75
+  },
+  {
+   "name": "a13-cpu isa/simd/crypto",
+   "pct": 90
+  },
+  {
+   "name": "a13-cpu ISA parity (20 groups, ARMv8.4-A)",
+   "pct": 90,
+   "files": 4,
+   "note": "measured on real iOS 14.3 bytes: 98.87% decode / 98.9% exec (tools/re/coverage-probe)"
+  },
+  {
+   "name": "sandbox (SandBlaster port)",
+   "pct": 85,
+   "files": 5
+  },
+  {
+   "name": "boot-full full-system pipeline",
+   "pct": 80,
+   "files": 1
+  },
+  {
+   "name": "dsc prebuilt + closure (ipsw port)",
+   "pct": 80,
+   "files": 2
+  },
+  {
+   "name": "devices wave: PMGR/SMC/AES-XTS/AOP",
+   "pct": 50,
+   "files": 4
+  },
+  {
+   "name": "XTS-CTS oracle pin (tools/oracles)",
+   "pct": 100,
+   "files": 1
+  },
+  {
+   "name": "a13-cpu goldens_ext CI table",
+   "pct": 95,
+   "files": 1
+  },
+  {
+   "name": "apple-soc: buttons",
+   "pct": 75
+  },
+  {
+   "name": "apple-soc: roswell",
+   "pct": 75
+  },
+  {
+   "name": "apple-soc: mic_tempsensor",
+   "pct": 75
+  },
+  {
+   "name": "apple-soc: tempsensor (upstream stub 1:1)",
+   "pct": 60
+  },
+  {
+   "name": "apple-soc: spmi_baseband",
+   "pct": 75
+  },
+  {
+   "name": "apple-soc: chestnut (upstream stub 1:1)",
+   "pct": 60
+  },
+  {
+   "name": "apple-soc: fan53740 (upstream stub 1:1)",
+   "pct": 60
+  },
+  {
+   "name": "apple-soc: lm_backlight (upstream stub 1:1)",
+   "pct": 60
+  },
+  {
+   "name": "apple-soc: pmu_d2255",
+   "pct": 75
+  },
+  {
+   "name": "apple-soc: a7iop",
+   "pct": 75
+  },
+  {
+   "name": "apple-soc: a7iop_mailbox",
+   "pct": 75
+  },
+  {
+   "name": "apple-soc: displaypipe_v2",
+   "pct": 75
+  },
+  {
+   "name": "apple-soc: mt_spi",
+   "pct": 75
+  },
+  {
+   "name": "apple-soc: baseband",
+   "pct": 75
+  },
+  {
+   "name": "apple-soc: full Inferno device inventory (inventory.rs)",
+   "pct": 100
+  },
+  {
+   "name": "kernelcache: boot patcher (engine + T8030 table)",
+   "pct": 90
+  },
+  {
+   "name": "kernelcache: LZSS decode (xnu mkext port)",
+   "pct": 75
+  },
+  {
+   "name": "kernelcache: LZFSE (real Apple bytes)",
+   "pct": 90
+  },
+  {
+   "name": "kernelcache: version + prelink KEXT list",
+   "pct": 90
+  },
+  {
+   "name": "real-fixture CI gate (Apple CDN bytes + live TSS)",
+   "pct": 100
+  },
+  {
+   "name": "real-kernel boot stage (boot-full [2.5/4])",
+   "pct": 75
+  },
+  {
+   "name": "RE toolkit (tools/re: oracle, mask_discover, coverage-probe, ghidra headless)",
+   "pct": 100,
+   "files": 18
+  },
+  {
+   "name": "boot-first lane (irestore SHA-384 staging \u2192 FIRST BOOT on real 18C66 bytes)",
+   "pct": 75,
+   "files": 1
+  }
+ ],
+ "permanent_gaps": [
+  {
+   "name": "APFS mount",
+   "reason": "Apple restored RestoreOptions wall + AES-XTS per-device keys (see research vault parity-metrics.json)"
+  },
+  {
+   "name": "AES-XTS real keys",
+   "reason": "per-device key wall; sanctioned Dopamine path is research-only"
+  },
+  {
+   "name": "TSS signing server",
+   "reason": "Apple CA is external by design; request/response shape + IM4M validation implemented (tss.rs)"
+  },
+  {
+   "name": "baseband",
+   "reason": "proprietary, permanent for research scope"
+  },
+  {
+   "name": "camera/FaceID/SEP personal keys",
+   "reason": "permanent for research scope"
+  }
+ ],
+ "tests": {
+  "total": 352,
+  "passing": 352
+ },
+ "sources": [
+  "ChefKiss Inferno @cc4302a (hw/ device models, AGPL-3.0/GPL-2.0)",
+  "ios-sweet-rust sweet-core (MIT, IM4P/ADT/Macho logic + vendored Apple LZFSE BSD-3)",
+  "qemu-sweet overlay (GPLv2+, DART walker / display path proven design)",
+  "libusbmuxd + idevicerestore asr.c + libimobiledevice restored.c (LGPL-2.1, protocol reference)",
+  "restored_external 18A5351d decompilation (RE-FINDINGS.md, checkpoint 0x0104/0x065B/0x067E contract)",
+  "ARM DDI 0487 (A64 encodings)"
+ ],
+ "tests_passed": 363
 }

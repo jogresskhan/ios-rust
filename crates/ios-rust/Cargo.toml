@@ -31,6 +31,7 @@ dsc = { path = "../dsc" }
 kernelcache = { path = "../kernelcache" }
 img4 = { path = "../img4" }
 adt = { path = "../adt" }
+macho = { path = "../macho" }
 devices-db = { path = "../devices-db" }
 vuln-db = { path = "../vuln-db" }
 devicecheck = { path = "../devicecheck" }

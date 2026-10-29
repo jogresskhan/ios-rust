@@ -442,8 +442,18 @@ pub enum Insn {
     /// ADC/ADCS/SBC/SBCS (session D, bug #17 companion): carry-select add
     /// with C from NZCV; S writes flags.
     Adc { rd: u8, rn: u8, rm: u8, setflags: bool, subtract: bool, is64: bool },
-    /// CCMP/CCMN (immediate `#imm5` or register form).
-    Ccmp { rn: u8, rm_imm: u8, nzcv: u8, cond: Cond, ccmn: bool, is64: bool },
+    /// CCMP/CCMN (immediate `#imm5` or register form). `reg_form` = the
+    /// operand is a REGISTER (rm_imm = reg number, use its VALUE); else an
+    /// immediate (rm_imm = imm5 value).
+    Ccmp {
+        rn: u8,
+        rm_imm: u8,
+        reg_form: bool,
+        nzcv: u8,
+        cond: Cond,
+        ccmn: bool,
+        is64: bool,
+    },
     /// MSR (immediate): DAIFSet/DAIFClr.
     MsrImm { daifclr: bool, imm4: u8 },
     /// MSR (immediate) SPSel — `msr spsel, #0/#1` (keystone: d50040bf /
@@ -2020,16 +2030,31 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
     // --- CCMP/CCMN: bits 28:24 == 11010 with bit29=1; bit30: 1=CCMP
     //     0=CCMN; imm5 at bits 20:16 (imm, bit11=1) / Rm at 20:16 (reg,
     //     bit11=0); nzcv = bits 15:12; cond = bits 3:0 ---
+    // CCMP/CCMN — keystone field layout, 4-sample empirical pin (session
+    // M4, REAL-DATA BUG #24): cond is ALWAYS bits 15:12 and nzcv ALWAYS
+    // bits 3:0, in BOTH forms:
+    //   ccmp x13, x8, #0, ls = FA4891A0 → cond@15:12 = 9 (LS), nzcv@3:0 = 0
+    //   ccmp x13, #3, #9, cs = FA4329A9 → cond@15:12 = 2 (CS), nzcv@3:0 = 9
+    //   ccmn x0,  x1, #5, gt = BA41C005 → cond@15:12 = C (GT), nzcv@3:0 = 5
+    //   ccmn x2,  #7, #1, ne = BA471841 → cond@15:12 = 1 (NE), nzcv@3:0 = 1
+    // The first cut read cond from bits 3:0 / nzcv from 15:12, so the real
+    // 18C66 DT-walk sequence `cmp x12,x8; ccmp x13,x8,#0,ls; b.lo` branched
+    // with architecturally-correct registers and panicked the boot
+    // ("Device tree pointer outside of device tree region"). The old
+    // golden word FA430822 was self-consistent with the swap (capstone:
+    // `ccmp x1, #3, #2, eq` — cond EQ nzcv 2, not cond CS).
+    // bit11 = 1 → immediate form (imm5@20:16), 0 → register form (Rm@20:16).
     if (w >> 24) & 0x1F == 0x1A && (w >> 29) & 1 == 1 {
         let ccmn = (w >> 30) & 1 == 0;
-        let cond = Cond::from_bits(w & 0xF)?;
-        let nzcv = ((w >> 12) & 0xF) as u8;
+        let cond = Cond::from_bits((w >> 12) & 0xF)?;
+        let nzcv = (w & 0xF) as u8;
         let is_imm = (w >> 11) & 1 == 1;
         let rm = reg(w, 16);
         let imm5 = (w >> 16) & 0x1F;
         return Some(Insn::Ccmp {
             rn: reg(w, 5),
             rm_imm: if is_imm { imm5 as u8 } else { rm },
+            reg_form: !is_imm,
             nzcv,
             cond,
             ccmn,

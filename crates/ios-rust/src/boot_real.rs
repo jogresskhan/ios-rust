@@ -166,6 +166,21 @@ pub struct BootRealReport {
     pub cpu_data0_report: Vec<String>,
     /// M4 debug: (pc, addr, val) stores of boot-stack-range VAs.
     pub stack_write_log: Vec<(u64, u64, u64)>,
+    // --- M4-b percpu-blocker diagnostics ---
+    /// First 8 vectored sync aborts (insn, elr, far, esr) — the storm origin.
+    pub first_aborts: Vec<(u64, u64, u64, u64)>,
+    /// Last 24 vectored sync aborts (insn, elr, far, esr) — the loop shape.
+    pub last_aborts: Vec<(u64, u64, u64, u64)>,
+    pub sync_abort_total: u64,
+    /// cpu_stack_alloc fingerprint stores: (pc, va, val) into __DATA.
+    pub data_stores: Vec<(u64, u64, u64)>,
+    pub data_store_count: u64,
+    /// 48-bit-truncated kernel-VA stores (REAL-DATA BUG probe).
+    pub poison_stores: Vec<(u64, u64, u64)>,
+    pub poison_count: u64,
+    /// panic() entries: (insn, x0 fmt, x1, x2, x3), first 64 + total count.
+    pub panic_calls: Vec<(u64, u64, u64, u64, u64)>,
+    pub panic_call_count: u64,
     /// Post-mortem: bytes at thread_starts PA, bootstrap L2 tables.
     pub mem_probe: Vec<String>,
     pub last_sp_change: Option<(u64, u32, u64)>,
@@ -396,6 +411,10 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
     // M4 debug: capture the kernel's boot-stack-pointer stores (cpu_data
     // init fingerprint) — printed in the report.
     cpu.stack_write_watch = true;
+    // M4-b: xnu panic() wrapper (measured: 0x…987b99c → bl panic_impl
+    // 0x…7a58588) — capture the ORIGINAL panic's format args; the storm
+    // is its recursion, so the first entry names the true root cause.
+    cpu.panic_watch_pc = Some(LINK_BASE + (0x987b99c - 0x7004000));
 
     println!(
         "[handoff] PC = {entry_pa:#x} (load PA) · x0 = {:#x} (boot_args) · MMU off · \
@@ -421,6 +440,11 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
         // bind before the instruction budget on long real-kernel scans.
         max_ns: max_insn.saturating_mul(40).saturating_add(16_000_000_000),
     });
+    let stop_pc: Option<u64> = match res.stop {
+        StopReason::UnknownInsn { pc, .. } => Some(pc),
+        StopReason::TranslationFault { pc, .. } => Some(pc),
+        _ => None,
+    };
 
     let out = serial.lock().map(|s| s.clone()).unwrap_or_default();
     let trace: Vec<String> = cpu
@@ -511,6 +535,15 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
             out
         },
         stack_write_log: cpu.stack_writes.iter().copied().collect(),
+        first_aborts: cpu.first_aborts.clone(),
+        last_aborts: cpu.abort_log.iter().rev().take(24).rev().copied().collect(),
+        sync_abort_total: cpu.sync_aborts,
+        data_stores: cpu.data_stores.iter().copied().collect(),
+        data_store_count: cpu.data_store_count,
+        poison_stores: cpu.poison_stores.iter().copied().collect(),
+        poison_count: cpu.poison_count,
+        panic_calls: cpu.panic_calls.iter().copied().collect(),
+        panic_call_count: cpu.panic_call_count,
         last_sp_change: cpu.last_sp_change,
         mem_probe: {
             let mut probe = Vec::new();
@@ -535,6 +568,22 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
                 let d = u64::from_le_bytes(buf3[k * 8..k * 8 + 8].try_into().unwrap());
                 if d != 0 {
                     probe.push(format!("L1'[{k}] = {d:#018x}"));
+                }
+            }
+            // stop-pc re-walk under the final table state: separates "the
+            // kernel remapped this page" from "our walker misread it".
+            if let Some(pc) = stop_pc {
+                match cpu.debug_walk(pc, a13_cpu::mmu::XlateKind::Fetch) {
+                    Ok(pa) => {
+                        let mut b = [0u8; 16];
+                        cpu.mem().read_bytes(pa, &mut b);
+                        probe.push(format!(
+                            "stop-pc walk: {pc:#x} → PA {pa:#x} bytes {:02x?} (chain {:?})",
+                            b,
+                            cpu.mmu.last_fault_chain
+                        ));
+                    }
+                    Err(e) => probe.push(format!("stop-pc walk: {pc:#x} → {e}")),
                 }
             }
             probe
@@ -627,6 +676,49 @@ pub fn print_report(r: &BootRealReport) {
     if !r.stack_write_log.is_empty() {
         println!("boot-stack-pointer stores (first {}):", r.stack_write_log.len());
         for (pc, addr, val) in r.stack_write_log.iter() {
+            println!("    pc={pc:#x} → [{addr:#x}] = {val:#x}");
+        }
+    }
+    // --- M4-b percpu-blocker diagnostics ---
+    if !r.panic_calls.is_empty() || r.panic_call_count > 0 {
+        println!(
+            "M4-b panic() calls: {} total (first {}):",
+            r.panic_call_count,
+            r.panic_calls.len()
+        );
+        for (insn, x0, x1, x2, x3) in r.panic_calls.iter().take(12) {
+            println!("    insn={insn} x0={x0:#x} x1={x1:#x} x2={x2:#x} x3={x3:#x}");
+        }
+    } else {
+        println!("M4-b panic() calls: none");
+    }
+    if !r.first_aborts.is_empty() {
+        println!("M4-b first sync aborts:");
+        for (insn, elr, far, esr) in &r.first_aborts {
+            println!("    insn={insn} elr={elr:#x} far={far:#x} esr={esr:#x}");
+        }
+        println!("M4-b last sync aborts (of {}):", r.sync_abort_total);
+        for (insn, elr, far, esr) in &r.last_aborts {
+            println!("    insn={insn} elr={elr:#x} far={far:#x} esr={esr:#x}");
+        }
+    }
+    if !r.data_stores.is_empty() {
+        println!(
+            "M4-b __DATA←stack-VA stores ({} total, first {}):",
+            r.data_store_count,
+            r.data_stores.len()
+        );
+        for (pc, addr, val) in r.data_stores.iter().take(48) {
+            println!("    pc={pc:#x} → [{addr:#x}] = {val:#x}");
+        }
+    }
+    if !r.poison_stores.is_empty() {
+        println!(
+            "M4-b POISON stores (48-bit-truncated kernel VAs, {} total, first {}):",
+            r.poison_count,
+            r.poison_stores.len()
+        );
+        for (pc, addr, val) in r.poison_stores.iter() {
             println!("    pc={pc:#x} → [{addr:#x}] = {val:#x}");
         }
     }

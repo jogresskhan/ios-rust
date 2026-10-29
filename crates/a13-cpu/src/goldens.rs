@@ -273,15 +273,33 @@ fn dataproc_goldens() {
         d(0xDA82_D420),
         Some(Insn::Csel { rd: 0, rn: 1, rm: 2, cond: Cond::Le, op: CselOp::Neg, is64: true })
     );
-    // CCMP/CCMN (keystone; #imm5=3, nzcv=0, cond=CS): ccmp = FA430822,
-    // ccmn = BA430822 (bit30 selects)
+    // CCMP/CCMN — REAL-DATA BUG #24 re-pin (keystone+capstone): the old
+    // row claimed FA430822 = "cond CS, nzcv 0" but capstone decodes it as
+    // `ccmp x1, #3, #2, eq` — the first decoder read cond from bits 3:0 /
+    // nzcv from 15:12 (both forms actually carry cond@15:12, nzcv@3:0).
+    // These assertions now pin the CAPSTONE decode of the same words:
     assert!(matches!(
         d(0xFA43_0822),
-        Some(Insn::Ccmp { rm_imm: 3, cond: Cond::Cs, ccmn: false, .. })
+        Some(Insn::Ccmp { rm_imm: 3, nzcv: 2, cond: Cond::Eq, ccmn: false, .. })
     ));
     assert!(matches!(
         d(0xBA43_0822),
-        Some(Insn::Ccmp { rm_imm: 3, cond: Cond::Cs, ccmn: true, .. })
+        Some(Insn::Ccmp { rm_imm: 3, nzcv: 2, cond: Cond::Eq, ccmn: true, .. })
+    ));
+    // keystone-assembled field-layout pins (see decode.rs comment block):
+    // ccmp x13, x8, #0, ls = FA4891A0 (reg form); ccmp x13, #3, #9, cs =
+    // FA4329A9 (imm form); ccmn x0, x1, #5, gt = BA41C005.
+    assert!(matches!(
+        d(0xFA48_91A0),
+        Some(Insn::Ccmp { rm_imm: 8, reg_form: true, nzcv: 0, cond: Cond::Ls, ccmn: false, .. })
+    ));
+    assert!(matches!(
+        d(0xFA43_29A9),
+        Some(Insn::Ccmp { rm_imm: 3, reg_form: false, nzcv: 9, cond: Cond::Cs, ccmn: false, .. })
+    ));
+    assert!(matches!(
+        d(0xBA41_C005),
+        Some(Insn::Ccmp { rm_imm: 1, reg_form: true, nzcv: 5, cond: Cond::Gt, ccmn: true, .. })
     ));
     // EXTR (keystone): extr x0, x1, x2, #7 = 93C21C20
     assert_eq!(d(0x93C2_1C20), Some(Insn::Extr { rd: 0, rn: 1, rm: 2, lsb: 7, is64: true }));

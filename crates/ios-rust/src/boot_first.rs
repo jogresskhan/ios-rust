@@ -270,9 +270,12 @@ pub fn run(fixtures_in: Option<&Path>, out_dir: &Path) -> i32 {
                 if r.res.executed > 0 { "✅" } else { "❌" },
                 r.res.executed
             );
-            println!("  ❌ full boot: NOT reached — the honest stop is the kernel's DeviceTree-dependent");
-            println!("     CPU-enumeration path (DT globals ship zero; see PARITY.md Layer 2.11d + M2 notes).");
-            println!("     Nothing synthetic past the stop.");
+            println!("  ❌ full boot: NOT reached — honest stop (session H, see PARITY.md 2.12):");
+            println!("     DT population + /cpus enumeration now WORK (bugs #20/#22/#24 fixed);");
+            println!("     the kernel runs its own data-abort handler (21,270 vectored aborts) and");
+            println!("     stops on a zero-fetch at 0xfffffff00816c458 — its text PA reads zero after");
+            println!("     the abort-driven remap loop (next block's RE target). Nothing synthetic.");
+            println!("     (Pre-H stop, kept for the ledger: DT-globals NULL in /cpus enumeration.)");
             if r.res.executed > 0 {
                 0
             } else {

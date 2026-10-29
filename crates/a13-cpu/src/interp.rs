@@ -292,6 +292,27 @@ pub struct Interpreter {
     pub watch_addrs: Vec<u64>,
     /// Watchpoint dedup: last executed index reported per address.
     watch_last_hit: std::collections::HashMap<u64, u64>,
+    // --- M4-b percpu-blocker diagnostics (measured, bounded, report-only) ---
+    /// Every vectored synchronous abort: (insn, elr, far, esr) — bounded
+    /// ring of the LAST 512 plus the FIRST 8 verbatim (the storm origin).
+    pub abort_log: std::collections::VecDeque<(u64, u64, u64, u64)>,
+    pub first_aborts: Vec<(u64, u64, u64, u64)>,
+    /// Stores into the kernel __DATA window whose VALUE is a stack-range
+    /// kernel VA — the cpu_stack_alloc(&BootCpuData) fingerprint
+    /// (target+value filtered; no heuristic struct scan).
+    pub data_stores: std::collections::VecDeque<(u64, u64, u64)>, // (pc, va, val)
+    pub data_store_count: u64,
+    /// Stores of 48-bit-truncated kernel VAs (bits 63:48 zero while
+    /// 47:32 == 0xFFF0 — observed 0x0000FFF008137198 on the boot path).
+    /// REAL-DATA BUG probe; capture-only, zero behavior drift.
+    pub poison_stores: std::collections::VecDeque<(u64, u64, u64)>,
+    pub poison_count: u64,
+    /// xnu panic() entry probe (pc set by boot_real from the measured
+    /// wrapper at 0x…987b99c): captures (insn, x0 fmt, x1, x2, x3) per
+    /// call — names the ORIGINAL panic that feeds the exception storm.
+    pub panic_watch_pc: Option<u64>,
+    pub panic_calls: std::collections::VecDeque<(u64, u64, u64, u64, u64)>,
+    pub panic_call_count: u64,
 }
 
 const N: u32 = 1 << 3;
@@ -382,6 +403,15 @@ impl Interpreter {
                 .filter_map(|s| u64::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok())
                 .collect(),
             watch_last_hit: std::collections::HashMap::new(),
+            abort_log: std::collections::VecDeque::new(),
+            first_aborts: Vec::new(),
+            data_stores: std::collections::VecDeque::new(),
+            data_store_count: 0,
+            poison_stores: std::collections::VecDeque::new(),
+            poison_count: 0,
+            panic_watch_pc: None,
+            panic_calls: std::collections::VecDeque::new(),
+            panic_call_count: 0,
         }
     }
 
@@ -432,6 +462,21 @@ impl Interpreter {
 
     pub fn mem(&mut self) -> &mut dyn MemAccess {
         &mut *self.mem
+    }
+
+    /// Post-mortem diagnostic: re-walk a VA under the CURRENT table state
+    /// (no side effects on counters) — boot reports use it to separate
+    /// "the kernel remapped this page" from "our walker misread it".
+    pub fn debug_walk(&mut self, va: u64, kind: crate::mmu::XlateKind) -> Result<u64, String> {
+        let chain_before = self.mmu.last_fault_chain.len();
+        let r = self
+            .mmu
+            .translate(self.mem.as_mut(), va, kind)
+            .map_err(|(v, d)| format!("walk fault va={v:#x} {d}"));
+        if self.mmu.last_fault_chain.len() > chain_before {
+            self.mmu.last_fault_chain.truncate(chain_before);
+        }
+        r
     }
 
     /// Register read with the ARM reg-31 rule (ZR for GPR use).
@@ -498,6 +543,15 @@ impl Interpreter {
                 if self.sys.vbar_el1 != 0 && self.vector_budget > 0 {
                     self.vector_budget -= 1;
                     self.sync_aborts += 1;
+                    // M4-b: bounded abort journal — names the storm origin
+                    // (first 8) and the steady-state loop (last 512).
+                    self.abort_log.push_back((self.executed, self.pc, v, esr));
+                    if self.abort_log.len() > 512 {
+                        self.abort_log.pop_front();
+                    }
+                    if self.first_aborts.len() < 8 {
+                        self.first_aborts.push((self.executed, self.pc, v, esr));
+                    }
                     // current-EL SPx sync entry (instr + data aborts both
                     // enter at VBAR+0x200; EC in the ESR distinguishes them)
                     self.take_exception(0x200, esr, Some(v), kind.as_str());
@@ -534,6 +588,27 @@ impl Interpreter {
     #[inline]
     fn st(&mut self, va: u64, size: u8, val: u64) -> Result<(), StopReason> {
         let pa = self.vaddr(va, XlateKind::Store)?;
+        if size == 8 {
+            // M4-b: cpu_stack_alloc fingerprint — a stack-range kernel VA
+            // stored into the kernel __DATA window (BootCpuData fields live
+            // there; the boot stack in __BOOTDATA is excluded by design).
+            if (0xFFFF_FFF0_098A_C000..0xFFFF_FFF0_09B0_0000).contains(&va)
+                && (0xFFFF_FFF0_0900_0000..0xFFFF_FFF0_8000_0000).contains(&val)
+            {
+                self.data_store_count += 1;
+                if self.data_stores.len() < 256 {
+                    self.data_stores.push_back((self.pc, va, val));
+                }
+            }
+            // M4-b: 48-bit-truncated kernel-VA poison probe (bits 63:48
+            // zeroed, 47:32 == 0xFFF0 — impossible as a canonical VA).
+            if val & 0xFFFF_0000_0000_0000 == 0 && (val >> 32) & 0xFFFF == 0xFFF0 {
+                self.poison_count += 1;
+                if self.poison_stores.len() < 32 {
+                    self.poison_stores.push_back((self.pc, va, val));
+                }
+            }
+        }
         if self.stack_write_watch
             && size == 8
             && (0xFFFF_FFF0_0980_0000..0xFFFF_FFF0_0A40_0000).contains(&val)
@@ -3355,11 +3430,14 @@ impl Interpreter {
                 }
                 self.set_rsp(rd, if taken { n } else { m });
             }
-            Insn::Ccmp { rn, rm_imm, nzcv, cond, ccmn, is64 } => {
+            Insn::Ccmp { rn, rm_imm, reg_form, nzcv, cond, ccmn, is64 } => {
                 if self.cond(cond) {
                     let mask = if is64 { u64::MAX } else { 0xFFFF_FFFF };
                     let a = self.r(rn) & mask;
-                    let b = rm_imm as u64 & mask;
+                    // REAL-DATA BUG #24 companion: register form compares
+                    // against the REGISTER VALUE — the first cut used the
+                    // reg NUMBER as an immediate.
+                    let b = if reg_form { self.r(rm_imm) & mask } else { rm_imm as u64 & mask };
                     self.add_with_flags(a, b, true, is64, !ccmn);
                 } else {
                     self.nzcv = (nzcv as u32) << 0; // direct NZCV copy (bits 3..0)
@@ -4254,6 +4332,14 @@ impl CpuBackend for Interpreter {
                     mmu_live_from: self.mmu_live_from,
                 };
             }
+            // M4-b: xnu panic() entry probe (pc supplied by boot_real).
+            if self.panic_watch_pc == Some(self.pc) {
+                self.panic_call_count += 1;
+                if self.panic_calls.len() < 64 {
+                    self.panic_calls
+                        .push_back((self.executed, self.x[0], self.x[1], self.x[2], self.x[3]));
+                }
+            }
             // Diagnostic watchpoints (env-gated, default off): log the
             // register window each time pc matches a watched address.
             if !self.watch_addrs.is_empty() {
@@ -4262,9 +4348,12 @@ impl CpuBackend for Interpreter {
                     if self.executed >= *hit + 1 {
                         *hit = self.executed;
                         eprintln!(
-                            "[watch] insn={} pc={:#x} lr={:x} x0={:x} x1={:x} x2={:x} x3={:x} x4={:x} x5={:x}",
+                            "[watch] insn={} pc={:#x} lr={:x} x0={:x} x1={:x} x2={:x} x3={:x} x4={:x} x5={:x} x8={:x} x9={:x} x10={:x} x11={:x} x12={:x} x13={:x} x19={:x} x20={:x} x21={:x} x22={:x}",
                             self.executed, self.pc, self.x[30],
-                            self.x[0], self.x[1], self.x[2], self.x[3], self.x[4], self.x[5]
+                            self.x[0], self.x[1], self.x[2], self.x[3], self.x[4], self.x[5],
+                            self.x[8], self.x[9], self.x[10], self.x[11],
+                            self.x[12], self.x[13],
+                            self.x[19], self.x[20], self.x[21], self.x[22]
                         );
                     }
                 }

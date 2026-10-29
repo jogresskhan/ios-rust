@@ -3,7 +3,7 @@
  "target_soc": "Apple T8030 (A13 Bionic)",
  "machine": "apple-t8030",
  "cpu": "apple-a13 (Lightning x2 + Thunder x4, ARMv8.4-A, AArch64-only)",
- "generated": "2026-10-30 (session G: M3 gate cleared, walker goldens, bug #19)",
+ "generated": "2026-10-30 (session H: M4 vectoring live, bugs #20-#24, boot 8.14M\u219210.92M insns w/ 21,270 vectored kernel aborts; M4 gate NOT cleared)",
  "rubric": {
   "100": "proven by CI/test artifact",
   "90": "implemented + verified",
@@ -43,9 +43,9 @@
   },
   {
    "name": "a13-cpu interpreter",
-   "pct": 88,
+   "pct": 89,
    "files": 1,
-   "note": "session G: M3 gate CLEARED \u2014 MMU live for 8,110,809 of 8,135,842 real insns (460 walks / 9.1M TLB hits / 100.0% hit-rate, leafs all L2 blocks); ESR/FAR synthesized on translation faults; honest limits: no exception vectoring (M4), no permission/AF enforcement, wholesale TLBI"
+   "note": "session H: sync-abort vectoring live (VBAR+0x200, ESR/FAR/ELR/SPSR, budget), timer-FIQ delivery path, AIC IRQ line, WFI ns-fast-forward, CCMP field-swap fix (bug #24, 4 goldens); boot 10,921,780 insns w/ 21,270 kernel-handled aborts; M4 WFI gate NOT cleared \u2014 remap-storm zero-fetch stop"
   },
   {
    "name": "a13-cpu gxf",
@@ -74,91 +74,113 @@
   },
   {
    "name": "apple-soc: aic",
-   "pct": 55
+   "pct": 55,
+   "note": "session H: ADT reg LE fix (bug #21) + arm-io ranges translation; all modeled windows now attach at real bases (aic@0x23b100000)"
   },
   {
    "name": "apple-soc: s3c_uart",
-   "pct": 55
+   "pct": 55,
+   "note": "session H: ADT reg LE fix (bug #21) + arm-io ranges translation; all modeled windows now attach at real bases (aic@0x23b100000)"
   },
   {
    "name": "apple-soc: wdt",
-   "pct": 60
+   "pct": 60,
+   "note": "session H: ADT reg LE fix (bug #21) + arm-io ranges translation; all modeled windows now attach at real bases (aic@0x23b100000)"
   },
   {
    "name": "apple-soc: dart",
-   "pct": 55
+   "pct": 55,
+   "note": "session H: ADT reg LE fix (bug #21) + arm-io ranges translation; all modeled windows now attach at real bases (aic@0x23b100000)"
   },
   {
    "name": "apple-soc: sart",
-   "pct": 50
+   "pct": 50,
+   "note": "session H: ADT reg LE fix (bug #21) + arm-io ranges translation; all modeled windows now attach at real bases (aic@0x23b100000)"
   },
   {
    "name": "apple-soc: pmgr",
-   "pct": 45
+   "pct": 45,
+   "note": "session H: ADT reg LE fix (bug #21) + arm-io ranges translation; all modeled windows now attach at real bases (aic@0x23b100000)"
   },
   {
    "name": "apple-soc: spmi_pmu",
-   "pct": 50
+   "pct": 50,
+   "note": "session H: ADT reg LE fix (bug #21) + arm-io ranges translation; all modeled windows now attach at real bases (aic@0x23b100000)"
   },
   {
    "name": "apple-soc: nvram",
-   "pct": 55
+   "pct": 55,
+   "note": "session H: ADT reg LE fix (bug #21) + arm-io ranges translation; all modeled windows now attach at real bases (aic@0x23b100000)"
   },
   {
    "name": "apple-soc: smc",
-   "pct": 50
+   "pct": 50,
+   "note": "session H: ADT reg LE fix (bug #21) + arm-io ranges translation; all modeled windows now attach at real bases (aic@0x23b100000)"
   },
   {
    "name": "apple-soc: gpio_i2c_spi",
-   "pct": 45
+   "pct": 45,
+   "note": "session H: ADT reg LE fix (bug #21) + arm-io ranges translation; all modeled windows now attach at real bases (aic@0x23b100000)"
   },
   {
    "name": "apple-soc: ans2_nvme",
-   "pct": 75
+   "pct": 75,
+   "note": "session H: ADT reg LE fix (bug #21) + arm-io ranges translation; all modeled windows now attach at real bases (aic@0x23b100000)"
   },
   {
    "name": "apple-soc: aes",
-   "pct": 90
+   "pct": 90,
+   "note": "session H: ADT reg LE fix (bug #21) + arm-io ranges translation; all modeled windows now attach at real bases (aic@0x23b100000)"
   },
   {
    "name": "apple-soc: sep_sim",
-   "pct": 90
+   "pct": 90,
+   "note": "session H: ADT reg LE fix (bug #21) + arm-io ranges translation; all modeled windows now attach at real bases (aic@0x23b100000)"
   },
   {
    "name": "apple-soc: displaypipe (ADP v4)",
-   "pct": 50
+   "pct": 50,
+   "note": "session H: ADT reg LE fix (bug #21) + arm-io ranges translation; all modeled windows now attach at real bases (aic@0x23b100000)"
   },
   {
    "name": "apple-soc: mipi_dsi",
-   "pct": 90
+   "pct": 90,
+   "note": "session H: ADT reg LE fix (bug #21) + arm-io ranges translation; all modeled windows now attach at real bases (aic@0x23b100000)"
   },
   {
    "name": "apple-soc: typec_otg",
-   "pct": 75
+   "pct": 75,
+   "note": "session H: ADT reg LE fix (bug #21) + arm-io ranges translation; all modeled windows now attach at real bases (aic@0x23b100000)"
   },
   {
    "name": "apple-soc: apcie",
-   "pct": 75
+   "pct": 75,
+   "note": "session H: ADT reg LE fix (bug #21) + arm-io ranges translation; all modeled windows now attach at real bases (aic@0x23b100000)"
   },
   {
    "name": "apple-soc: aop",
-   "pct": 45
+   "pct": 45,
+   "note": "session H: ADT reg LE fix (bug #21) + arm-io ranges translation; all modeled windows now attach at real bases (aic@0x23b100000)"
   },
   {
    "name": "apple-soc: rtkit",
-   "pct": 45
+   "pct": 45,
+   "note": "session H: ADT reg LE fix (bug #21) + arm-io ranges translation; all modeled windows now attach at real bases (aic@0x23b100000)"
   },
   {
    "name": "apple-soc: mca",
-   "pct": 90
+   "pct": 90,
+   "note": "session H: ADT reg LE fix (bug #21) + arm-io ranges translation; all modeled windows now attach at real bases (aic@0x23b100000)"
   },
   {
    "name": "apple-soc: scaler",
-   "pct": 75
+   "pct": 75,
+   "note": "session H: ADT reg LE fix (bug #21) + arm-io ranges translation; all modeled windows now attach at real bases (aic@0x23b100000)"
   },
   {
    "name": "apple-soc: t8030 machine",
-   "pct": 90
+   "pct": 90,
+   "note": "session H: ADT reg LE fix (bug #21) + arm-io ranges translation; all modeled windows now attach at real bases (aic@0x23b100000)"
   },
   {
    "name": "ipsw (fetch/manifest/im4p/variants)",
@@ -279,63 +301,78 @@
   },
   {
    "name": "apple-soc: buttons",
-   "pct": 75
+   "pct": 75,
+   "note": "session H: ADT reg LE fix (bug #21) + arm-io ranges translation; all modeled windows now attach at real bases (aic@0x23b100000)"
   },
   {
    "name": "apple-soc: roswell",
-   "pct": 75
+   "pct": 75,
+   "note": "session H: ADT reg LE fix (bug #21) + arm-io ranges translation; all modeled windows now attach at real bases (aic@0x23b100000)"
   },
   {
    "name": "apple-soc: mic_tempsensor",
-   "pct": 75
+   "pct": 75,
+   "note": "session H: ADT reg LE fix (bug #21) + arm-io ranges translation; all modeled windows now attach at real bases (aic@0x23b100000)"
   },
   {
    "name": "apple-soc: tempsensor (upstream stub 1:1)",
-   "pct": 60
+   "pct": 60,
+   "note": "session H: ADT reg LE fix (bug #21) + arm-io ranges translation; all modeled windows now attach at real bases (aic@0x23b100000)"
   },
   {
    "name": "apple-soc: spmi_baseband",
-   "pct": 75
+   "pct": 75,
+   "note": "session H: ADT reg LE fix (bug #21) + arm-io ranges translation; all modeled windows now attach at real bases (aic@0x23b100000)"
   },
   {
    "name": "apple-soc: chestnut (upstream stub 1:1)",
-   "pct": 60
+   "pct": 60,
+   "note": "session H: ADT reg LE fix (bug #21) + arm-io ranges translation; all modeled windows now attach at real bases (aic@0x23b100000)"
   },
   {
    "name": "apple-soc: fan53740 (upstream stub 1:1)",
-   "pct": 60
+   "pct": 60,
+   "note": "session H: ADT reg LE fix (bug #21) + arm-io ranges translation; all modeled windows now attach at real bases (aic@0x23b100000)"
   },
   {
    "name": "apple-soc: lm_backlight (upstream stub 1:1)",
-   "pct": 60
+   "pct": 60,
+   "note": "session H: ADT reg LE fix (bug #21) + arm-io ranges translation; all modeled windows now attach at real bases (aic@0x23b100000)"
   },
   {
    "name": "apple-soc: pmu_d2255",
-   "pct": 75
+   "pct": 75,
+   "note": "session H: ADT reg LE fix (bug #21) + arm-io ranges translation; all modeled windows now attach at real bases (aic@0x23b100000)"
   },
   {
    "name": "apple-soc: a7iop",
-   "pct": 75
+   "pct": 75,
+   "note": "session H: ADT reg LE fix (bug #21) + arm-io ranges translation; all modeled windows now attach at real bases (aic@0x23b100000)"
   },
   {
    "name": "apple-soc: a7iop_mailbox",
-   "pct": 75
+   "pct": 75,
+   "note": "session H: ADT reg LE fix (bug #21) + arm-io ranges translation; all modeled windows now attach at real bases (aic@0x23b100000)"
   },
   {
    "name": "apple-soc: displaypipe_v2",
-   "pct": 75
+   "pct": 75,
+   "note": "session H: ADT reg LE fix (bug #21) + arm-io ranges translation; all modeled windows now attach at real bases (aic@0x23b100000)"
   },
   {
    "name": "apple-soc: mt_spi",
-   "pct": 75
+   "pct": 75,
+   "note": "session H: ADT reg LE fix (bug #21) + arm-io ranges translation; all modeled windows now attach at real bases (aic@0x23b100000)"
   },
   {
    "name": "apple-soc: baseband",
-   "pct": 75
+   "pct": 75,
+   "note": "session H: ADT reg LE fix (bug #21) + arm-io ranges translation; all modeled windows now attach at real bases (aic@0x23b100000)"
   },
   {
    "name": "apple-soc: full Inferno device inventory (inventory.rs)",
-   "pct": 100
+   "pct": 100,
+   "note": "session H: ADT reg LE fix (bug #21) + arm-io ranges translation; all modeled windows now attach at real bases (aic@0x23b100000)"
   },
   {
    "name": "kernelcache: boot patcher (engine + T8030 table)",
@@ -401,8 +438,8 @@
   }
  ],
  "tests": {
-  "total": 298,
-  "passing": 298
+  "total": 394,
+  "passing": 394
  },
  "sources": [
   "ChefKiss Inferno @cc4302a (hw/ device models, AGPL-3.0/GPL-2.0)",
@@ -412,5 +449,5 @@
   "restored_external 18A5351d decompilation (RE-FINDINGS.md, checkpoint 0x0104/0x065B/0x067E contract)",
   "ARM DDI 0487 (A64 encodings)"
  ],
- "tests_passed": 298
+ "tests_passed": 394
 }

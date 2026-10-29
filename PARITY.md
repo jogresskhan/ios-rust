@@ -690,3 +690,57 @@ resolved in favor of the re-measured 8,135,842.
 mmu goldens; report fields + isa cleanup produced no regressions).
 BOOT-PLAN M3 marked [x] with this run as evidence; permission/AF/XN
 enforcement stays an honest, tracked limit gated on M4 vectoring.
+
+### 2.12 — Session H (2026-10-30): M4 vectoring live + four real-data bugs #20-#24
+
+* **BUG #20 (boot_args DeviceTreeP @+0x28/+0x30 → must be +0x60/+0x68):**
+  the M2-era builder put the DT pointer inside Boot_Video; the kernel
+  reads deviceTreeP/deviceTreeLength at +0x60/+0x68 (PE_init_platform,
+  pe_init.c:390; kernel-side `ldr x9,[x19,#0x60]` @0x…81399c8). This —
+  not the "0x…b83f54 gate" — is why DT globals shipped zero since M2.
+  Fixed (+revision=2), golden-pinned.
+* **BUG #21 (ADT reg parsed big-endian):** real Apple ADT is LE;
+  `/arm-io/aic` reg = 0x3b100000/0x8000 LE u64 pairs; all 59 modeled
+  windows attached at garbage bases (aic@0x103B, pmgr@0x3B — measured by
+  the M5 MMIO census, notes/m5-device-census.md). LE format rule pinned
+  by real bytes (len%16==0 → u64 pairs; %16==8 → u32; ==4 → bare u32) +
+  arm-io `ranges` translation (child <0x1_00000000 → +0x2_00000000;
+  0x6_.. identity — decoded from the real ranges property).
+* **BUG #22 (hardcoded staging layout):** DT blob sat exactly AT
+  topOfKernelData (0x8_0400_0000) while end_kern of the 45.7 MB image is
+  0x803BAD000 — outside the [end_kern, topOfKernelData) physmap region
+  arm_vm_init maps; the kernel's PE_slide_devicetree landed head on the
+  region start and SecureDT panicked "Device tree pointer outside of
+  device tree region" (0x…73adec0) inside DTGetProperty("name","arm-io").
+  Layout now computed from real sizes; deviceTreeP = blob bootstrap-KVA
+  (PA + virtBase − physBase — the identity arm_vm_physmap_slide
+  subtracts, verified against arm_vm_init.c:1471-1474).
+* **BUG #23 (DT boot-cpu state):** the real n104ap blob ships all 6
+  /cpus nodes state="waiting"; iBoot marks the boot core "running"
+  before the jump (ml_is_boot_cpu, machine_routines.c:924). Harness now
+  patches cpu0 "waiting\0"→"running\0" in-place (8 bytes, nothing else).
+* **BUG #24 (CCMP/CCMN decode field swap):** decode read cond@3:0 /
+  nzcv@15:12; keystone 4-sample pin: cond is ALWAYS 15:12, nzcv ALWAYS
+  3:0, both forms. The real DT-walk `cmp x12,x8; ccmp x13,x8,#0,ls;
+  b.lo` branched on correct registers and panicked the boot. Fixed +
+  register-form VALUE semantics + 4 goldens; old row FA430822 was
+  self-consistent with the swap (capstone: `ccmp x1, #3, #2, eq`).
+
+* **Measured (IOS_RUST_DRAM_MB=1024):** boot-first 8,135,842 →
+  **10,921,780 insns**; 22,946 walks / 14,568,119 TLB hits (99.8%);
+  **21,270 data-aborts vectored to the kernel's own handler**
+  (exc 21270 sync · FIQ 0 · IRQ 0 · WFI 0); terminal stop
+  `UnknownInsn 0x0 @ 0xfffffff00816c458` — stop-pc re-walk: stale TLB
+  entry → PA 0x80216c458 (correct text PA) reads ZERO; the kernel
+  zeroed its own text page during the abort-driven remap storm (open RE
+  target, next block). M4 acceptance (WFI-and-resume ≥10M): NOT cleared.
+* **M4 infra (M4-B research landed, notes/m4-aic-timer-re.md):** sync
+  abort vectoring (VBAR+0x200, ESR/FAR/ELR/SPSR, budget 100k), timer-FIQ
+  delivery path, AIC IRQ line, WFI ns-fast-forward, cpu_data[0] scan,
+  IOS_RUST_WATCH watchpoint diagnostics. Spec corrections: timer =
+  FIQ via CNTV_CTL ISTATUS (NOT IRQ 29 — BOOT-PLAN corrected); CNTFRQ
+  never read (24 MHz default); VBAR_EL1 = 0xfffffff008165000;
+  machine_idle @0x81699a0; AIC v1 map per pexpert AIC.h.
+* `cargo test --workspace`: **394 passed / 0 failed** (IOS_RUST_DRAM_MB=
+  768 on the 3 GiB host — the 4 GiB default window OOMs there; knob is
+  the honest workaround, unchanged behavior on 4+ GiB hosts).

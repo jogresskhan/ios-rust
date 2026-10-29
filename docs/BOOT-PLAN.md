@@ -274,7 +274,77 @@ xnu builds its own page tables during early boot; the interpreter must walk them
    T0SZ=T1SZ=25, TBI0=1, IPS=40-bit) and now surfaced live in the boot
    report's MMU config line.]**
 
-## M4 — IRQ / AIC / timers  [ ]
+## M4 — IRQ / AIC / timers  [ ] (session H 2026-10-30: vectoring live, kernel handles its own aborts; gate NOT cleared — see evidence)
+
+**Session H evidence (2026-10-30, IOS_RUST_DRAM_MB=1024, log /tmp/bf-m4-ccmp.log):**
+boot-first went 8,135,842 → **10,921,780 retired insns** with the DT path
+fully unblocked and **21,270 data-aborts VECTORED to the kernel's own
+handler** (sync-abort → VBAR+0x200 with ESR/FAR/ELR/SPSR synthesis,
+DAIF masking; exc_taken 21270 · FIQ 0 · IRQ 0 · WFI 0). The terminal
+stop is now `UnknownInsn 0x0 @ 0xfffffff00816c458`: the kernel's own
+remap loop eventually fetches zeros — the stop-pc re-walk shows a stale
+TLB entry returning PA 0x80216c458 (the CORRECT text PA) whose bytes are
+zero, i.e. the kernel itself zeroed its text page during the
+abort-driven mapping storm (next block's RE target: which kernel write
+lands on the text PA, and whether a pmap table-page allocation we feed
+is wrong). Four REAL-DATA bugs found+fixed this session:
+
+* **#20 boot_args DeviceTreeP** — the M2-era builder wrote the DT pointer
+  at +0x28/+0x30 (inside Boot_Video); the kernel reads deviceTreeP@0x60 /
+  deviceTreeLength@0x68 (PE_init_platform, pe_init.c:390-391; kernel-side
+  proof `ldr x9,[x19,#0x60]` @0x…81399c8). Fixed + revision=2 + golden.
+* **#21 ADT reg little-endian** — `AdtNode::reg_entries` parsed BE; the
+  real n104ap tree is LE (`/arm-io/aic` reg = 0x3b100000/0x8000 as LE
+  u64 pairs) — all 59 modeled windows attached at garbage bases
+  (aic@0x103B). Fixed + LE format rule (len%16==0 → u64 pairs; %16==8 →
+  u32 pairs; len==4 → bare u32) + real-bytes golden + arm-io `ranges`
+  translation (child 0..0x1_00000000 → +0x2_00000000, 0x6_.. → identity,
+  read from the real ranges property).
+* **#22 staging layout** — hardcoded TOP_OF_KERNEL_DATA = DT_PA =
+  0x8_0400_0000 sat exactly AT topOfKernelData while end_kern (45.7 MB
+  image) is 0x803BAD000 — the DT blob was outside the physmap region
+  arm_vm_init maps ([end_kern, topOfKernelData)), the slide landed
+  deviceTreeHead on the region start and SecureDT panicked "Device tree
+  pointer outside of device tree region" (string 0x…73adec0). Layout now
+  computed from real sizes: image → end_kern → DT → boot_args →
+  topOfKernelData; deviceTreeP = blob bootstrap-KVA (PA + virtBase −
+  physBase, the identity arm_vm_physmap_slide subtracts). Plus iBoot-
+  equivalent DT staging: the real blob ships all 6 /cpus nodes
+  "waiting"; cpu0 patched to "running" in-place (ml_is_boot_cpu,
+  machine_routines.c:924 needs exactly one running node).
+* **#24 CCMP/CCMN field swap** — decode read cond from bits 3:0 and nzcv
+  from 15:12; keystone 4-sample pin proves cond is ALWAYS bits 15:12 and
+  nzcv ALWAYS bits 3:0 in BOTH forms (`ccmp x13, x8, #0, ls` =
+  0xFA4891A0: cond@15:12=9, nzcv@3:0=0). The real DT-walk sequence
+  `cmp x12,x8; ccmp x13,x8,#0,ls; b.lo` branched with correct registers
+  and panicked the boot. Fixed decode + register-form VALUE semantics
+  (the old row also used the reg NUMBER as an immediate) + 4 new
+  goldens; the old FA430822 row was self-consistent with the swap
+  (capstone: `ccmp x1, #3, #2, eq`).
+
+**M4 infrastructure landed (uncommitted-from-timeout M4-B work, now
+tested):** exception vectoring with budget (100k), take_exception
+(ELR/FAR/ESR/SPSR + DAIF masking), timer-FIQ delivery (CNTV_CTL
+ISTATUS → VBAR+0x300 when DAIF.F clear), AIC IRQ line, WFI counters +
+ns fast-forward, cpu_data[0] discovery scan, GXF context seed,
+`IOS_RUST_WATCH` env-gated watchpoint diagnostics (pc/lr/x0..x22 log,
+zero drift). **Spec corrections from the real kernel (M4-B notes,
+tools/re/notes/m4-aic-timer-re.md — capstone, 318 lines):** the timer
+deadline path is **FIQ, not IRQ 29** (sleh_fiq reads CNTV_CTL ISTATUS;
+BOOT-PLAN's "IRQ 29" corrected here); CNTFRQ never read (24 MHz from
+pe_identify_machine defaults, no /cpus timebase prop exists); VBAR_EL1
+early = 0xfffffff008165000; machine_idle @0x81699a0 = the only idle WFI;
+AIC v1 offsets per pexpert AIC.h (kext does the init, not pexpert).
+
+**Honest limits carried forward:** M4 acceptance NOT met (no WFI loop
+yet — the kernel stops in the remap storm at 10.9M); AIC model still the
+stub (AIC.h offsets documented, kext driver RE pending); PAR/AT S1E1R +
+PAR_EL1 still absent (kvtophys sites will need them once the remap storm
+is past); permission/AF/XN enforcement still gated on this vectoring
+(now EXISTS — enforcement can land next). cargo test --workspace:
+**394 passed / 0 failed** (DRAM_MB=768 — the 4 GiB default window cannot
+allocate on the 3 GiB host; the env knob is the honest workaround,
+default behavior unchanged on big hosts).
 
 1. Model `apple-aic` v1 (devices crate has a stub): event reg, IPI regs,
    pending-set/clear, mask; wire to `vm-core::irq::IrqController`.

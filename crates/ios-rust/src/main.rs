@@ -27,6 +27,7 @@ use vault::VaultClient;
 use virt::{machine_boot, Machine, MachineConfig, QemuCli, QEMU_COMPAT_VERSION};
 
 mod boot_full;
+mod boot_first;
 mod host_restore;
 
 fn main() {
@@ -54,11 +55,27 @@ fn main() {
             };
             boot_full::run(ipsw.as_deref(), &out_dir)
         }
+        Some("boot-first") => {
+            // boot-first [fixtures-dir] [out-dir] — irestore staging → first boot
+            let mut fixtures = None;
+            let mut out_dir = PathBuf::from(".");
+            for a in &args[1..] {
+                let p = Path::new(a);
+                if p.is_dir() {
+                    if p.join("BuildManifest.plist").exists() && fixtures.is_none() {
+                        fixtures = Some(p.to_path_buf());
+                    } else {
+                        out_dir = p.to_path_buf();
+                    }
+                }
+            }
+            boot_first::run(fixtures.as_deref(), &out_dir)
+        }
         Some("sandbox") => cmd_sandbox(&args[1..]),
         _ => {
             eprintln!(
                 "ios-rust {} — single-binary T8030 emulator + restore pipeline\n\n\
-                 commands:\n  run      qemu-system-aarch64 compatible subset (-M apple-t8030 …)\n  restore  parse + ramdisk-variant IPSW pipeline\n  boot     restore → install → homescreen ladder (honest status)\n  parity   100%-parity ledger status\n  vault    research-S3 (list/get/put/usage)\n  selftest invariants\n  dsc      dyld shared cache reader (info/images/rebase/symbols/a2o/o2a)\n  kc       kernelcache (info/version/kexts) — LZSS/LZFSE decode\n  devices  device database + ipsw.me catalog (list/lookup/board/cpuid/t8030/ipsw-me)\n  vulns    iOS vulnerability research KB (list/show/search/mitigations/frida/tools)\n  dc       DeviceCheck token internals (demo/constants/entitlements)\n  xnu      XNU ARM64 ABI KB (syscalls/traps/errno/boot/boot-order/abi)\n  host     Linux host integration (check/deps/qemu)",
+                 commands:\n  run      qemu-system-aarch64 compatible subset (-M apple-t8030 …)\n  restore  parse + ramdisk-variant IPSW pipeline\n  boot     restore → install → homescreen ladder (honest status)\n  boot-full  ipsw → full-root → real-kernel → springboard (fixtures-aware)\n  boot-first  irestore staging (SHA-384 verify) → FIRST BOOT on real bytes\n  parity   100%-parity ledger status\n  vault    research-S3 (list/get/put/usage)\n  selftest invariants\n  dsc      dyld shared cache reader (info/images/rebase/symbols/a2o/o2a)\n  kc       kernelcache (info/version/kexts) — LZSS/LZFSE decode\n  devices  device database + ipsw.me catalog (list/lookup/board/cpuid/t8030/ipsw-me)\n  vulns    iOS vulnerability research KB (list/show/search/mitigations/frida/tools)\n  dc       DeviceCheck token internals (demo/constants/entitlements)\n  xnu      XNU ARM64 ABI KB (syscalls/traps/errno/boot/boot-order/abi)\n  host     Linux host integration (check/deps/qemu)",
                 env!("CARGO_PKG_VERSION")
             );
             2

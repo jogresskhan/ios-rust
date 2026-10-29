@@ -276,6 +276,44 @@ HFSX reader, codesign verify) — see `tools/re/README.md` for the full
 playbook. Workspace test count 343 → 352 (all green); ledger headline
 73.6 → **74.0** (81 rows, honest recompute).
 
+### Layer 2.12 — boot-first: the FIRST BOOT after irestore (real 18C66 data plane)
+
+`ios-rust boot-first [fixtures-dir] [out-dir]` reproduces on real Apple
+bytes what happens between idevicerestore printing “Restore Finished
+(status 0)” and the first instruction of the freshly-installed system:
+
+1. **[irestore 1/3] identity select** — the real 751 KB
+   `BuildManifest.plist` parsed with the workspace plist parser: 6
+   identities, 4× n104ap (iPhone12,1), supported products
+   iPhone12,1/iPhone11,8, build 18C66, ApChipID 0x8030, ApBoardID 0x04,
+   UniqueBuildID 20 B.
+2. **[irestore 2/3] SHA-384 component verification** — the restored
+   data plane, measured:
+   - `DeviceTree.n104ap.im4p` (42,763 B) == manifest `DeviceTree`
+     digest for **all four** n104ap identities ✅
+   - `kernelcache.release.iphone12b` (15,849,700 B) == manifest
+     `KernelCache` digest for identity[1] “Customer Erase Install” and
+     identity[4] “Customer Upgrade Install” ✅
+   - `RestoreKernelCache`/`RestoreDeviceTree` (the restore-RAMDISK
+     images, covered by the G1/G2 lanes) correctly do NOT match the
+     release files — the check is discriminating, not vacuous.
+3. **[irestore 3/3] staging** — the two verified components plus
+   `staging-manifest.txt` land in `boot-first-staged/`: the exact
+   device state right after status 0.
+4. **[first boot] iBoot-equivalent on the STAGED bytes** — machine
+   assembly from the staged ADT (59/105 /arm-io peripherals modeled,
+   35 unmatched), staged kernelcache LZFSE-decoded (45,778,056 B),
+   T8030 patch table 8/17 applied on real bytes, image mapped at the
+   real VA, and the pure-Rust A13 interpreter executes the kernel's
+   first function: **9 instructions retired from
+   `0xfffffff007a18000`, clean RET → HLT** (exit 0).
+
+Verdict (honest): the irestore → first-boot data plane is REAL and
+digest-verified end to end; the boot still stops at the first function
+— a full boot needs rebase/chained-fixups image loading, MMU/TLB,
+IRQ/AIC delivery, userspace exec (see Layer 2.11a). Nothing synthetic
+past the stop. Ledger: +1 row (82), headline 74.0 → **74.1**.
+
 ## Layer 2.10 — REAL-ARTIFACT gates ("use the GitHub action to make download cache", Dec 2026)
 
 Real Apple artifacts are now first-class CI fixtures (`.github/workflows/

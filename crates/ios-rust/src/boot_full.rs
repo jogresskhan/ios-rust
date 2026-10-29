@@ -352,7 +352,10 @@ pub fn real_kernel_stage() -> Option<Result<RealKernelReport, String>> {
     Some(real_kernel_run(&dir))
 }
 
-fn real_kernel_run(dir: &Path) -> Result<RealKernelReport, String> {
+/// Run the real-kernel boot from `dir` (which must contain
+/// `kernelcache.release.iphone12b` + `DeviceTree.n104ap.im4p`). Used by
+/// `boot-full` (fixtures dir) and `boot-first` (the staged install dir).
+pub fn real_kernel_run(dir: &Path) -> Result<RealKernelReport, String> {
     // 1) decompress the REAL kernelcache
     let kc_path = dir.join("kernelcache.release.iphone12b");
     let raw = std::fs::read(&kc_path).map_err(|e| format!("read {}: {e}", kc_path.display()))?;

@@ -3,7 +3,7 @@
   "target_soc": "Apple T8030 (A13 Bionic)",
   "machine": "apple-t8030",
   "cpu": "apple-a13 (Lightning x2 + Thunder x4, ARMv8.4-A, AArch64-only)",
-  "generated": "2026-12-03",
+  "generated": "2026-10-29",
   "rubric": {
     "100": "proven by CI/test artifact",
     "90": "implemented + verified",
@@ -16,9 +16,9 @@
   },
   "engine_smoke": {
     "status": "PASS",
-    "detail": "boot-full v2: full APFS container build (System/Data/Preboot) \u2192 REAL-KERNEL STAGE (the actual T8030 iOS 13.7 kernelcache from Apple's CDN: 39 MB LZFSE decode, 6/20 T8030 patches applied to real bytes, real ADT drives device attach 59/105 peripherals, and the pure-Rust A13 interpreter executes the kernel's first real function to a clean RET\u2192HLT from __TEXT_EXEC 0xfffffff007bb0000) \u2192 launchd\u2192SpringBoard ladder \u2192 2436x1125 homescreen; PLUS 20 CPU groups with the 189-entry golden table; PLUS real TSS response parse (gs.apple.com capture). Next honest gate: kernel image rebase/fixup load (GOT pointers ship zeroed) to boot past the first indirect call. RE-toolkit session: measured 90.52%\u219298.59% decode / 90.4%\u219298.6% exec on the real 18C66 kernel text after porting PAC-branches, 9-bit addressing, STP/LDP pairs+SIMD, exception class, register-offset LS, add-sub-extended, LSLV family; 3 decoder bugs fixed (MOV-alias swallow, LDP/STP opc map, SIMD LS width rule)."
+    "detail": "boot-full v2: full APFS container build (System/Data/Preboot) \u2192 REAL-KERNEL STAGE (the actual T8030 iOS 13.7 kernelcache from Apple's CDN: 39 MB LZFSE decode, 6/20 T8030 patches applied to real bytes, real ADT drives device attach 59/105 peripherals, and the pure-Rust A13 interpreter executes the kernel's first real function to a clean RET\u2192HLT from __TEXT_EXEC 0xfffffff007bb0000) \u2192 launchd\u2192SpringBoard ladder \u2192 2436x1125 homescreen; PLUS 20 CPU groups with the 189-entry golden table; PLUS real TSS response parse (gs.apple.com capture). Next honest gate: kernel image rebase/fixup load (GOT pointers ship zeroed) to boot past the first indirect call. RE-toolkit session: measured 90.52%\u219298.59% decode / 90.4%\u219298.6% exec on the real 18C66 kernel text after porting PAC-branches, 9-bit addressing, STP/LDP pairs+SIMD, exception class, register-offset LS, add-sub-extended, LSLV family; 3 decoder bugs fixed (MOV-alias swallow, LDP/STP opc map, SIMD LS width rule). boot-first lane (2026-10-29): BuildManifest identity select + SHA-384 component verification (DeviceTree == all 4 n104ap identities; KernelCache == release identities [1]/[4]) \u2192 staged install (staging-manifest.txt, status 0) \u2192 iBoot-equivalent machine assembly from the STAGED bytes \u2192 real 18C66 kernel first function: 9 insns retired from 0xfffffff007a18000, clean RET\u2192HLT."
   },
-  "overall_pct": 74.0,
+  "overall_pct": 74.1,
   "modules": [
     {
       "name": "qemu-util (libqemuutil port)",
@@ -363,6 +363,11 @@
       "name": "RE toolkit (tools/re: oracle, mask_discover, coverage-probe, ghidra headless)",
       "pct": 100,
       "files": 18
+    },
+    {
+      "name": "boot-first lane (irestore SHA-384 staging \u2192 FIRST BOOT on real 18C66 bytes)",
+      "pct": 75,
+      "files": 1
     }
   ],
   "permanent_gaps": [

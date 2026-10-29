@@ -206,3 +206,17 @@ capstone/keystone-only.
    (`decode sweep %`, top remaining classes with counts).
 4. Real-data findings (bugs the fixtures exposed) written into
    PARITY.md — numbered, with the fixture that exposed them.
+5. **Back up to S3 — this is now the storage of record.** The GitHub
+   account (20kiwy) is suspended; until it is restored, push every local
+   commit to IDrive e2 instead:
+
+   ```bash
+   source ~/.config/ios-rust/s3.env        # endpoint/region/keys (NOT in the repo)
+   python3 tools/s3_backup.py snapshot ios-research-vault
+   # → re-archives HEAD into the export tree, refreshes the git bundle,
+   #   and uploads: ios-rust-export/, bundle, ios-re-toolkit/, research-docs/,
+   #   verdicts/ios-rust-latest.json, INDEX-latest.md
+   ```
+
+   Bucket layout is self-describing: read `research/INDEX-latest.md` first.
+   `git clone <bundle>` restores the repo with full history.

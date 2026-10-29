@@ -67,6 +67,26 @@ pub struct SystemRegs {
     pub id_aa64isar1: u64,
     pub id_aa64pfr0: u64,
     pub id_aa64mmfr2: u64,
+    // --- M4: generic timer (xnu arms the VIRTUAL timer; CNTP disabled+IMASK) ---
+    /// CTL: bit0 ENABLE, bit1 IMASK, bit2 ISTATUS (RO, synthesized on read).
+    pub cntv_ctl: u64,
+    pub cntv_cval: u64,
+    pub cntp_ctl: u64,
+    pub cntp_cval: u64,
+    pub cntkctl_el1: u64,
+    // --- M4: Apple GXF context registers (T8030 exception plumbing) ---
+    /// S3_6_C15_C9_1 — kernel percpu/thread pointer mirror. On hardware the
+    /// GXF machinery keeps this live; PPL entry saves TPIDR→here, exception
+    /// vectors restore here→TPIDR (both sites byte-verified in the kernel).
+    pub gxf_ctx: u64,
+    /// S3_6_C15_C8_3 — GXF dispatch flag (the vector spins while bit0 set).
+    pub gxf_c8_3: u64,
+    /// S3_6_C15_C9_5 — guarded-world ESR mirror.
+    pub gxf_esr_m: u64,
+    /// S3_6_C15_C9_7 — guarded-world FAR mirror.
+    pub gxf_far_m: u64,
+    /// TPIDR_EL1 (s3_0_c13_c0_4) — percpu/thread pointer.
+    pub tpidr_el1: u64,
 }
 
 /// Canonical sysreg encodings (op0:1 op1:3 CRn:4 CRm:4 op2:3 → 15 bits).
@@ -99,12 +119,30 @@ pub mod sysreg {
     pub const CURRENT_EL: u16 = enc(1, 0, 4, 2, 2);
     pub const ID_AA64MMFR0_EL1: u16 = enc(1, 0, 0, 7, 0);
     pub const ID_AA64MMFR1_EL1: u16 = enc(1, 0, 0, 7, 1);
-    pub const TPIDR_EL1: u16 = enc(1, 0, 13, 0, 2);
+    /// REAL-DATA BUG #21 fix: TPIDR_EL1 is s3_0_c13_c0_**4** (hand-checked
+    /// against the kernel's MRS x8, tpidr_el1 = 0xD538D088 → op2=4), not op2=2.
+    pub const TPIDR_EL1: u16 = enc(1, 0, 13, 0, 4);
     pub const TPIDR_EL0: u16 = enc(1, 3, 13, 0, 2);
     pub const TPIDRRO_EL0: u16 = enc(1, 3, 13, 0, 3);
     /// Apple `s3_4_c15_c0_4` — start.s polls bit 1 before touching the
     /// core (boot-stage handshake). Modeled: reads OR-in bit 1.
     pub const APPLE_BOOT_STAGE: u16 = enc(1, 4, 15, 0, 4);
+    // --- M4: generic timer (measured usage: MSR CNTV_CTL=1, CNTP_CTL=2,
+    // CNTV_TVAL deadlines, MRS CNTV_CTL ISTATUS; census in
+    // tools/re/notes/m4-aic-timer-re.md) ---
+    pub const CNTV_CTL_EL0: u16 = enc(1, 3, 14, 3, 1);
+    pub const CNTV_CVAL_EL0: u16 = enc(1, 3, 14, 3, 2);
+    pub const CNTV_TVAL_EL0: u16 = enc(1, 3, 14, 3, 0);
+    pub const CNTP_CTL_EL0: u16 = enc(1, 3, 14, 2, 1);
+    pub const CNTP_CVAL_EL0: u16 = enc(1, 3, 14, 2, 2);
+    pub const CNTP_TVAL_EL0: u16 = enc(1, 3, 14, 2, 0);
+    pub const CNTKCTL_EL1: u16 = enc(1, 0, 14, 1, 0);
+    // --- M4: Apple GXF + fast-IPI (byte-verified MSR/MRS sites) ---
+    pub const GXF_C8_3: u16 = enc(1, 6, 15, 8, 3);
+    pub const GXF_CTX: u16 = enc(1, 6, 15, 9, 1);
+    pub const GXF_ESR_M: u16 = enc(1, 6, 15, 9, 5);
+    pub const GXF_FAR_M: u16 = enc(1, 6, 15, 9, 7);
+    pub const IPI_SR_EL1: u16 = enc(1, 5, 15, 1, 1); // fast-IPI status, W1C
     /// OSLAR_EL1 — keystone: `msr oslar_el1, xzr` = d510109f →
     /// (op0raw 1, op1 0, CRn 1, CRm 0, op2 4).
     pub const OSLAR_EL1: u16 = enc(1, 0, 1, 0, 4);
@@ -214,6 +252,46 @@ pub struct Interpreter {
     /// Insn index at the SCTLR.M 0→1 edge — THE M3 gate metric source:
     /// `mmu_live_insns = executed − mmu_live_from` (RunResult carries it).
     pub mmu_live_from: Option<u64>,
+    /// M4: WFI fast-forwarded idle time (ns) — added to the exec time for
+    /// CNTVCT/CNTPCT/timer deadlines but NOT counted against the ns budget
+    /// (virtual idle must not starve the instruction budget).
+    pub ns_ffwd: u64,
+    /// M4: AIC IRQ line (the machine's interrupt controller raises it).
+    pub irq_line: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// M4 counters — the honest report surface.
+    pub exc_taken: u64,
+    pub fiq_taken: u64,
+    pub irq_taken: u64,
+    pub sync_aborts: u64,
+    pub wfi_count: u64,
+    pub wfi_wakeups: u64,
+    /// M4: synchronous-abort vectoring budget (0 disables vectoring).
+    pub vector_budget: u64,
+    /// M4: last exception (kind, esr, far, elr) for the boot report.
+    pub last_exception: Option<(&'static str, u64, u64, u64)>,
+    /// M4: GXF context seed provenance flag (seeded once, then reported).
+    pub gxf_ctx_seeded: bool,
+    /// M4: PA window of the kernel's __DATA segment — where the
+    /// cpu_data[0] discovery scan runs (the machine fills this from the
+    /// parsed segments).
+    pub cpu_data_scan: Option<(u64, u64)>,
+    /// M4: discovered cpu_data[0] address (report surface).
+    pub cpu_data0_addr: Option<u64>,
+    /// M4: KVA = PA + kva_base (the kernel's bootstrap identity
+    /// virtBase − physBase, set by the machine at handoff).
+    pub kva_base: u64,
+    /// M4 debug: capture stores of boot-stack-range kernel VAs (finds the
+    /// cpu_data_init int-stack field writes without any heuristic scan).
+    pub stack_write_watch: bool,
+    pub stack_writes: std::collections::VecDeque<(u64, u64, u64)>, // (pc, addr, val)
+    /// M4: earliest insn index the failed discovery scan may retry at.
+    cpu_data_scan_retry_at: u64,
+    /// Diagnostic watchpoints (env IOS_RUST_WATCH="0xaddr,…" — default
+    /// empty, zero behavior drift): on pc match, log pc/lr/x0..x3 to
+    /// stderr. Kernel-RE breakpoint aid, not emulation semantics.
+    pub watch_addrs: Vec<u64>,
+    /// Watchpoint dedup: last executed index reported per address.
+    watch_last_hit: std::collections::HashMap<u64, u64>,
 }
 
 const N: u32 = 1 << 3;
@@ -281,7 +359,63 @@ impl Interpreter {
             trace: std::collections::VecDeque::new(),
             last_sp_change: None,
             mmu_live_from: None,
+            ns_ffwd: 0,
+            irq_line: None,
+            exc_taken: 0,
+            fiq_taken: 0,
+            irq_taken: 0,
+            sync_aborts: 0,
+            wfi_count: 0,
+            wfi_wakeups: 0,
+            vector_budget: 100_000,
+            last_exception: None,
+            gxf_ctx_seeded: false,
+            cpu_data_scan: None,
+            cpu_data0_addr: None,
+            kva_base: 0,
+            stack_write_watch: false,
+            stack_writes: std::collections::VecDeque::new(),
+            cpu_data_scan_retry_at: 0,
+            watch_addrs: std::env::var("IOS_RUST_WATCH")
+                .unwrap_or_default()
+                .split(',')
+                .filter_map(|s| u64::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok())
+                .collect(),
+            watch_last_hit: std::collections::HashMap::new(),
         }
+    }
+
+    /// M4: discover cpu_data[0]'s address by scanning the kernel's __DATA
+    /// for the struct the kernel's own bootstrap filled in: a live kernel
+    /// VA at +0x4f8 (intstack_top, written by cpu_data_init) with the
+    /// exception-depth counter at +0x500 still small. Returns the struct
+    /// base. Every seeded byte is guest-written — nothing invented.
+    fn discover_cpu_data0(&mut self) -> Option<u64> {
+        let (start, end) = self.cpu_data_scan?;
+        // rescan cooldown: a failed scan is retried at most once per 1M
+        // retired insns (cpu_data_init may simply not have run yet).
+        if self.executed < self.cpu_data_scan_retry_at {
+            return None;
+        }
+        let mut addr = (start + 0xF) & !0xF;
+        while addr + 0x520 <= end {
+            let istack = MemAccess::load(&mut *self.mem, addr + 0x4f8, 8);
+            // intstack_top KVA: a canonical kernel VA in the boot-stack
+            // neighborhood (observed SP = 0xFFFFFFF0_09B0FD30 — __BOOTDATA
+            // stacks). Anything else is a false positive.
+            if (0xFFFF_FFF0_0980_0000..0xFFFF_FFF0_0A40_0000).contains(&istack)
+                && istack & 7 == 0
+            {
+                let depth = MemAccess::load(&mut *self.mem, addr + 0x500, 8);
+                if depth <= 0x1000 {
+                    self.cpu_data0_addr = Some(addr);
+                    return Some(addr);
+                }
+            }
+            addr += 8;
+        }
+        self.cpu_data_scan_retry_at = self.executed + 1_000_000;
+        None
     }
 
     /// Record (pc, word, regs) into the bounded trace ring when enabled.
@@ -339,9 +473,18 @@ impl Interpreter {
         }
     }
 
+    /// Sign-extend a 32-bit loaded value to 64 bits.
+    #[inline]
+    fn sext32(v: u64) -> u64 {
+        (v as u32 as i32) as i64 as u64
+    }
+
     /// Translate a VA through the stage-1 MMU (pass-through while off).
-    /// Every walk fault synthesizes FAR_EL1 = va and ESR_EL1 (EC/WnR/DFSC
-    /// per `mmu::synth_esr`) before surfacing the stop — no vectoring yet.
+    /// M4: on a walk fault, if the guest's VBAR_EL1 is live and vectoring
+    /// budget remains, deliver a SYNCHRONOUS ABORT to the vector table
+    /// (ELR=faulting insn, FAR=va, ESR per `mmu::synth_esr`, DAIF masked)
+    /// and return `ExceptionTaken` — the run loop continues at the vector.
+    /// Without a live VBAR (pre-vector boot) the fault stays terminal.
     #[inline]
     fn vaddr(&mut self, va: u64, kind: XlateKind) -> Result<u64, StopReason> {
         if !self.mmu.enabled {
@@ -351,13 +494,23 @@ impl Interpreter {
             .translate(&mut *self.mem, va, kind)
             .map_err(|(v, detail)| {
                 let level = self.mmu.last_fault_chain.last().map(|c| c.0).unwrap_or(0);
-                self.sys.far_el1 = v;
-                self.sys.esr_el1 = crate::mmu::synth_esr(kind, detail, level);
-                StopReason::TranslationFault {
-                    pc: self.pc,
-                    va: v,
-                    kind: kind.as_str(),
-                    detail,
+                let esr = crate::mmu::synth_esr(kind, detail, level);
+                if self.sys.vbar_el1 != 0 && self.vector_budget > 0 {
+                    self.vector_budget -= 1;
+                    self.sync_aborts += 1;
+                    // current-EL SPx sync entry (instr + data aborts both
+                    // enter at VBAR+0x200; EC in the ESR distinguishes them)
+                    self.take_exception(0x200, esr, Some(v), kind.as_str());
+                    StopReason::ExceptionTaken
+                } else {
+                    self.sys.far_el1 = v;
+                    self.sys.esr_el1 = esr;
+                    StopReason::TranslationFault {
+                        pc: self.pc,
+                        va: v,
+                        kind: kind.as_str(),
+                        detail,
+                    }
                 }
             })
     }
@@ -381,6 +534,14 @@ impl Interpreter {
     #[inline]
     fn st(&mut self, va: u64, size: u8, val: u64) -> Result<(), StopReason> {
         let pa = self.vaddr(va, XlateKind::Store)?;
+        if self.stack_write_watch
+            && size == 8
+            && (0xFFFF_FFF0_0980_0000..0xFFFF_FFF0_0A40_0000).contains(&val)
+        {
+            if self.stack_writes.len() < 128 {
+                self.stack_writes.push_back((self.pc, va, val));
+            }
+        }
         MemAccess::store(&mut *self.mem, pa, size, val);
         Ok(())
     }
@@ -436,10 +597,60 @@ impl Interpreter {
         }
     }
 
-    /// Sign-extend a 32-bit loaded value to 64 bits.
+    /// 24 MHz model counter (measured: gPEClockFrequencyInfo.timebase =
+    /// 24,000,000 on T8030; the kernel never reads CNTFRQ but CNTVCT drives
+    /// mach_absolute_time). Ticks advance with executed insns (40 ns model)
+    /// PLUS WFI fast-forwarded idle time.
     #[inline]
-    fn sext32(v: u64) -> u64 {
-        (v as u32 as i32) as i64 as u64
+    pub fn ticks(&self) -> u64 {
+        (self.ns_budget_used + self.ns_ffwd) * 24 / 1000
+    }
+
+    #[inline]
+    fn ctl_istatus(&self, ctl: u64, cval: u64) -> bool {
+        (ctl & 1) == 1 && (ctl & 2) == 0 && self.ticks() >= cval
+    }
+
+    /// Virtual-timer FIQ pending (xnu's ml_get_timer_pending = CNTV_CTL
+    /// ISTATUS; sleh_fiq path bypasses the AIC — measured).
+    #[inline]
+    fn timer_fiq_pending(&self) -> bool {
+        self.ctl_istatus(self.sys.cntv_ctl, self.sys.cntv_cval)
+    }
+
+    /// Next armed timer deadline in model ns (None = nothing armed).
+    fn next_timer_deadline_ns(&self) -> Option<u64> {
+        let mut dl = u64::MAX;
+        if self.sys.cntv_ctl & 1 == 1 {
+            dl = dl.min(self.sys.cntv_cval);
+        }
+        if self.sys.cntp_ctl & 1 == 1 {
+            dl = dl.min(self.sys.cntp_cval);
+        }
+        if dl == u64::MAX {
+            None
+        } else {
+            Some(dl.saturating_mul(1000) / 24)
+        }
+    }
+
+    /// M4 exception delivery to the EL1 vector table. `off` = VBAR offset
+    /// (current-EL SPx: sync 0x200, IRQ 0x280, FIQ 0x300), `esr` = 0 for
+    /// IRQ/FIQ, `far` set for synchronous aborts.
+    fn take_exception(&mut self, off: u64, esr: u64, far: Option<u64>, kind: &'static str) {
+        // SPSR_EL1 = NZCV | DAIF | M[3:0]=EL1h (0b0101)
+        self.sys.spsr_el1 = ((self.nzcv as u64) << 28) | self.sys.daif | 0x5;
+        self.sys.elr_el1 = self.pc;
+        self.sys.esr_el1 = esr;
+        if let Some(f) = far {
+            self.sys.far_el1 = f;
+        }
+        // entry masks async exceptions (DAIF.I/F set)
+        self.sys.daif |= 0x3C0;
+        self.sp_sel = true; // SPx
+        self.pc = self.sys.vbar_el1.wrapping_add(off);
+        self.exc_taken += 1;
+        self.last_exception = Some((kind, esr, far.unwrap_or(0), self.sys.elr_el1));
     }
 
     fn cond(&self, c: Cond) -> bool {
@@ -2806,6 +3017,13 @@ impl Interpreter {
             Insn::Isb | Insn::Dsb | Insn::Dmb => {}
             Insn::Eret => {
                 self.pc = self.sys.elr_el1;
+                // M4: ERET restores PSTATE from SPSR (NZCV + DAIF + SP bit).
+                // xnu's exception RETURN path depends on the DAIF restore:
+                // handlers ERET with SPSR.I=0 to re-enable interrupts.
+                let spsr = self.sys.spsr_el1;
+                self.nzcv = ((spsr >> 28) & 0xF) as u32;
+                self.sys.daif = (self.sys.daif & !0x3C0) | (spsr & 0x3C0);
+                self.sp_sel = spsr & 1 == 1;
                 return Ok(());
             }
             Insn::Genter { .. } => {
@@ -3206,7 +3424,24 @@ impl Interpreter {
             }
             Insn::Hint { op } => {
                 self.group_exec[18] += 1; // DGH bucket (other named hints tracked here)
-                let _ = op;
+                if op == HintOp::Wfi {
+                    // M4 WFI semantics: park until the next armed timer
+                    // deadline (the xnu idle loop is `wfi; b .-4`), then let
+                    // the loop check deliver the timer FIQ. With nothing
+                    // armed the park is an honest named stop.
+                    self.wfi_count += 1;
+                    if self.timer_fiq_pending() {
+                        // deadline already passed: FIQ taken at the loop check
+                    } else if let Some(target_ns) = self.next_timer_deadline_ns() {
+                        let cur = self.ns_budget_used + self.ns_ffwd;
+                        if target_ns > cur {
+                            self.ns_ffwd += target_ns - cur;
+                        }
+                        self.wfi_wakeups += 1;
+                    } else {
+                        return Err(StopReason::Wfi);
+                    }
+                }
             }
             Insn::TlbiRange { op, rt } => {
                 self.group_exec[17] += 1;
@@ -3759,7 +3994,43 @@ impl Interpreter {
             sysreg::FAR_EL1 => self.sys.far_el1,
             sysreg::GXF_CONFIG_EL1 => self.gxf_config,
             sysreg::GXF_STATUS_EL1 => self.gxf_status,
-            sysreg::CNTVCT_EL0 => self.ns_budget_used / 40, // 40ns tick model
+            // M4 timer + GXF surface
+            sysreg::CNTV_CTL_EL0 => {
+                self.sys.cntv_ctl | if self.ctl_istatus(self.sys.cntv_ctl, self.sys.cntv_cval) { 4 } else { 0 }
+            }
+            sysreg::CNTV_CVAL_EL0 => self.sys.cntv_cval,
+            sysreg::CNTV_TVAL_EL0 => self.sys.cntv_cval.wrapping_sub(self.ticks()) as u32 as u64,
+            sysreg::CNTP_CTL_EL0 => {
+                self.sys.cntp_ctl | if self.ctl_istatus(self.sys.cntp_ctl, self.sys.cntp_cval) { 4 } else { 0 }
+            }
+            sysreg::CNTP_CVAL_EL0 => self.sys.cntp_cval,
+            sysreg::CNTP_TVAL_EL0 => self.sys.cntp_cval.wrapping_sub(self.ticks()) as u32 as u64,
+            sysreg::CNTKCTL_EL1 => self.sys.cntkctl_el1,
+            sysreg::GXF_C8_3 => self.sys.gxf_c8_3,
+            sysreg::GXF_ESR_M => self.sys.gxf_esr_m,
+            sysreg::GXF_FAR_M => self.sys.gxf_far_m,
+            sysreg::IPI_SR_EL1 => 0, // no IPI source modeled yet; W1C on write
+            sysreg::TPIDR_EL1 => {
+                // T8030 hardware contract: ordinary kernel code NEVER writes
+                // TPIDR_EL1 — on real hardware the confidential GXF boot
+                // programs the guard context with &cpu_data[cpu] before the
+                // first consumer runs. Measured emulator findings (both
+                // recorded in tools/re/notes/m4-aic-timer-re.md):
+                //  * the kernel's exception prologue (0x…81603ec) HANDLES
+                //    tpidr==0 (skips the percpu stack switch);
+                //  * ANY non-zero tpidr whose [0x4f8] isn't a live
+                //    stack-info struct self-spins the prologue (0x…81603f8)
+                //    — a poisoned seed is worse than the honest reset state;
+                //  * the kernel's own bootstrap (cpu_bootstrap, stripped in
+                //    the public tree) sets the real value only mid-boot.
+                // Model: TPIDR_EL1 stays at its hardware reset value (0)
+                // until the guest itself writes it; the report surfaces
+                // every percpu-dependent abort so the moment the real
+                // value becomes load-bearing is visible in the trace.
+                self.sys.tpidr_el1
+            }
+            sysreg::GXF_CTX => self.sys.gxf_ctx,
+            sysreg::CNTVCT_EL0 => self.ticks(),
             // PAC keys
             sysreg::APIAKEYLO_EL1 => self.sys.apiakeylo,
             sysreg::APIAKEYHI_EL1 => self.sys.apiakeyhi,
@@ -3794,7 +4065,7 @@ impl Interpreter {
                     sysreg::MIDR_EL1 => return 0x611F_0120,
                     sysreg::MPIDR_EL1 => return 0x8000_0000, // core 0, MT=0
                     sysreg::CNTFRQ_EL0 => return 24_000_000, // Apple 24 MHz
-                    sysreg::CNTPCT_EL0 => return self.ns_budget_used / 40,
+                    sysreg::CNTPCT_EL0 => return self.ticks(),
                     sysreg::CTR_EL0 => return 0x8444_C004,
                     sysreg::CURRENT_EL => return 0x4, // EL1
                     // 40-bit PA, 4K+16K granules, 48-bit VA
@@ -3867,6 +4138,20 @@ impl Interpreter {
             sysreg::FAR_EL1 => self.sys.far_el1 = v,
             sysreg::GXF_CONFIG_EL1 => self.gxf_config = v,
             sysreg::GXF_STATUS_EL1 => {}
+            // M4 timer + GXF writes
+            sysreg::CNTV_CTL_EL0 => self.sys.cntv_ctl = v & 0x3, // ISTATUS is RO
+            sysreg::CNTV_CVAL_EL0 => self.sys.cntv_cval = v,
+            sysreg::CNTV_TVAL_EL0 => self.sys.cntv_cval = self.ticks() + (v as u32 as u64),
+            sysreg::CNTP_CTL_EL0 => self.sys.cntp_ctl = v & 0x3,
+            sysreg::CNTP_CVAL_EL0 => self.sys.cntp_cval = v,
+            sysreg::CNTP_TVAL_EL0 => self.sys.cntp_cval = self.ticks() + (v as u32 as u64),
+            sysreg::CNTKCTL_EL1 => self.sys.cntkctl_el1 = v,
+            sysreg::GXF_CTX => self.sys.gxf_ctx = v,
+            sysreg::GXF_C8_3 => self.sys.gxf_c8_3 = v,
+            sysreg::GXF_ESR_M => self.sys.gxf_esr_m = v,
+            sysreg::GXF_FAR_M => self.sys.gxf_far_m = v,
+            sysreg::IPI_SR_EL1 => {} // W1C, nothing pending to clear
+            sysreg::TPIDR_EL1 => self.sys.tpidr_el1 = v,
             // PAC keys
             sysreg::APIAKEYLO_EL1 => self.sys.apiakeylo = v,
             sysreg::APIAKEYHI_EL1 => self.sys.apiakeyhi = v,
@@ -3969,10 +4254,44 @@ impl CpuBackend for Interpreter {
                     mmu_live_from: self.mmu_live_from,
                 };
             }
+            // Diagnostic watchpoints (env-gated, default off): log the
+            // register window each time pc matches a watched address.
+            if !self.watch_addrs.is_empty() {
+                if self.watch_addrs.contains(&self.pc) {
+                    let hit = self.watch_last_hit.entry(self.pc).or_insert(0);
+                    if self.executed >= *hit + 1 {
+                        *hit = self.executed;
+                        eprintln!(
+                            "[watch] insn={} pc={:#x} lr={:x} x0={:x} x1={:x} x2={:x} x3={:x} x4={:x} x5={:x}",
+                            self.executed, self.pc, self.x[30],
+                            self.x[0], self.x[1], self.x[2], self.x[3], self.x[4], self.x[5]
+                        );
+                    }
+                }
+            }
             match self.step() {
                 Ok(()) => {
                     self.executed += 1;
                     self.ns_budget_used += 40; // ~25 MIPS model
+                    // M4: async exception delivery — check after each retired
+                    // insn. FIQ (timer) first: xnu's critical path; then IRQ
+                    // (AIC line). DAIF gates: F=bit6, I=bit7.
+                    if self.timer_fiq_pending() && self.sys.daif & 0x40 == 0 {
+                        self.fiq_taken += 1;
+                        self.take_exception(0x300, 0, None, "fiq");
+                    } else if let Some(line) = &self.irq_line {
+                        if line.load(std::sync::atomic::Ordering::Relaxed)
+                            && self.sys.daif & 0x80 == 0
+                        {
+                            self.irq_taken += 1;
+                            self.take_exception(0x280, 0, None, "irq");
+                        }
+                    }
+                }
+                Err(StopReason::ExceptionTaken) => {
+                    // M4: a synchronous abort vectored to the guest — the
+                    // faulting insn did NOT retire; execution resumes at the
+                    // vector (pc already updated by take_exception).
                 }
                 Err(StopReason::Halted) => {
                     self.executed += 1;
@@ -4005,8 +4324,12 @@ impl CpuBackend for Interpreter {
         self.pc
     }
 
-    fn set_irq(&mut self, _level: bool) {
-        // IRQ delivery via AIC IACK; level latched by machine loop.
+    fn set_irq(&mut self, level: bool) {
+        // M4: the machine's AIC raises the shared IRQ line; the run loop
+        // polls it after every retired insn (DAIF.I gates delivery).
+        if let Some(line) = &self.irq_line {
+            line.store(level, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 }
 

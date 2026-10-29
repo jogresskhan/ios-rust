@@ -42,9 +42,60 @@ pub const BOOT_REAL_ID: &str = "boot-real v1 (real XNU 18C66 handoff → first b
 // agree inside one block or every VA→PA translation skews by the delta.
 const LOAD_PA: u64 = 0x8_0100_4000; // = DRAM base + (LINK_BASE & 0x1FFFFFF)
 const LINK_BASE: u64 = 0xFFFF_FFF0_0700_4000; // kernel __TEXT link VA
-const TOP_OF_KERNEL_DATA: u64 = 0x8_0400_0000;
-const DT_PA: u64 = 0x8_0400_0000;
-const BA_PA: u64 = 0x8_0410_0000;
+
+/// iBoot-equivalent staging layout, computed from the REAL image/blob sizes
+/// (REAL-DATA BUG #22: the first cut hardcoded TOP_OF_KERNEL_DATA = DT_PA =
+/// 0x8_0400_0000 — but the 45.7 MB kernel image ends at PA 0x803AC8488, so
+/// end_kern ≈ 0x803AD000 and the DT blob sat exactly AT topOfKernelData,
+/// one step outside the physmap region arm_vm_init maps for it
+/// ([end_kern, topOfKernelData), arm_vm_init.c:1471). The kernel's
+/// PE_slide_devicetree then landed deviceTreeHead on the region START
+/// (0x8030AD000), SecureDT parsed garbage 0xF53000 bytes away from the real
+/// blob and panicked "Device tree pointer outside of device tree region"
+/// (string 0xfffffff0073adec0, hit at pc 0xfffffff007a585d0 after
+/// 8,135,422 insns — the panic path itself faults on TPIDR_EL1=0).
+/// xnu's contract (arm_vm_init.c + pe_init.c, verified against the vendored
+/// xnu-7195.121.3 source): deviceTreeP is the blob's bootstrap-map KVA
+/// (blob_pa + virtBase − physBase); when the DT lives ABOVE the kernel text
+/// (kvtophys(head) ≥ kvtophys(&_mh_execute_header) — SecureDTIsLockedDown
+/// false), arm_vm_init slides the head onto the blob's final physmap VA,
+/// which only lands correctly if the blob is INSIDE [end_kern,
+/// topOfKernelData). So: kernel image → page-aligned end_kern → DT blob →
+/// boot_args page → topOfKernelData = the page after boot_args.
+struct StagedLayout {
+    /// PA the kernel image is loaded at (= LOAD_PA).
+    load_pa: u64,
+    /// round_page(LOAD_PA + image bytes) — xnu `end_kern` PA side.
+    end_kern_pa: u64,
+    /// PA of the DeviceTree blob (inside [end_kern_pa, top_of_kernel_data)).
+    dt_pa: u64,
+    /// PA of boot_args (page after the DT blob).
+    ba_pa: u64,
+    /// Highest physical address used by the kernel data area — what
+    /// boot_args.topOfKernelData carries (boot.h: "Highest physical address
+    /// used in kernel data area").
+    top_of_kernel_data: u64,
+}
+
+impl StagedLayout {
+    fn compute(image_bytes: usize, dt_bytes: usize) -> StagedLayout {
+        let page = |x: u64| (x + 0xFFF) & !0xFFF;
+        let end_kern_pa = page(LOAD_PA + image_bytes as u64);
+        let dt_pa = end_kern_pa;
+        let ba_pa = page(dt_pa + dt_bytes as u64);
+        let top_of_kernel_data = page(ba_pa + 0x2E0);
+        StagedLayout { load_pa: LOAD_PA, end_kern_pa, dt_pa, ba_pa, top_of_kernel_data }
+    }
+
+    /// The blob's kernel-side virtual address under the bootstrap map:
+    /// VA = PA + virtBase − physBase (the identity every xnu arm64
+    /// boot-time pointer follows; arm_vm_physmap_slide subtracts
+    /// gVirtBase − gPhysBase to get the PA side). deviceTreeP carries this
+    /// value; PE_slide_devicetree then converts it to the final physmap VA.
+    fn dt_va(&self) -> u64 {
+        LINK_BASE + (self.dt_pa - self.load_pa)
+    }
+}
 fn mem_size() -> u64 {
     // 4 GiB (iPhone12,1) by default; IOS_RUST_DRAM_MB shrinks the window
     // for small sandboxes (bootargs memSize follows, see put(ba, 0x18)).
@@ -98,6 +149,23 @@ pub struct BootRealReport {
     pub adt_peripherals: usize,
     pub fault_chain: Vec<(u32, u64, u64)>,
     pub regs_dump: String,
+    // --- M4 metrics ---
+    /// Exceptions delivered to the guest's VBAR_EL1 (sync aborts + FIQ + IRQ).
+    pub exc_taken: u64,
+    pub fiq_taken: u64,
+    pub irq_taken: u64,
+    /// Synchronous aborts vectored (subset of exc_taken).
+    pub sync_aborts: u64,
+    pub wfi_count: u64,
+    pub wfi_wakeups: u64,
+    /// Last delivered exception (kind, esr, far, elr).
+    pub last_exception: Option<(&'static str, u64, u64, u64)>,
+    /// GXF context register was seeded (provenance: kernel per-cpu base).
+    pub gxf_ctx_seeded: bool,
+    /// The discovered cpu_data[0] KVA (and its raw fields) for the report.
+    pub cpu_data0_report: Vec<String>,
+    /// M4 debug: (pc, addr, val) stores of boot-stack-range VAs.
+    pub stack_write_log: Vec<(u64, u64, u64)>,
     /// Post-mortem: bytes at thread_starts PA, bootstrap L2 tables.
     pub mem_probe: Vec<String>,
     pub last_sp_change: Option<(u64, u32, u64)>,
@@ -150,24 +218,64 @@ fn parse_kernel(img: &[u8]) -> Result<(u64, u64, Vec<(String, u64, u64)>), Strin
     Ok((segs.first().map(|s| s.1).unwrap_or(0), entry, segs))
 }
 
-/// boot_args for arm64 — the layout the real start.s loads: virtBase@0x8,
-/// physBase@0x10, memSize@0x18, topOfKernelData@0x20, DeviceTreeP@0x28,
-/// DeviceTreeLen@0x30, …, a kernel-read field at 0x2d0.
-fn build_boot_args(virt_base: u64, phys_base: u64, dt_pa: u64, dt_len: u32) -> Vec<u8> {
+/// boot_args for arm64 — the layout the real 18C66 binary loads (measured,
+/// see tools/re/notes/m4-aic-timer-re.md + m4-dt-gate-re.md + boot.h):
+/// virtBase@0x8, physBase@0x10, memSize@0x18, topOfKernelData@0x20 (u64 each),
+/// Video (6×u64) @0x28..0x58, machineType@0x58, **deviceTreeP@0x60,
+/// deviceTreeLength@0x68**, CommandLine[608]@0x70, bootFlags@0x2d0,
+/// memSizeActual@0x2d8. REAL-DATA BUG #20: the M2-era builder wrote the DT
+/// pointer at +0x28 (inside Video) — PE_init_platform reads +0x60/+0x68,
+/// so every DT global shipped zero and /cpus enumeration faulted on NULL
+/// after 8,135,842 insns.
+fn build_boot_args(
+    virt_base: u64,
+    phys_base: u64,
+    top_of_kernel_data: u64,
+    dt_va: u64,
+    dt_len: u32,
+) -> Vec<u8> {
     let mut ba = vec![0u8; 0x2E0];
     let put = |buf: &mut Vec<u8>, off: usize, v: u64| {
         buf[off..off + 8].copy_from_slice(&v.to_le_bytes());
     };
-    ba[0..2].copy_from_slice(&0u16.to_le_bytes()); // Rev
+    // Revision 2 / Version 2 — what real iBoot ships (kBootArgsRevision2 =
+    // the rev that makes bootFlags@0x2d0 valid; the kernel reads bootFlags
+    // unconditionally in the early CPU-start paths, 0x8168110/0x8168238).
+    ba[0..2].copy_from_slice(&2u16.to_le_bytes()); // Revision
     ba[2..4].copy_from_slice(&2u16.to_le_bytes()); // Version
     put(&mut ba, 0x08, virt_base);
     put(&mut ba, 0x10, phys_base);
     put(&mut ba, 0x18, mem_size());
-    put(&mut ba, 0x20, TOP_OF_KERNEL_DATA);
-    put(&mut ba, 0x28, dt_pa);
-    ba[0x30..0x34].copy_from_slice(&dt_len.to_le_bytes());
-    // everything else (video, flags, cmdline, [0x2d0]) stays zero
+    put(&mut ba, 0x20, top_of_kernel_data);
+    // Video @0x28..0x58 stays zero (no framebuffer handoff)
+    put(&mut ba, 0x58, 0); // machineType
+    put(&mut ba, 0x60, dt_va); // deviceTreeP — kernel VA the boot maps cover
+    ba[0x68..0x6C].copy_from_slice(&dt_len.to_le_bytes()); // deviceTreeLength
+    // CommandLine[608]@0x70 stays zero
+    put(&mut ba, 0x2D0, 0); // bootFlags (dark-boot bit clear)
+    put(&mut ba, 0x2D8, mem_size()); // memSizeActual
     ba
+}
+
+/// iBoot-equivalent DeviceTree staging: real iBoot marks the core it
+/// executes on `state = "running"` before the xnu jump. The IPSW blob is
+/// the pre-patch template — ALL 6 /cpus nodes ship b"waiting\0" (measured
+/// on DeviceTree.n104ap; xnu's ml_is_boot_cpu picks the node whose state
+/// is "running", machine_routines.c:924, tools/re/notes/m4-dt-gate-re.md
+/// §6/E14 — with asserts compiled out the enumerator otherwise runs all 6
+/// and dies on `topology_info.boot_cpu->cpu_id`). We boot on cpu0 (reg 0,
+/// first child in pre-order), so flip exactly the FIRST "waiting\0" —
+/// same 8-byte length, nothing else in the blob changes. Returns the
+/// number of "waiting" nodes seen (6 = the real n104ap shape).
+fn patch_boot_cpu_running(dt: &mut [u8]) -> usize {
+    const WAITING: &[u8] = b"waiting\0";
+    let n = dt.windows(WAITING.len()).filter(|w| *w == WAITING).count();
+    if n > 0 {
+        if let Some(pos) = dt.windows(WAITING.len()).position(|w| w == WAITING) {
+            dt[pos..pos + WAITING.len()].copy_from_slice(b"running\0");
+        }
+    }
+    n
 }
 
 struct BusMem(Bus);
@@ -226,16 +334,43 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
     let adt = adt::AdtNode::parse(&dt_blob).map_err(|e| format!("ADT: {e}"))?;
     let adt_peripherals = adt.find("arm-io").map(|n| n.children.len()).unwrap_or(0);
 
+    // iBoot-equivalent boot-CPU staging (see patch_boot_cpu_running): the
+    // IPSW template ships all 6 /cpus nodes "waiting"; flip cpu0 → running.
+    let mut dt_blob = dt_blob;
+    let waiting_nodes = patch_boot_cpu_running(&mut dt_blob);
+    println!(
+        "[stage] DeviceTree boot-cpu: {waiting_nodes} \"waiting\" nodes, first (cpu0) → \"running\""
+    );
+
     // ---- 3) machine assembly (iBoot equivalent) ----
+    // Staging layout computed from the REAL sizes (BUG #22 — see
+    // StagedLayout): image → end_kern → DT blob → boot_args page →
+    // topOfKernelData.
+    let layout = StagedLayout::compute(img.len(), dt_blob.len());
+    println!(
+        "[stage] end_kern {:#x} · DT @ {:#x} ({} B, bootstrap-KVA {:#x}) · boot_args @ {:#x} · topOfKernelData {:#x}",
+        layout.end_kern_pa,
+        layout.dt_pa,
+        dt_blob.len(),
+        layout.dt_va(),
+        layout.ba_pa,
+        layout.top_of_kernel_data
+    );
     let mut machine = T8030Machine::new(effective_dram_mb());
     let devices_attached = machine.attach_from_adt(&adt);
     let serial = machine.serial.clone();
     let mut bus = std::mem::replace(&mut machine.bus, Bus::new());
 
     bus.write_raw(LOAD_PA, &img);
-    bus.write_raw(DT_PA, &dt_blob);
-    let ba = build_boot_args(LINK_BASE, LOAD_PA, DT_PA, dt_blob.len() as u32);
-    bus.write_raw(BA_PA, &ba);
+    bus.write_raw(layout.dt_pa, &dt_blob);
+    let ba = build_boot_args(
+        LINK_BASE,
+        LOAD_PA,
+        layout.top_of_kernel_data,
+        layout.dt_va(),
+        dt_blob.len() as u32,
+    );
+    bus.write_raw(layout.ba_pa, &ba);
 
     // HLT canary page (a stray RET lands here and halts cleanly)
     let mut pause = Ram::new("boot-pause", 0x1000);
@@ -246,19 +381,32 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
     let entry_pa = LOAD_PA + (entry - link_base);
     let mut cpu = Interpreter::new(Box::new(BusMem(bus)));
     cpu.set_reset_vector(entry_pa);
-    cpu.x[0] = BA_PA; // boot_args pointer (physical, MMU off)
+    cpu.x[0] = layout.ba_pa; // boot_args pointer (physical, MMU off)
     cpu.x[30] = PAUSE_PA;
     cpu.sp = 0;
     cpu.trace_enabled = true;
+    // M4: give the cpu_data[0] discovery scan the kernel's __DATA window
+    // (PA = load PA + segment offset from the link base).
+    if let Some((_, data_va, _)) = segs.iter().find(|(n, _, _)| n == "__DATA") {
+        let pa = LOAD_PA + (data_va - link_base);
+        cpu.cpu_data_scan = Some((pa, pa + 0x300_000));
+    }
+    // KVA identity for the discovery seed: VA = PA + virtBase − physBase.
+    cpu.kva_base = LINK_BASE - LOAD_PA;
+    // M4 debug: capture the kernel's boot-stack-pointer stores (cpu_data
+    // init fingerprint) — printed in the report.
+    cpu.stack_write_watch = true;
 
     println!(
-        "[handoff] PC = {entry_pa:#x} (load PA) · x0 = {BA_PA:#x} (boot_args) · MMU off · \
-         EL1 · DAIF masked by the kernel itself"
+        "[handoff] PC = {entry_pa:#x} (load PA) · x0 = {:#x} (boot_args) · MMU off · \
+         EL1 · DAIF masked by the kernel itself",
+        layout.ba_pa
     );
     let mem_size = mem_size();
     println!(
         "[contract] virtBase = {LINK_BASE:#x} · physBase = {LOAD_PA:#x} · memSize = {mem_size:#x} · \
-         DeviceTree @ {DT_PA:#x} · MIDR = 0x611f0120"
+         DeviceTree @ {:#x} · MIDR = 0x611f0120",
+        layout.dt_pa
     );
 
     // ---- 5) execute the real kernel ----
@@ -271,7 +419,7 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
         max_insn,
         // ~25 MIPS model (40 ns/insn) + headroom — the ns budget must never
         // bind before the instruction budget on long real-kernel scans.
-        max_ns: max_insn.saturating_mul(40).saturating_add(4_000_000_000),
+        max_ns: max_insn.saturating_mul(40).saturating_add(16_000_000_000),
     });
 
     let out = serial.lock().map(|s| s.clone()).unwrap_or_default();
@@ -297,8 +445,8 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
         link_base,
         entry_link_va: entry,
         entry_pa,
-        bootargs_pa: BA_PA,
-        dt_pa: DT_PA,
+        bootargs_pa: layout.ba_pa,
+        dt_pa: layout.dt_pa,
         dt_bytes: dt_blob.len(),
         mmu_config: cpu.mmu.config_str(),
         mmu_walks: cpu.mmu.walks,
@@ -328,6 +476,41 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
         adt_peripherals,
         fault_chain: cpu.mmu.last_fault_chain.clone(),
         regs_dump: cpu.dump_state(),
+        exc_taken: cpu.exc_taken,
+        fiq_taken: cpu.fiq_taken,
+        irq_taken: cpu.irq_taken,
+        sync_aborts: cpu.sync_aborts,
+        wfi_count: cpu.wfi_count,
+        wfi_wakeups: cpu.wfi_wakeups,
+        last_exception: cpu.last_exception,
+        gxf_ctx_seeded: cpu.gxf_ctx_seeded,
+        cpu_data0_report: {
+            let mut out = Vec::new();
+            if let Some(pa) = cpu.cpu_data0_addr {
+                let va = pa.wrapping_add(cpu.kva_base);
+                out.push(format!(
+                    "cpu_data[0] @ PA {pa:#x} · KVA {va:#x} · tpidr {:#x}",
+                    cpu.sys.tpidr_el1
+                ));
+                for (name, off) in [
+                    ("active_thread", 0x0u64),
+                    ("cpu_number?", 0x8),
+                    ("intstack_top+0x4f8", 0x4f8),
+                    ("depth+0x500", 0x500),
+                ] {
+                    let mut b = [0u8; 8];
+                    cpu.mem().read_bytes(pa + off, &mut b);
+                    out.push(format!(
+                        "  cpu_data[0]+{name} = {:#018x}",
+                        u64::from_le_bytes(b)
+                    ));
+                }
+            } else {
+                out.push("cpu_data[0]: never discovered".into());
+            }
+            out
+        },
+        stack_write_log: cpu.stack_writes.iter().copied().collect(),
         last_sp_change: cpu.last_sp_change,
         mem_probe: {
             let mut probe = Vec::new();
@@ -366,6 +549,7 @@ pub fn print_report(r: &BootRealReport) {
         StopReason::TranslationFault { pc, va, kind, detail } => {
             format!("TranslationFault({kind}, {detail}) va={va:#x} pc={pc:#x}")
         }
+        StopReason::Wfi => "Wfi (idle park, no armed timer deadline)".to_string(),
         other => format!("{other:?}"),
     };
     println!();
@@ -419,6 +603,32 @@ pub fn print_report(r: &BootRealReport) {
             (r.esr_el1 >> 6) & 1,
             r.esr_el1 & 0x3F
         );
+    }
+    // --- M4 metrics ---
+    println!(
+        "M4 exceptions: delivered {} (sync aborts {} · FIQ {} · IRQ {}) · WFI {} (wakeups {}) · GXF ctx seeded {}",
+        r.exc_taken,
+        r.sync_aborts,
+        r.fiq_taken,
+        r.irq_taken,
+        r.wfi_count,
+        r.wfi_wakeups,
+        r.gxf_ctx_seeded
+    );
+    if let Some((kind, esr, far, elr)) = &r.last_exception {
+        println!(
+            "M4 last exception: {} · ESR {:#x} · FAR {:#x} · ELR {:#x}",
+            kind, esr, far, elr
+        );
+    }
+    for line in &r.cpu_data0_report {
+        println!("{line}");
+    }
+    if !r.stack_write_log.is_empty() {
+        println!("boot-stack-pointer stores (first {}):", r.stack_write_log.len());
+        for (pc, addr, val) in r.stack_write_log.iter() {
+            println!("    pc={pc:#x} → [{addr:#x}] = {val:#x}");
+        }
     }
     println!(
         "unknown sysregs: {} reads / {} writes{}",

@@ -63,11 +63,18 @@ impl Default for InterpBudget {
 pub enum StopReason {
     Budget,
     Halted,
+    /// WFI with no armed timer deadline — the M4-named idle stop (not a
+    /// crash: the kernel parked with nothing to wake it).
+    Wfi,
     Panic,
     UnknownInsn { pc: u64, insn: u32 },
     /// Stage-1 MMU walk failed (invalid descriptor, out-of-range VA, …).
     /// The kernel built tables we could not walk — dump and investigate.
     TranslationFault { pc: u64, va: u64, kind: &'static str, detail: &'static str },
+    /// INTERNAL (never surfaced as a stop): a synchronous abort was vectored
+    /// to the guest's VBAR_EL1 (M4 exception delivery) — the run loop must
+    /// continue from the new PC.
+    ExceptionTaken,
 }
 
 #[derive(Clone, Debug)]

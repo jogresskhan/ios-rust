@@ -31,7 +31,7 @@ use crate::boot_real;
 /// Instruction budget for the first boot. The measured honest stop (the
 /// kernel's DeviceTree-dependent CPU-enumeration path) lands at ~8.14M
 /// insns; 12M leaves headroom without running away.
-const BOOT_FIRST_MAX_INSN: u64 = 12_000_000;
+const BOOT_FIRST_MAX_INSN: u64 = 48_000_000;
 
 pub const BOOT_FIRST_ID: &str = "boot-first v1 (irestore staging → first boot, real bytes)";
 

@@ -1,8 +1,60 @@
 //! Flat physical bus — QEMU's sysbus equivalent for the T8030 map.
 
+use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use crate::{Device, DmaDevice};
+
+/// Optional MMIO access log — M5 device-census instrumentation (task M5-C).
+///
+/// Off by default and behavior-identical: set `IOS_RUST_MMIO_LOG=<path>` to
+/// append, one line per bus event, to `<path>`:
+///
+/// ```text
+/// #map,<device>,<base hex>,<size hex>          (attach; RAM regions too)
+/// #unimpl,<node>,<base hex>,<size hex>,<compat> (t8030 attach_from_adt)
+/// <addr hex>,<size bytes>,<r|w>,<device|UNMAPPED> (every non-RAM access)
+/// ```
+///
+/// RAM-backed regions (dram/srom/sram/seprom/boot-pause/nvram) are NOT
+/// logged per-access — the census only cares about MMIO windows, and the
+/// 8M-insn boot would otherwise emit ~25M fetch lines. Append-only; the
+/// consumer is tools/re/reports/m5_mmio_census.py. The emulator never
+/// parses the log back, so default behavior is byte-identical.
+static MMIO_LOG: OnceLock<Option<Mutex<File>>> = OnceLock::new();
+
+fn mmio_log_file() -> Option<&'static Mutex<File>> {
+    MMIO_LOG
+        .get_or_init(|| {
+            let path = std::env::var_os("IOS_RUST_MMIO_LOG")?;
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .ok()
+                .map(Mutex::new)
+        })
+        .as_ref()
+}
+
+/// Append one raw line to the MMIO log (no-op unless IOS_RUST_MMIO_LOG is
+/// set). Public so the machine crate can annotate attach decisions the bus
+/// never sees (unmodeled /arm-io nodes).
+pub fn mmio_log_line(line: &str) {
+    if let Some(f) = mmio_log_file() {
+        if let Ok(mut f) = f.lock() {
+            let _ = f.write_all(line.as_bytes());
+            let _ = f.write_all(b"\n");
+        }
+    }
+}
+
+/// True when MMIO logging is enabled (cheap hot-path gate).
+fn mmio_logging() -> bool {
+    mmio_log_file().is_some()
+}
 
 /// Process-wide mirrors of the newest `Bus`'s unmapped-access counters.
 /// The boot harness moves its `Bus` into the CPU's `MemAccess` box, so the
@@ -52,6 +104,10 @@ impl Bus {
 
     pub fn attach(&mut self, base: u64, size: u64, device: Box<dyn Device>) {
         assert!(size > 0, "region size must be > 0");
+        if mmio_logging() {
+            let name = device.name();
+            mmio_log_line(&format!("#map,{name},{base:#x},{size:#x}"));
+        }
         self.regions.push(Region { base, size, device });
         self.regions.sort_by_key(|r| r.base);
     }
@@ -66,9 +122,16 @@ impl Bus {
         match self.find(addr) {
             Some(i) => {
                 let r = &mut self.regions[i];
+                if mmio_logging() && r.device.ram_mut().is_none() {
+                    let name = r.device.name();
+                    mmio_log_line(&format!("{addr:#x},{size},r,{name}"));
+                }
                 r.device.read(addr - r.base, size)
             }
             None => {
+                if mmio_logging() {
+                    mmio_log_line(&format!("{addr:#x},{size},r,UNMAPPED"));
+                }
                 self.unmapped_reads += 1;
                 UNMAPPED_READS.fetch_add(1, Ordering::Relaxed);
                 self.unmapped_read_zeros
@@ -80,10 +143,17 @@ impl Bus {
         match self.find(addr) {
             Some(i) => {
                 let r = &mut self.regions[i];
+                if mmio_logging() && r.device.ram_mut().is_none() {
+                    let name = r.device.name();
+                    mmio_log_line(&format!("{addr:#x},{size},w,{name}"));
+                }
                 let off = addr - r.base;
                 r.device.write(off, size, val);
             }
             None => {
+                if mmio_logging() {
+                    mmio_log_line(&format!("{addr:#x},{size},w,UNMAPPED"));
+                }
                 self.unmapped_writes += 1;
                 UNMAPPED_WRITES.fetch_add(1, Ordering::Relaxed);
             }

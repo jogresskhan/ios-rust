@@ -75,7 +75,7 @@ fn main() {
         Some("boot-real") => {
             // boot-real [fixtures-dir] [max-insn] — the REAL first boot
             let mut fixtures = None;
-            let mut max_insn: u64 = 10_000_000;
+            let mut max_insn: u64 = 48_000_000;
             for a in &args[1..] {
                 let p = Path::new(a);
                 if p.is_dir() {

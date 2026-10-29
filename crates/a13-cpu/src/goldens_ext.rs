@@ -281,6 +281,7 @@ pub fn mnemonic_of(i: &Insn) -> String {
             HintOp::Csdb => "csdb",
             HintOp::TsbCsync => "tsb",
             HintOp::Xpaclri => "xpaclri",
+            HintOp::Wfi => "wfi",
         }.into(),
         Insn::Vdot { unsigned, .. } => if *unsigned { "udot" } else { "sdot" }.into(),
         Insn::Vsqrdmlah { subtract, .. } => if *subtract { "sqrdmlsh" } else { "sqrdmlah" }.into(),

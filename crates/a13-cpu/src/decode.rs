@@ -731,7 +731,7 @@ pub enum BtiKind {
     Jc,
 }
 
-/// Named hint ops (decoded-by-name no-ops).
+/// Named hint ops (decoded-by-name no-ops; WFI has M4 semantics).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HintOp {
     Dgh,
@@ -740,6 +740,8 @@ pub enum HintOp {
     Csdb,
     TsbCsync,
     Xpaclri,
+    /// WFI — interruptible park; the M4 timer model wakes it.
+    Wfi,
 }
 
 /// TLBI range op (v8.4) — the EL1-relevant subset.
@@ -2093,6 +2095,7 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
         let op = match (crm, op2) {
             (0, 6) => HintOp::Dgh,
             (0, 7) => HintOp::Xpaclri,
+            (0, 2) => HintOp::Wfi, // M4: the kernel's idle park (0xD503207F)
             (2, 0) => HintOp::Esb,
             (2, 1) => HintOp::PsbCsync,
             (2, 2) => HintOp::TsbCsync,

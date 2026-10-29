@@ -1,0 +1,124 @@
+arm-io children=105  with-reg=94  no-reg-skipped=11
+modeled kinds: {'aic': 2, 'pmgr': 1, 'apple-wdt': 1, 'gpio': 2, 'aes': 1, 'aop': 3, 'dart': 16, 'smc': 4, 'sep-sim': 1, 'ans2-nvme': 1, 'sart': 1, 's3c-uart': 4, 'spi': 2, 'i2c': 4, 'spmi-pmu': 3, 'typec-otg': 1, 'mipi-dsi': 1, 'adp-v4': 2, 'scaler': 1, 'mca': 7, 'apcie': 1} total modeled: 59
+
+== MODELED (kind | name | base | size | compat) ==
+dart       | dart-isp               | 0x22BAC8000 | 0x4000 | dart,t8020
+adp-v4     | disp0                  | 0x230000000 | 0x2FC000 | disp0,t8030
+mipi-dsi   | mipi-dsim              | 0x230400000 | 0xC0000 | mipi-dsim-1,synopsys
+dart       | dart-disp0             | 0x230704000 | 0x4000 | dart,t8020
+adp-v4     | dapf-disp0             | 0x230708000 | 0x1000 | dapf,t8020
+dart       | dart-sio               | 0x235004000 | 0x4000 | dart,t8020
+aes        | aes                    | 0x235008000 | 0x4000 | aes,s8000
+i2c        | i2c0                   | 0x235010000 | 0x1000 | i2c,t8030;i2c,s5l8940x;iic,soft
+i2c        | i2c1                   | 0x235014000 | 0x1000 | i2c,t8030;i2c,s5l8940x;iic,soft
+i2c        | i2c2                   | 0x235018000 | 0x1000 | i2c,t8030;i2c,s5l8940x;iic,soft
+i2c        | i2c3                   | 0x23501C000 | 0x1000 | i2c,t8030;i2c,s5l8940x;iic,soft
+spi        | spi1                   | 0x235104000 | 0x4000 | spi-1,samsung
+spi        | spi3                   | 0x23510C000 | 0x4000 | spi-1,samsung
+s3c-uart   | uart0                  | 0x235200000 | 0x4000 | uart-1,samsung
+s3c-uart   | uart4                  | 0x235210000 | 0x4000 | uart-1,samsung
+s3c-uart   | uart7                  | 0x23521C000 | 0x4000 | uart-1,samsung
+mca        | mca-switch             | 0x238400000 | 0x18000 | mca-switch,t8030
+mca        | mca0                   | 0x238400000 | 0x4000 | mcaCluster,t8030
+mca        | mca1                   | 0x238404000 | 0x4000 | mcaCluster,t8030
+mca        | mca2                   | 0x238408000 | 0x4000 | mcaCluster,t8030
+mca        | mca3                   | 0x23840C000 | 0x4000 | mcaCluster,t8030
+mca        | mca4                   | 0x238410000 | 0x4000 | mcaCluster,t8030
+mca        | mca5                   | 0x238414000 | 0x4000 | mcaCluster,t8030
+typec-otg  | usb-drd                | 0x239010000 | 0x10000 | usb-drd,t8030;usb-drd,t8027
+dart       | dart-usb               | 0x239024000 | 0x4000 | dart,t8020
+pmgr       | pmgr                   | 0x23B000000 | 0x100000 | pmgr1,t8030
+aic        | aic                    | 0x23B100000 | 0x8000 | aic,1
+aic        | aic-timebase           | 0x23B108000 | 0x1000 | 
+dart       | dart-pmp               | 0x23B300000 | 0x4000 | dart,t8020
+gpio       | gpio                   | 0x23C100000 | 0x100000 | gpio,t8030;gpio,s5l8960x
+s3c-uart   | dockchannel-uart       | 0x23D128000 | 0x10000 | 
+spmi-pmu   | spmi0                  | 0x23D180700 | 0x100 | spmi,t8015
+spmi-pmu   | spmi1                  | 0x23D184700 | 0x100 | spmi,t8015
+spmi-pmu   | spmi2                  | 0x23D188700 | 0x100 | spmi,t8015
+gpio       | nub-gpio               | 0x23D1F0000 | 0x4000 | gpio,t8015;gpio,s5l8960x
+apple-wdt  | wdt                    | 0x23D2B0000 | 0x4000 | wdt,t8030;wdt,s5l8960x
+dart       | dart-rsm               | 0x23D328000 | 0x4000 | dart,t8020
+smc        | smc                    | 0x23E400000 | 0x20000 | iop,ascwrap-v2
+smc        | smc-gpio               | 0x23E820000 | 0x4000 | gpio,t8015;gpio,s5l8960x
+smc        | smc-i2c0               | 0x23ED04000 | 0x1000 | i2c,t8030;i2c,s5l8940x;iic,soft
+smc        | smc-i2c1               | 0x23ED08000 | 0x1000 | i2c,t8030;i2c,s5l8940x;iic,soft
+dart       | dart-sep               | 0x2412C0000 | 0x4000 | dart,t8020
+sep-sim    | sep                    | 0x242400000 | 0x10000 | iop,t8030;iop,t8015
+aop        | aop                    | 0x24A400000 | 0x20000 | iop,ascwrap-v2
+aop        | aop-gpio               | 0x24A820000 | 0x4000 | gpio,t8030;gpio,s5l8960x
+dart       | dart-aop               | 0x24AC00000 | 0x4000 | dart,t8020
+aop        | dapf-aop               | 0x24AC04000 | 0x1000 | dapf,t8020
+scaler     | scaler0                | 0x263000000 | 0x20000 | scaler,t8030;scaler,s5l8960x
+dart       | dart-scaler            | 0x263200000 | 0x4000 | dart,t8020
+dart       | dart-jpeg0             | 0x265004000 | 0x4000 | dart,t8020
+dart       | dart-jpeg1             | 0x26500C000 | 0x4000 | dart,t8020
+dart       | dart-ave               | 0x267030000 | 0x4000 | dart,t8020
+dart       | dart-avd               | 0x269010000 | 0x4000 | dart,t8020
+dart       | dart-ane               | 0x26B800000 | 0x4000 | dart,t8020
+ans2-nvme  | ans                    | 0x277400000 | 0xC000 | iop,ascwrap-v2
+sart       | sart-ans               | 0x27AC50000 | 0x8000 | sart,t8030
+dart       | dart-apcie2            | 0x603008000 | 0x4000 | dart,t8020
+dart       | dart-apcie3            | 0x604008000 | 0x4000 | dart,t8020
+apcie      | apcie                  | 0x610000000 | 0x1000000 | apcie,t8030
+
+== UNMODELED (Rust classify None) n=35 ==
+amc                | 0x200000000 | 0x1000 | 1reg | amctempsensor,t8030;amctempsensor,s5l8960x
+wlan               | 0x20000000F | 0x0 | 0reg | 
+bluetooth          | 0x20000000F | 0x0 | 0reg | bluetooth,n88
+mcc                | 0x200100000 | 0x80000 | 3reg | mcc,t8030
+error-handler      | 0x200100000 | 0x60000 | 17reg | error-handler,t8030
+aft                | 0x200144000 | 0x4000 | 1reg | aft,t8030
+sgx                | 0x204000000 | 0x100000 | 2reg | gpu,t8030
+gfx-asc            | 0x206400000 | 0x20000 | 2reg | iop,ascwrap-v2
+tempsensor5        | 0x210ED0000 | 0x10000 | 1reg | tempsensor,t8030
+tempsensor3        | 0x211ED0000 | 0x10000 | 1reg | tempsensor,t8030
+tempsensor4        | 0x211ED0000 | 0x10000 | 1reg | tempsensor,t8030
+mtrtempsensor11    | 0x211EE1000 | 0x16000 | 1reg | tempsensor,t8020
+mtrtempsensor13    | 0x211EE1000 | 0x16000 | 1reg | tempsensor,t8020
+isp                | 0x22A000000 | 0x1F09000 | 4reg | isp,t8030;isp,s5l8960x
+pwm                | 0x23500C000 | 0x1000 | 1reg | pwm,t8030;pwm,s5l8920x
+sio                | 0x236400000 | 0x20000 | 2reg | iop,ascwrap-v2
+atc-phy            | 0x239000000 | 0x4 | 2reg | atc-phy,t8030;atc-phy,t8027
+nco                | 0x23B044000 | 0x14000 | 1reg | nco,t8030;nco,s5l8960x
+sochot0            | 0x23B0C4000 | 0x1000 | 5reg | sochot,s5l8955x
+dwi                | 0x23B200000 | 0x4000 | 1reg | dwi,t8030;dwi,s8000
+mtrtempsensor6     | 0x23B281000 | 0x8000 | 1reg | tempsensor,t8020
+mtrtempsensor7     | 0x23B289000 | 0x8000 | 1reg | tempsensor,t8020
+mtrtempsensor8     | 0x23B299000 | 0x8000 | 1reg | tempsensor,t8020
+tempsensor0        | 0x23B2C4000 | 0x34000 | 1reg | tempsensor,t8030
+tempsensor1        | 0x23B2C4000 | 0x34000 | 1reg | tempsensor,t8030
+tempsensor2        | 0x23B2C4000 | 0x34000 | 1reg | tempsensor,t8030
+mtrtempsensor14    | 0x23B2E0000 | 0x8000 | 1reg | mtrtempsensor,t8020
+mtrtempsensor15    | 0x23B2E0000 | 0x8000 | 1reg | mtrtempsensor,t8020
+pmp                | 0x23BC00000 | 0x60000 | 38reg | iop,ascwrap-v2
+rsm                | 0x23D325000 | 0x1000 | 2reg | rsm,t8030
+jpeg0              | 0x265000000 | 0x4000 | 1reg | jpeg,t8030;jpeg,s5l8920x
+jpeg1              | 0x265008000 | 0x4000 | 1reg | jpeg,t8030;jpeg,s5l8920x
+ave                | 0x267100000 | 0x300000 | 4reg | ave,t8030
+avd                | 0x268000000 | 0x2000000 | 1reg | avd,t8030
+ane                | 0x26A000000 | 0x1F00000 | 2reg | ane,t8030
+
+== NO-REG (skipped entirely by attach_from_adt) ==
+mapper-gfx-asc             | iommu-mapper,gfx
+alc0                       | alc,t8030
+alc2                       | alc,t8030
+dietempctl0                | dietempctl,t8030
+vtempctl0                  | vtempctl,t8030
+smctempsensor0             | smc-tempsensor
+cpu-debug-interface        | 
+aod2                       | aod,t8030;aod,s5l8960x
+pearl-sep                  | biosensor,pearl
+haptics-support-interface  | haptics-support,leap
+audio-resource-manager     | audio,embedded-resource-manager
+
+== Rust reg_entries(BE) vs real LE for key nodes ==
+aic        real=0x23B100000+0x8000   rust-BE-would-attach@0x0
+uart0      real=0x235200000+0x4000   rust-BE-would-attach@0x0
+wdt        real=0x23D2B0000+0x4000   rust-BE-would-attach@0x0
+sart-ans   real=0x27AC50000+0x8000   rust-BE-would-attach@0x0
+pmgr       real=0x23B000000+0x100000   rust-BE-would-attach@0x0
+smc        real=0x23E400000+0x20000   rust-BE-would-attach@0x0
+ans        real=0x277400000+0xC000   rust-BE-would-attach@0x0
+gpio       real=0x23C100000+0x100000   rust-BE-would-attach@0x0
+disp0      real=0x230000000+0x2FC000   rust-BE-would-attach@0x0

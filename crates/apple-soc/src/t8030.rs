@@ -184,6 +184,13 @@ impl T8030Machine {
                         "i2c" => Box::new(I2c::new()),
                         "spi" => Box::new(Spi::new()),
                         other => {
+                            vm_core::bus::mmio_log_line(&format!(
+                                "#unimpl-class,{},{:#x},{:#x},{}",
+                                child.name,
+                                base,
+                                size,
+                                compat.join(";")
+                            ));
                             self.unimplemented_devices
                                 .push((other.to_string(), base, size, compat.clone()));
                             continue;
@@ -195,6 +202,16 @@ impl T8030Machine {
                     count += 1;
                 }
                 None => {
+                    // M5 census: record the unmodeled node's real window so
+                    // tools/re/reports/m5_mmio_census.py can name UNMAPPED
+                    // hits (no-op unless IOS_RUST_MMIO_LOG is set).
+                    vm_core::bus::mmio_log_line(&format!(
+                        "#unimpl,{},{:#x},{:#x},{}",
+                        child.name,
+                        base,
+                        size,
+                        compat.join(";")
+                    ));
                     self.unimplemented_devices
                         .push((child.name.clone(), base, size, compat.clone()));
                 }

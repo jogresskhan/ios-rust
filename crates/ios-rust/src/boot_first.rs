@@ -31,7 +31,20 @@ use crate::boot_real;
 /// Instruction budget for the first boot. The measured honest stop (the
 /// kernel's DeviceTree-dependent CPU-enumeration path) lands at ~8.14M
 /// insns; 12M leaves headroom without running away.
-const BOOT_FIRST_MAX_INSN: u64 = 48_000_000;
+///
+/// Session M (2026-10-30) moved the frontier to a 48M CLEAN budget stop
+/// (kernel-HANDLED percpu abort, panic 0), so 48M became the default.
+/// M5 census runs need to look PAST the budget stop — the standard env-knob
+/// pattern (IOS_RUST_DRAM_MB / IOS_RUST_STOP_PC_RANGE / IOS_RUST_TRACE_DEEP)
+/// extends it: IOS_RUST_BOOT_FIRST_MAX_INSN=<n> overrides without touching
+/// default behavior (unset → 48M, byte-identical runs).
+fn boot_first_max_insn() -> u64 {
+    std::env::var("IOS_RUST_BOOT_FIRST_MAX_INSN")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(48_000_000)
+}
 
 pub const BOOT_FIRST_ID: &str = "boot-first v1 (irestore staging → first boot, real bytes)";
 
@@ -246,7 +259,7 @@ pub fn run(fixtures_in: Option<&Path>, out_dir: &Path) -> i32 {
 
     // ---- FIRST BOOT: the real iBoot→xnu handoff on the staged bytes ----
     println!("[first boot] iBoot-equivalent: ADT from STAGED DeviceTree → STAGED KernelCache on the Rust backend");
-    match boot_real::run(&staged, BOOT_FIRST_MAX_INSN) {
+    match boot_real::run(&staged, boot_first_max_insn()) {
         Ok(r) => {
             println!(
                 "[boot 1/3] machine: {} B kernel LZFSE-decoded · link base {:#x} · entry PA {:#x}",

@@ -42,6 +42,7 @@ fn main() {
         Some("selftest") => cmd_selftest(),
         Some("dsc") => cmd_dsc(&args[1..]),
         Some("kc") => cmd_kernelcache(&args[1..]),
+        Some("adt") => cmd_adt(&args[1..]),
         Some("devices") => cmd_devices(&args[1..]),
         Some("vulns") => cmd_vulns(&args[1..]),
         Some("dc") => cmd_devicecheck(&args[1..]),
@@ -674,6 +675,122 @@ fn cmd_dsc(args: &[String]) -> i32 {
         }
         _ => {
             eprintln!("dsc <info|images|rebase|symbols|a2o|o2a> <cache> [args]");
+            2
+        }
+    }
+}
+
+/// `adt` — flat DeviceTree diagnostics for the M5 device census.
+///
+///   adt windows <im4p>        list every node's reg windows (leaf path + compat)
+///   adt find <im4p> <addr>    which node owns the physical address (M5 UNMAPPED naming)
+///
+/// IM4P → (LZFSE) → flat ADT, same extraction path as boot_real.
+fn cmd_adt(args: &[String]) -> i32 {
+    let Some(cmd) = args.first() else {
+        eprintln!("adt <windows|find> <devicetree-im4p> [addr]");
+        return 2;
+    };
+    let Some(path) = args.get(1) else {
+        eprintln!("adt {cmd}: missing <devicetree-im4p>");
+        return 2;
+    };
+    let raw = match std::fs::read(path) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("adt: cannot read {path}: {e}");
+            return 1;
+        }
+    };
+    let im4p = match img4::im4p::Im4p::parse(&raw) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("adt: IM4P parse: {e}");
+            return 1;
+        }
+    };
+    let blob = if restore::lzfse::is_lzfse(&im4p.data) {
+        match restore::lzfse::decompress(&im4p.data, None) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("adt: LZFSE: {e}");
+                return 1;
+            }
+        }
+    } else {
+        im4p.data.clone()
+    };
+    let root = match adt::AdtNode::parse(&blob) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("adt: flat parse: {e}");
+            return 1;
+        }
+    };
+
+    fn walk(node: &adt::AdtNode, prefix: &str, f: &mut dyn FnMut(&str, &adt::AdtNode)) {
+        let path = format!("{prefix}/{}", node.name);
+        for c in &node.children {
+            walk(c, &path, f);
+        }
+        f(&path, node);
+    }
+
+    match cmd.as_str() {
+        "windows" => {
+            let mut rows: Vec<(String, Vec<(u64, u64)>, Vec<String>)> = Vec::new();
+            walk(&root, "", &mut |path, n| {
+                let reg = n.reg_entries();
+                if !reg.is_empty() {
+                    rows.push((path.to_string(), reg, n.compatible()));
+                }
+            });
+            rows.sort_by_key(|(_, reg, _)| reg.first().copied().unwrap_or((u64::MAX, 0)));
+            for (path, reg, compat) in &rows {
+                let wins: Vec<String> =
+                    reg.iter().map(|(a, s)| format!("{a:#x}+{s:#x}")).collect();
+                println!(
+                    "{:<44} {}  compat={}",
+                    path,
+                    wins.join(" "),
+                    compat.first().cloned().unwrap_or_else(|| "-".into())
+                );
+            }
+            println!("{} reg-bearing nodes", rows.len());
+            0
+        }
+        "find" => {
+            let Some(addr_s) = args.get(2) else {
+                eprintln!("adt find: missing <addr>");
+                return 2;
+            };
+            let addr = parse_num(addr_s).unwrap_or_else(|| {
+                eprintln!("adt find: bad addr {addr_s}");
+                0
+            });
+            let mut hits = 0;
+            walk(&root, "", &mut |path, n| {
+                for (base, size) in n.reg_entries() {
+                    if addr >= base && addr < base + size.max(1) {
+                        let compat = n.compatible();
+                        println!(
+                            "{path}  window {base:#x}+{size:#x}  (off {:#x})  compat={}",
+                            addr - base,
+                            compat.join(";")
+                        );
+                        hits += 1;
+                    }
+                }
+            });
+            if hits == 0 {
+                println!("no ADT node window contains {addr:#x}");
+                1
+            } else {
+                0
+            }
+        }
+        _ => {
+            eprintln!("adt <windows|find> <devicetree-im4p> [addr]");
             2
         }
     }

@@ -967,3 +967,39 @@ enforcement stays an honest, tracked limit gated on M4 vectoring.
 * `cargo test --workspace`: **425 passed / 0 failed** (+19 over session
   J's 406). RE notes: `tools/re/notes/m4-gcd-clock-re.md` (+ companion
   script `tools/re/reports/m4_gcd_clock.py`).
+
+### 2.12e — Session N (2026-10-30): M5 census + B1 bus rule + PMGR 44-window + dockchannel/dapf
+
+* **First live device census at the session-M frontier (M5 task 1):** the real
+  18C66 boot path touches exactly **17 device-MMIO accesses through 48M insns**,
+  all named after this session: dockchannel-uart w1 FIFO page 0x23D10C000
+  (8 hits — previously the tree's ONLY UNMAPPED window), uart0 console init
+  0x235200000 (9). A 400M-insn extension (`IOS_RUST_BOOT_FIRST_MAX_INSN`, new
+  env knob, default unchanged) measured **0 further device touches** — the
+  48M→400M stretch loops inside M4's open percpu wall (FAR 0x10c handled
+  abort, panic 0, bus unmapped 0/0, WFI 0). Verdict: M5 device modeling is
+  AHEAD of the boot path; the next ledger move is M4's bug #33 GXF-write half.
+* **B1 bus rule** (vm-core `Bus::find`): overlapping windows resolve
+  smallest-matching-wins, tie → last attached — the real ADT nests device
+  pages inside larger windows and the old lowest-base-first rule shadowed
+  them forever (pmgr w22 ⊃ dockchannel+pmp, mca-switch ⊃ mca0/1, SEPROM ⊃
+  dart-sep).
+* **PMGR 44-window** (`apple-soc/src/pmgr.rs` rewritten): PmgrCore +
+  44 PmgrWindow boxes, concatenated linear offsets (the measured
+  AppleT8030PMGR addressing), APSC 0xE2020/0xE2588 PS-mirror reads
+  (default 0xFF ACTIVE), gate reads 0x80000+id*0x18 (stride-unconfirmed,
+  degrades to always-powered), ADT clock-gates seeding, scratch elsewhere.
+* **dockchannel-uart** (`apple-soc/src/dockchannel.rs`): replaced the
+  s3c-uart mis-model with a 2-window shared-core scratch shim + dedicated TX
+  sink (never the console). Reads echo stored config — the census PROVED
+  write-then-readback touching before the spec's RAZ assumption was written.
+* **dapf** (`apple-soc/src/dapf.rs`): dapf-disp0/dapf-aop out of the
+  adp-v4/aop mis-models; TCR store/bypass, rest RAZ. Per-window exact sizes
+  replace the blanket 0x1000 rounding; dead dart-ans arm deleted; new
+  `ios-rust adt windows|find` diagnostic subcommand.
+* Modeled windows: 59 → **103** (44 pmgr + dockchannel×2 + dapf×2); census
+  at the current frontier: **17/17 named, 0 UNMAPPED, 0/0 unmapped counters**.
+  Honest: M5 acceptance (NVMe rootfs bytes) still untested — ANS/SART/SMC
+  sit behind the M4 wall; specs staged in m5-attach-spec §5.4-5.6.
+* `cargo test --workspace`: **434 passed / 0 failed**. Docs: BOOT-PLAN M5
+  session-N block.

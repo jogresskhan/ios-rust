@@ -19,12 +19,14 @@ use crate::{
     aop::Aop,
     apcie::Apcie,
     dart::Dart,
+    dapf::Dapf,
     displaypipe::AdpV4,
+    dockchannel,
     gpio_i2c_spi::{Gpio, I2c, Spi},
     mca::Mca,
     mipi_dsi::MipiDsi,
     nvram::Nvram,
-    pmgr::Pmgr,
+    pmgr,
     rtkit::RtkitDevice,
     s3c_uart::S3cUart,
     sart::Sart,
@@ -83,6 +85,8 @@ pub struct T8030Machine {
     pub bus: Bus,
     pub fb: vm_core::framebuffer::FrameSink,
     pub serial: Arc<Mutex<Vec<u8>>>,
+    /// Dedicated dockchannel sink (attach-spec §5.1: NEVER the console sink).
+    pub dockchannel_sink: Arc<Mutex<Vec<u8>>>,
     pub adt: Option<adt::AdtNode>,
     pub devices_attached: Vec<(&'static str, u64, u64)>,
     pub unimplemented_devices: Vec<(String, u64, u64, Vec<String>)>,
@@ -96,6 +100,7 @@ impl T8030Machine {
     pub fn new(dram_mb: u64) -> Self {
         let mut bus = Bus::new();
         let serial: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let dockchannel_sink: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
         let fb = vm_core::framebuffer::new_sink(2436, 1125); // D79AP panel
         // Fixed regions (t8030.c define order)
         bus.attach(SROM_BASE, 0x20_0000, Box::new(Ram::new("srom", 0x20_0000)));
@@ -111,6 +116,7 @@ impl T8030Machine {
             bus,
             fb,
             serial,
+            dockchannel_sink,
             adt: None,
             devices_attached: Vec::new(),
             unimplemented_devices: Vec::new(),
@@ -123,6 +129,11 @@ impl T8030Machine {
     /// Attach the fallback (synthesized) peripheral map for headless runs.
     pub fn attach_fallback(&mut self) {
         for (name, base, size) in FALLBACK_MAP {
+            // pmgr = the 44-window shared-core device (attach-spec §4) —
+            // handled after the loop, not as a single-window box.
+            if *name == "pmgr" {
+                continue;
+            }
             let dev: Box<dyn Device> = match *name {
                 "aic" => {
                     let mut a = Aic::new();
@@ -132,12 +143,10 @@ impl T8030Machine {
                 "aic-timebase" => Box::new(AicTimebase { counter: 0 }),
                 "uart0" => Box::new(S3cUart::new(0, self.serial.clone())),
                 "wdt" => Box::new(AppleWdt::new()),
-                "dart-ans" => Box::new(Dart::new("dart-ans")),
                 "ans2-nvme" => Box::new(Ans2Nvme::new()),
                 "adp-v4" => Box::new(self.display.clone_device()),
                 "mipi-dsi" => Box::new(MipiDsi::new()),
                 "sart" => Box::new(Sart::new()),
-                "pmgr" => Box::new(Pmgr::new()),
                 "gpio" => Box::new(Gpio::new()),
                 other => {
                     self.unimplemented_devices
@@ -147,6 +156,16 @@ impl T8030Machine {
             };
             self.bus.attach(*base, *size, dev);
             self.devices_attached.push((name_static(name), *base, *size));
+        }
+        // Fallback pmgr: the spec's 44-window table, no clock-gates seeds.
+        let (core, _windows) = pmgr::new_44_window(&[]);
+        let mut lin = 0u64;
+        for &(wb, ws) in pmgr::PMGR_WINDOWS {
+            let mut w = pmgr::PmgrWindow { core: core.clone(), lin };
+            let dn = w.name();
+            self.bus.attach(wb, ws, Box::new(w));
+            self.devices_attached.push((dn, wb, ws));
+            lin += ws;
         }
     }
 
@@ -181,6 +200,70 @@ impl T8030Machine {
             let kind = classify(&name, &compat, &child.name);
             match kind {
                 Some(k) => {
+                    // M5 multi-window kinds (attach-spec §4/§5.1): one logical
+                    // device spanning ALL the node's reg windows.
+                    if k == "pmgr" {
+                        // clock-gates of THIS node seed the boot gates
+                        // (defect-(e) fix, attach-spec §4.4).
+                        let cg = child
+                            .prop_bytes("clock-gates")
+                            .map(|b| {
+                                b.chunks_exact(4)
+                                    .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+                                    .collect::<Vec<u32>>()
+                            })
+                            .unwrap_or_default();
+                        let (core, _spec_windows) = pmgr::new_44_window(&cg);
+                        // The kernel addresses pmgr by the concatenated offset
+                        // over the ADT's OWN window order/sizes — compute `lin`
+                        // from the translated windows, not the spec table.
+                        let wins: Vec<(u64, u64)> = child
+                            .reg_entries()
+                            .iter()
+                            .map(|&(b, s)| (translate(b), if s == 0 { 0x1000 } else { s }))
+                            .collect();
+                        let table: &[(u64, u64)] = if wins.len() == pmgr::PMGR_WINDOWS.len() {
+                            &wins
+                        } else {
+                            // ADT disagrees with the spec's 44-window table —
+                            // attach the spec table verbatim (translated bases).
+                            pmgr::PMGR_WINDOWS
+                        };
+                        let mut lin = 0u64;
+                        for &(wb, ws) in table {
+                            let mut w = pmgr::PmgrWindow { core: core.clone(), lin };
+                            let dn = w.name();
+                            self.bus.attach(wb, ws, Box::new(w));
+                            self.devices_attached.push((dn, wb, ws));
+                            lin += ws;
+                        }
+                        count += 1;
+                        continue;
+                    }
+                    if k == "dockchannel" {
+                        let (w0, w1, _sink) =
+                            dockchannel::new_pair(self.dockchannel_sink.clone());
+                        let wins: Vec<(u64, u64)> = child
+                            .reg_entries()
+                            .iter()
+                            .map(|&(b, s)| (translate(b), if s == 0 { 0x1000 } else { s }))
+                            .collect();
+                        // w0 = config page, w1 = FIFO page (ADT order); the
+                        // two boxes share one core. Extra windows (none on
+                        // n104ap) alias w0's behavior.
+                        for (i, &(wb, ws)) in wins.iter().enumerate() {
+                            let dev: Box<dyn Device> = match i {
+                                0 => Box::new(w0.clone()),
+                                1 => Box::new(w1.clone()),
+                                _ => Box::new(w0.clone()),
+                            };
+                            let dn = if i == 1 { w1.name() } else { w0.name() };
+                            self.bus.attach(wb, ws, dev);
+                            self.devices_attached.push((dn, wb, ws));
+                        }
+                        count += 1;
+                        continue;
+                    }
                     let dev: Box<dyn Device> = match k {
                         "aic" => {
                             let mut a = Aic::new();
@@ -192,7 +275,7 @@ impl T8030Machine {
                         "apple-wdt" => Box::new(AppleWdt::new()),
                         "dart" => Box::new(Dart::new("dart-adp")),
                         "sart" => Box::new(Sart::new()),
-                        "pmgr" => Box::new(Pmgr::new()),
+                        "dapf" => Box::new(Dapf::new()),
                         "spmi-pmu" => Box::new(SpmiPmu::new()),
                         "ans2-nvme" => Box::new(Ans2Nvme::new()),
                         "rtkit" => Box::new(RtkitDevice::new("rtkit")),
@@ -224,8 +307,12 @@ impl T8030Machine {
                         }
                     };
                     let dev_name = dev.name();
-                    self.bus.attach(base, size.max(0x1000), dev);
-                    self.devices_attached.push((dev_name, base, size.max(0x1000)));
+                    // M5 attach-spec §2: per-window exact sizes — 0x1000 floor
+                    // only for zero-size windows (no more blanket rounding that
+                    // grew e.g. 0x18-byte mca-switch pages into 0x1000 shadows).
+                    let eff_size = if size == 0 { 0x1000 } else { size };
+                    self.bus.attach(base, eff_size, dev);
+                    self.devices_attached.push((dev_name, base, eff_size));
                     count += 1;
                 }
                 None => {
@@ -327,6 +414,17 @@ fn classify(compat_first: &str, compat_all: &[String], node_name: &str) -> Optio
     let hay = format!("{}|{}|{}", compat_first, compat_all.join(","), node_name);
     let h = hay.to_lowercase();
     let m = |p: &str| h.contains(p);
+    // M5 attach-spec row 29 / §5.1: dockchannel-uart has NO compatible and a
+    // DIFFERENT protocol than S3C UART (the old arm mis-modeled it as a
+    // second S3cUart, corrupting the console sink). Name is the only key.
+    if node_name.contains("dockchannel") {
+        return Some("dockchannel");
+    }
+    // M5 §5.2: DAPF = DART address filter (dapf-disp0/dapf-aop) — must win
+    // over the disp/adp AND dart AND aop arms (it is none of those).
+    if m("dapf") {
+        return Some("dapf");
+    }
     // the aic-timebase node shares the aic compatible — split on its
     // device_type="timer" name FIRST (sub-agent census: it was being
     // misclassified as a second AIC).

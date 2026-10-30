@@ -572,10 +572,71 @@ the honest workaround, default behavior unchanged on big hosts).
 3. **Acceptance:** boot-first reaches a WFI-and-resumes loop (stop=WFI no longer
    terminal; timer IRQ wakes it); ≥ 10M insns retired.
 
-## M5 — peripherals the real boot path touches  [ ]
+## M5 — peripherals the real boot path touches  [~] (session N 2026-10-30: FIRST live census at the session-M frontier — the rank-1 unknown-device is dockchannel-uart, modeled + served; B1 bus rule + PMGR 44-window + dapf shims landed; PMGR/AIC/WDT/SART/ANS still 0 touches through 400M — the wall between 48M and 400M is M4's open percpu abort, not M5 devices)
 
-Current: 59/105 /arm-io peripherals modeled, 35 named-unmatched
-(`PARITY.md` 2.11a list). Order by what the boot trace touches first:
+**Session N evidence (release build, IOS_RUST_DRAM_MB=1024, 430→434 workspace
+tests 0 failed):**
+
+* **M5 task 1 DONE — the first post-M census** (`IOS_RUST_MMIO_LOG`, run
+  transcripts `/tmp/m5/`): at the session-M 48M frontier the real boot path
+  touches exactly **17 device-MMIO accesses, all named**: rank 1 =
+  `dockchannel-uart` w1 FIFO page `0x23D10C000` (8 hits, `w,r` pairs at
+  0x0/0x4/0x8/0xC — the OLD tree's only UNMAPPED window), rank 2 = uart0
+  console init @`0x235200000` (9). A 400M-budget extension run (new
+  `IOS_RUST_BOOT_FIRST_MAX_INSN` env knob, default unchanged 48M) measured
+  **0 additional device touches through 400M** — 1 kernel-HANDLED sync abort
+  (FAR 0x10c, ESR 0x96000005, ELR 0x…7b1e150 — session-M's percpu deref),
+  panic 0, bus unmapped 0/0, WFI 0, AT ops 63, pac-aut-unverified 163.
+  Honest conclusion: the 48M→400M stretch loops inside M4's open percpu
+  wall; PMGR/AIC/WDT/SART/ANS/SMM touches all sit BEHIND it.
+* **B1 bus rule (vm-core `Bus::find`, attach-spec §0):** overlapping windows
+  now resolve SMALLEST-matching-region-wins, tie → last attached. Required
+  because the real ADT nests device pages inside larger windows (pmgr w22 ⊃
+  dockchannel+pmp; mca-switch ⊃ mca0/1; SEPROM ⊃ dart-sep…). The old
+  lowest-base-first `position()` shadowed nested devices forever.
+* **PMGR 44-window rewrite (attach-spec §4, `apple-soc/src/pmgr.rs`):** the
+  synthetic psreg model replaced wholesale by `PmgrCore` (Arc-shared) +
+  44 `PmgrWindow` boxes with CONCATENATED linear offsets — the measured
+  AppleT8030PMGR addressing model. APSC polls 0xE2020/0xE2588 answer the
+  PS-format mirror ((TARGET<<4)|TARGET, default 0xF ⇒ 0xFF "ACTIVE");
+  gate reads at 0x80000+id*0x18 (stride-unconfirmed mitigation: any read in
+  the span answers, wrong stride degrades to always-powered, never a hang);
+  boot `clock-gates` from the ADT seed the gate table; everything else
+  scratch R/W. Fallback map attaches the same 44 windows.
+* **dockchannel-uart (attach-spec §5.1, `apple-soc/src/dockchannel.rs`):**
+  the s3c-uart mis-model (wrong protocol + console-sink corruption risk)
+  replaced by a 2-window shared-core scratch shim with a DEDICATED TX sink.
+  Measured upgrade over the spec's RAZ: the 48M census PROVED the kernel
+  touches w1 early, so reads echo stored config (write-then-readback safe).
+  After the fix the census is **17/17 named, 0 UNMAPPED**.
+* **dapf shims (attach-spec §5.2, `apple-soc/src/dapf.rs`):** dapf-disp0 +
+  dapf-aop re-classified out of the adp-v4/aop mis-models (DAPF = DART SID
+  filter); TCR store-on-write/boot-safe bypass, rest RAZ. classify() wins
+  over disp/dart/aop arms; dockchannel intercepts before the uart arm.
+* **Per-window exact sizes:** the blanket `size.max(0x1000)` rounding is gone
+  (0x1000 floor only for zero-size windows) — no more 0x1000 shadows grown
+  from 0x18-byte pages. Dead `dart-ans` fallback arm deleted (P4). New
+  `ios-rust adt windows|find` diagnostic subcommand (IM4P→LZFSE→flat ADT,
+  window map + physical-address owner lookup — the census naming tool).
+* Census-tool staleness note: `m5_mmio_census.py`'s "BAD base (reg_entries
+  BE bug)" annotations are STALE (P1 landed sessions ago; the attached bases
+  it prints are the REAL ones). The ranked tables + attach map remain
+  authoritative. Next tooling pass should drop the stale cross-check text.
+
+**Honest limits carried forward:** M5 acceptance NOT met — "no
+unknown-device aborts" is true at the current frontier (0/0 unmapped), but
+the NVMe-rootfs-bytes clause is untested: ANS/NVMe/SART are 0-touch through
+400M because M4's percpu wall (bug #33 GXF-write half + the FAR 0x10c
+handled-abort loop) gates everything past 48M. SART v1 rewrite + ANS
+dual-window + SMC endpoint specs (attach-spec §5.4-5.6) are READY but
+unlanded — they move the ledger only when the frontier reaches them.
+`cargo test --workspace`: **434 passed / 0 failed** (+4: pmgr×2 new tests
+rewritten + dockchannel×1 + dapf×1; the pmgr gate_roundtrip test was
+replaced by the 3-test pmgr suite).
+
+Current: 59/105 → **103 modeled windows / 105 /arm-io children** (44 pmgr
+windows + dockchannel×2 + dapf×2 added; 35 classify-miss nodes unchanged —
+skip-list per m5-peripheral-queue §5). Order by what the boot trace touches first:
 
 1. Re-run boot with a device-access log; rank missing compatibles by hit count.
 2. PMGR (clock gates — xnu polls pstate/clock-tree early), UART (have), SART,

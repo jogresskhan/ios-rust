@@ -29,6 +29,8 @@ pub mod a7iop_mailbox;
 pub mod displaypipe_v2;
 pub mod pmu_d2255;
 pub mod dart;
+pub mod dapf;
+pub mod dockchannel;
 pub mod gpio_i2c_spi;
 pub mod mca;
 pub mod mipi_dsi;

@@ -112,10 +112,31 @@ impl Bus {
         self.regions.sort_by_key(|r| r.base);
     }
 
+    /// Region resolution — **B1 rule (M5 attach-spec §0)**: resolve overlapping
+    /// windows by SMALLEST matching region wins; tie → the region attached
+    /// later. The real ADT nests device pages inside larger windows (measured:
+    /// pmgr window22 [0x23D100000+0x80000] ⊃ dockchannel-uart [0x23D10C000+0x1000]
+    /// and pmp; mca-switch ⊃ mca0/mca1; SEPROM Ram ⊃ dart-sep …). The old
+    /// `position()` = lowest-base-first silently shadowed the nested devices
+    /// forever. Iteration is in (base, attach-order) order because `attach`
+    /// does a stable sort by base, so `<=` implements "tie → last attached".
     fn find(&mut self, addr: u64) -> Option<usize> {
-        self.regions
-            .iter()
-            .position(|r| addr >= r.base && addr < r.base + r.size)
+        let mut best: Option<usize> = None;
+        for (i, r) in self.regions.iter().enumerate() {
+            if addr >= r.base && addr < r.base + r.size {
+                best = match best {
+                    None => Some(i),
+                    Some(b) => {
+                        if r.size <= self.regions[b].size {
+                            Some(i)
+                        } else {
+                            Some(b)
+                        }
+                    }
+                };
+            }
+        }
+        best
     }
 
     pub fn read(&mut self, addr: u64, size: u8) -> u64 {

@@ -400,6 +400,159 @@ fn walk_extent(dt: &[u8], off: usize) -> usize {
     p
 }
 
+// --- M5-P: iBoot-equivalent /chosen/lock-regs populate (REAL-DATA BUG #41) ---
+//
+// The kernel's AMCC lock-regs bring-up (parser 0x…7b7c390, caller
+// 0x…7b7c0a0 — reached at insn 22,688,176 after bug #40 fell) requires:
+//   /chosen/lock-regs/amcc:  aperture-count (<17, u32), aperture-size
+//   (u32 ≠ 0), plane-count (<17, u32), plane-stride (u32, optional),
+//   aperture-phys-addr (count×8 B, ≤ 0x80), cache-status-reg-offset/mask/
+//   value (u32 ×3); /chosen/lock-regs/amcc/amcc-ctrr-a: page-size-shift
+//   (u32) + lower-limit/upper-limit/lock/enable/disable -reg-offset/mask/
+//   value (u32 each). Missing 'aperture-count' panicked the kernel's OWN
+//   "lock-regs: cannot find required property 'aperture-count'".
+// The IPSW EDT ships the node STUB-EMPTY (name + AAPL,phandle only) — on
+// real hardware iBoot fills the runtime aperture geometry before the
+// jump. The honest emulator equivalent: synthesize ONE self-consistent
+// aperture (count=1, 16 KB window, plane=1) over a RAM PA at the DRAM
+// midpoint, page-size-shift=14 (T8030's 16K pages), and all reg offsets/
+// masks/values = 0 (the kernel samples [aperture+offset] per plane and
+// requires CONSISTENCY across planes only — with count=1/plane=1 the
+// check is trivially satisfied; sampled 0 → zero-size lock region).
+// Honesty note: real iBoot AMCC geometry is hardware state we do not
+// model — the synthesized values are documented emulator choices, not
+// measured hardware numbers.
+
+/// Offset of the direct child of `node_off` whose name prop == `want`.
+fn dt_find_child(dt: &[u8], node_off: usize, want: &str) -> Option<usize> {
+    let rd = |p: usize| -> u32 { u32::from_le_bytes(dt[p..p + 4].try_into().unwrap()) };
+    let nprops = rd(node_off) as usize;
+    let nchildren = rd(node_off + 4) as usize;
+    let mut p = node_off + 8;
+    for _ in 0..nprops {
+        let len = (rd(p + 32) & 0x7FFF_FFFF) as usize;
+        p = (p + 36 + len + 3) & !3;
+    }
+    for _ in 0..nchildren {
+        let child = p;
+        // child name = first prop "name"
+        let cnprops = rd(child) as usize;
+        let mut q = child + 8;
+        let mut name: Option<String> = None;
+        for _ in 0..cnprops {
+            if dt.len() >= q + 5 && &dt[q..q + 5] == b"name\x00" {
+                let vlen = (rd(q + 32) & 0x7FFF_FFFF) as usize;
+                let v = &dt[q + 36..(q + 36 + vlen).min(dt.len())];
+                let v = &v[..v.iter().position(|&c| c == 0).unwrap_or(v.len())];
+                name = Some(String::from_utf8_lossy(v).into_owned());
+            }
+            let len = (rd(q + 32) & 0x7FFF_FFFF) as usize;
+            q = (q + 36 + len + 3) & !3;
+        }
+        if name.as_deref() == Some(want) {
+            return Some(child);
+        }
+        p = walk_extent(dt, child);
+    }
+    None
+}
+
+/// Byte offset just past `node_off`'s own property list (= first child /
+/// node end).
+fn dt_props_end(dt: &[u8], node_off: usize) -> usize {
+    let rd = |p: usize| -> u32 { u32::from_le_bytes(dt[p..p + 4].try_into().unwrap()) };
+    let nprops = rd(node_off) as usize;
+    let mut p = node_off + 8;
+    for _ in 0..nprops {
+        let len = (rd(p + 32) & 0x7FFF_FFFF) as usize;
+        p = (p + 36 + len + 3) & !3;
+    }
+    p
+}
+
+/// Append one property (name[32] + u32 len + data, 4-aligned) at `at`,
+/// bumping `node_off`'s nprops. Data is padded to 4 bytes by the caller.
+fn dt_append_prop(dt: &mut Vec<u8>, at: usize, node_off: usize, name: &str, data: &[u8]) {
+    assert!(name.len() < 32, "prop name too long: {name}");
+    let mut rec = vec![0u8; 32];
+    rec[..name.len()].copy_from_slice(name.as_bytes());
+    rec.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    rec.extend_from_slice(data);
+    while rec.len() % 4 != 0 {
+        rec.push(0);
+    }
+    let nprops = u32::from_le_bytes(dt[node_off..node_off + 4].try_into().unwrap());
+    dt.splice(at..at, rec);
+    dt[node_off..node_off + 4].copy_from_slice(&(nprops + 1).to_le_bytes());
+}
+
+/// Populate /chosen/lock-regs/{amcc,amcc-ctrr-a} with the aperture config
+/// the kernel's lock-regs parser requires (see the block comment above).
+/// `aperture_pa` = the one aperture's physical address (RAM-backed).
+/// Returns the number of properties written.
+fn dt_populate_amcc_lockregs(dt: &mut Vec<u8>, aperture_pa: u64) -> Result<usize, String> {
+    let rd = |p: usize| -> u32 { u32::from_le_bytes(dt[p..p + 4].try_into().unwrap()) };
+    // root → chosen → lock-regs → amcc (pre-order path walk)
+    let mut off = 0usize;
+    for want in ["chosen", "lock-regs", "amcc"] {
+        off = dt_find_child(dt, off, want)
+            .ok_or_else(|| format!("lock-regs populate: /{want} node not found"))?;
+    }
+    let amcc = off;
+
+    let u32le = |v: u32| v.to_le_bytes().to_vec();
+    let mut written = 0usize;
+
+    // amcc props — inserted BEFORE its first child (amcc-ctrr-a).
+    let at = dt_props_end(dt, amcc);
+    // order: append sequentially; each dt_append_prop bumps at by rec len,
+    // so track the cursor manually.
+    let mut cur = at;
+    for (name, data) in [
+        ("aperture-count", u32le(1)),
+        ("aperture-size", u32le(0x4000)),
+        ("plane-count", u32le(1)),
+        ("plane-stride", u32le(0x4000)),
+        ("aperture-phys-addr", aperture_pa.to_le_bytes().to_vec()),
+        ("cache-status-reg-offset", u32le(0)),
+        ("cache-status-reg-mask", u32le(0)),
+        ("cache-status-reg-value", u32le(0)),
+    ] {
+        dt_append_prop(dt, cur, amcc, name, &data);
+        cur += (32 + 4 + data.len() + 3) & !3;
+        written += 1;
+    }
+
+    // amcc-ctrr-a props — RE-FIND the child (the amcc splice shifted every
+    // later byte), then append at its end (the node has no children).
+    let ctrr = dt_find_child(dt, amcc, "amcc-ctrr-a")
+        .ok_or_else(|| "lock-regs populate: amcc-ctrr-a node not found".to_string())?;
+    let at = dt_props_end(dt, ctrr);
+    let mut cur = at;
+    for (name, data) in [
+        ("page-size-shift", u32le(14)),
+        ("lower-limit-reg-offset", u32le(0)),
+        ("lower-limit-reg-mask", u32le(0)),
+        ("upper-limit-reg-offset", u32le(0)),
+        ("upper-limit-reg-mask", u32le(0)),
+        ("lock-reg-offset", u32le(0)),
+        ("lock-reg-mask", u32le(0)),
+        ("lock-reg-value", u32le(0)),
+        ("enable-reg-offset", u32le(0)),
+        ("enable-reg-mask", u32le(0)),
+        ("enable-reg-value", u32le(0)),
+        ("disable-reg-offset", u32le(0)),
+        ("disable-reg-mask", u32le(0)),
+        ("disable-reg-value", u32le(0)),
+    ] {
+        dt_append_prop(dt, cur, ctrr, name, &data);
+        cur += (32 + 4 + data.len() + 3) & !3;
+        written += 1;
+    }
+    Ok(written)
+}
+
+
 /// REAL-DATA BUG #36 fix — iBoot-equivalent `random-seed` staging. The real
 /// kernel reads **/chosen/random-seed** (measured RE: the seed helper
 /// 0x…81383ac does `SecureDTLookupEntry(0, "/chosen")` with the path string
@@ -754,6 +907,18 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
         "[stage] DeviceTree dram-base/dram-size: {dram_base:#x}/{dram_size:#x} staged (machine DRAM geometry)"
     );
 
+    // ---- M5-P: iBoot-equivalent /chosen/lock-regs aperture populate ----
+    // The kernel's AMCC bring-up (parser 0x…7b7c390) requires aperture
+    // properties the IPSW EDT stub doesn't carry (REAL-DATA BUG #41 —
+    // "lock-regs: cannot find required property 'aperture-count'" at insn
+    // 22,688,176). One aperture over a RAM PA at the DRAM midpoint.
+    let aperture_pa = dram_base + (dram_size / 2) & !0x3FFF;
+    let lockregs_props = dt_populate_amcc_lockregs(&mut dt_blob, aperture_pa)?;
+    println!(
+        "[stage] DeviceTree /chosen/lock-regs populated: {lockregs_props} props staged \
+         (1×16KB aperture @ {aperture_pa:#x}, page-size-shift 14, reg locks 0)"
+    );
+
     // ---- 3) machine assembly (iBoot equivalent) ----
     // Staging layout computed from the REAL sizes (BUG #22 — see
     // StagedLayout): image → end_kern → DT blob → boot_args page →
@@ -914,6 +1079,40 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
         StopReason::ExceptionRecursion { elr, .. } => Some(elr),
         _ => None,
     };
+
+    // M5-P stop-memdump: when the run stopped via IOS_RUST_STOP_PC_RANGE,
+    // dump 0x40 bytes at each of x0/x1/x2 (the KAT memcmp computed/expected
+    // pointers land there) — bounded, report-only, zero behavior drift.
+    if std::env::var("IOS_RUST_STOP_DUMP_MEM").ok().as_deref() == Some("1") {
+        for (i, reg) in [0usize, 1, 2].iter().enumerate() {
+            let va = cpu.x[*reg];
+            if va == 0 {
+                continue;
+            }
+            let mut buf = [0u8; 0x40];
+            let mut line = format!("M5-P stop-memdump x{i} @ {va:#x}:");
+            let mut got = 0usize;
+            for (off, chunk) in buf.chunks_mut(8).enumerate() {
+                if let Ok(pa) =
+                    cpu.debug_walk(va + (off * 8) as u64, a13_cpu::mmu::XlateKind::Load)
+                {
+                    cpu.mem().read_bytes(pa, chunk);
+                    got += chunk.len();
+                }
+            }
+            if got == 0 {
+                line.push_str(" <unmapped>");
+            } else {
+                for (k, b) in buf.iter().take(got).enumerate() {
+                    if k % 16 == 0 {
+                        line.push_str(&format!("\n    +{:02x}:", k));
+                    }
+                    line.push_str(&format!(" {b:02x}"));
+                }
+            }
+            println!("{line}");
+        }
+    }
 
     let out = serial.lock().map(|s| s.clone()).unwrap_or_default();
     let trace: Vec<String> = cpu

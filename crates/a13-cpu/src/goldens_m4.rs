@@ -606,3 +606,181 @@ fn gap39_kernel_ccmp_never_writes_gprs() {
     assert_eq!(c.x[0], 0, "x0 untouched on the taken path too");
     assert_eq!(c.x[11], 0x1234, "x11 survives the taken path");
 }
+
+// ==================== REAL-DATA BUG #40 (M5-P) — the W-form add/sub +
+// logical-REGISTER upper-half leak that WAS the global_waitqs wall ======
+//
+// The kernel's OWN panic "kernel_memory_allocate() failed to alloc global_
+// waitqs" at insn 22,505,463 traced to waitq_bootstrp's whsize arithmetic
+// (0x…7ab6d68..0x…7ab6d74, verbatim words from the 18C66 kernelcache):
+//
+//   0x128004E9  mov w9, #-0x28
+//   0x1B097D08  mul w8, w8, w9
+//   0x12124508  and w8, w8, #0xffffc000
+//   0x4B0803F3  neg w19, w8          ← THE BUG SITE
+//
+// The engine ran `neg w19, w8` as a 64-bit SUB: 0 − 0x00000000FFFFC000 =
+// 0xffffffff00004000 — with CLEAN inputs. W-form must zero-extend into
+// Xd: x19 = 0x4000. That garbage size (2^64 − 0xFFFFC000) to
+// kernel_memory_allocate trips the wired-extent sanity check
+// (vm_kern.c: `map_size > MAX(1ULL << 31, sane_size / 64)` →
+// KERN_RESOURCE_SHORTAGE) and the kernel panics.
+//
+// Panic evidence (measured at the 0x…987b99c probe, insn 22,505,463):
+// x0=fmt 0x…735e028, x19=x2=0xffffffff00004000 (the spilled whsize),
+// lr=0x…7ab6f34 (the call after `bl kernel_memory_allocate` 0x…7b01cb8).
+
+/// The verbatim waitq_bootstrp negate: `neg w19, w8` (0x4B0803F3) must
+/// ZERO-EXTEND the 32-bit result into X19 — never 0xffffffff00004000.
+#[test]
+fn gap40_neg_wform_zero_extends() {
+    let words = [0x4B08_03F3u32, HLT]; // neg w19, w8 (verbatim)
+    let (mut c, _) = ram(&words);
+    c.x[8] = 0x0000_0000_FFFF_C000u64; // the measured clean input
+    let res = c.run(InterpBudget { max_insn: 2, max_ns: 1_000_000_000 });
+    assert!(matches!(res.stop, StopReason::Halted), "{res:?}");
+    assert_eq!(
+        c.x[19], 0x4000u64,
+        "neg w19,w8 must write 0x4000 (zero-extended), got 0x{:x} — bug #40",
+        c.x[19]
+    );
+}
+
+/// The full verbatim waitq_bootstrp whsize tail (x8 = g_num_waitqs after
+/// the power-of-2 mask loop = 256): mov w9,#-0x28; mul w8,w8,w9;
+/// and w8,#0xffffc000; neg w19,w8 → x19 must be 0x4000 zero-extended
+/// (the buggy engine produced 0xffffffff00004000 — the KMA size that
+/// panicked the kernel), and W-form movn must zero-extend w9.
+#[test]
+fn gap40_waitq_whsize_chain_verbatim() {
+    let words = [0x1280_04E9u32, 0x1B09_7D08, 0x1212_4508, 0x4B08_03F3, HLT];
+    let (mut c, _) = ram(&words);
+    c.x[8] = 256; // g_num_waitqs (power of 2), the real pre-mul input
+    let res = c.run(InterpBudget { max_insn: 5, max_ns: 1_000_000_000 });
+    assert!(matches!(res.stop, StopReason::Halted), "{res:?}");
+    assert_eq!(
+        c.x[9], 0x0000_0000_FFFF_FFD8u64,
+        "mov w9,#-0x28 (movn w9,#0x27) zero-extends to 0xFFFFFFD8"
+    );
+    assert_eq!(
+        c.x[8], 0x0000_0000_FFFF_C000u64,
+        "256*(-40) mod 2^32 & 0xffffc000 = 0xFFFFC000"
+    );
+    assert_eq!(
+        c.x[19], 0x4000u64,
+        "neg w19,w8 → whsize 0x4000 zero-extended — the bug #40 site"
+    );
+}
+
+/// W-form logical-REGISTER: `orr w0, w1, w2` and `eor w3, w4, w5` with
+/// dirty uppers must zero-extend (the ORR/EOR leak — bug #38 covered only
+/// the immediate forms; AND was safe by accident: result ⊆ masked Rm).
+#[test]
+fn gap40_logic_reg_wform_zero_extends() {
+    // orr w0, w1, w2  = 0x2A020020? — pack via the shifted-reg encoding:
+    // ORR shifted-register: sf=0 01 01010 shift=00 0 Rm=2 imm6=0 Rn=1 Rd=0
+    let orr = 0x2A02_0020u32;
+    // EOR shifted-register: sf=0 10 01010 … Rn=4 Rd=3
+    let eor = 0x4A05_0083u32;
+    let words = [orr, eor, HLT];
+    let (mut c, _) = ram(&words);
+    c.x[1] = 0xAAAA_0000_0000_00F0u64;
+    c.x[2] = 0x0000_0000_0000_000Fu64;
+    c.x[4] = 0x1234_0000_0000_00FFu64;
+    c.x[5] = 0x0000_0000_0000_0F0Fu64;
+    let res = c.run(InterpBudget { max_insn: 3, max_ns: 1_000_000_000 });
+    assert!(matches!(res.stop, StopReason::Halted), "{res:?}");
+    assert_eq!(c.x[0], 0xF0 | 0xF, "orr w0,w1,w2 → 0xFF zero-extended");
+    assert_eq!(c.x[3], 0x00FF ^ 0x0F0F, "eor w3,w4,w5 → 0xF0F0 zero-extended");
+}
+
+/// W-form ADD/SUB immediate (capstone-pinned 0x11004020 / 0x51000400):
+/// `add w0, w1, #0x10` with a DIRTY x1 upper must read bits 31:0 only and
+/// zero-extend the result into X0; `sub w0, w0, #1` then stays 32-bit.
+#[test]
+fn gap40_addsub_imm_wform_masks_operand_and_result() {
+    let words = [0x1100_4020u32, 0x5100_0400, HLT]; // add w0,w1,#0x10 ; sub w0,w0,#1
+    let (mut c, _) = ram(&words);
+    c.x[1] = 0xDEAD_0000_BEEF_0020u64; // dirty upper half
+    let res = c.run(InterpBudget { max_insn: 3, max_ns: 1_000_000_000 });
+    assert!(matches!(res.stop, StopReason::Halted), "{res:?}");
+    assert_eq!(
+        c.x[0], 0x0000_0000_BEEF_002Fu64,
+        "w0 = (w1&0xffffffff + 0x10 - 1) zero-extended (0xBEEF002F, NOT \
+         0xDEAD0000BEEF002F) — bug #40"
+    );
+}
+
+// ==================== REAL-DATA BUG #42 (M5-P) — PSTATE.PAN unsupported
+// → "context switch with PAN disabled" at insn 23,684,722 ================
+//
+// machine_switch_context's helper (0x…7b91904) does `mrs x8, pan; cbz w8,
+// →panic`. The engine dropped every `msr pan, #0/#1` (95 sites: copyin/
+// copyout wrappers, pmap, arm_vm_init 0x…7b80ad4) AND the SPSel immediate
+// mask (0xD500_401F, no op2 pin) silently swallowed PAN words as SPSel.
+// 18C66 ground-truth bytes: msr pan,#0 = D500409F, msr pan,#1 = D500419F,
+// mrs x8, pan = D5384268 (capstone-decoded).
+
+#[test]
+fn gap42_pan_decode_from_kernel_bytes() {
+    use crate::decode::Insn;
+    assert_eq!(
+        decode(0, 0xD500_409F),
+        Some(Insn::MsrPan { set: false }),
+        "msr pan, #0 (verbatim 0x…7b7ce54)"
+    );
+    assert_eq!(
+        decode(0, 0xD500_419F),
+        Some(Insn::MsrPan { set: true }),
+        "msr pan, #1 (verbatim 0x…7b7ce68)"
+    );
+    assert_eq!(
+        decode(0, 0xD538_4268),
+        Some(Insn::MrsPan { rt: 8 }),
+        "mrs x8, pan (verbatim 0x…7b91918)"
+    );
+    // the PAN words must NOT decode as SPSel anymore (op2 pin: 4 vs 5)
+    assert!(
+        !matches!(decode(0, 0xD500_409F), Some(Insn::MsrSpsel { .. })),
+        "SPSel mask must not swallow PAN words — bug #42"
+    );
+    // SPSel itself unchanged (keystone goldens d50040bf/d50041bf)
+    assert_eq!(decode(0, 0xD500_40BF), Some(Insn::MsrSpsel { use_sp: false }));
+    assert_eq!(decode(0, 0xD500_41BF), Some(Insn::MsrSpsel { use_sp: true }));
+}
+
+/// Exec round-trip: msr pan,#1 → mrs reads 1 → msr pan,#0 → mrs reads 0.
+#[test]
+fn gap42_pan_msr_mrs_roundtrip() {
+    // msr pan,#1; mrs x0, pan; msr pan,#0; mrs x1, pan; hlt
+    let words = [0xD500_419Fu32, 0xD538_4260, 0xD500_409F, 0xD538_4261, HLT];
+    let (mut c, _) = ram(&words);
+    let res = c.run(InterpBudget { max_insn: 6, max_ns: 1_000_000_000 });
+    assert!(matches!(res.stop, StopReason::Halted), "{res:?}");
+    assert_eq!(c.x[0], 1, "mrs x0, pan after msr pan,#1");
+    assert_eq!(c.x[1], 0, "mrs x1, pan after msr pan,#0");
+}
+
+/// Exception entry saves PAN into SPSR bit 23; ERET restores it.
+#[test]
+fn gap42_pan_spsr_save_restore() {
+    // words: msr pan,#1; eret
+    let (mut c, _) = ram(&[0xD500_419Fu32, 0xD69F_03E0]);
+    let res = c.run(InterpBudget { max_insn: 1, max_ns: 1_000_000_000 });
+    assert!(matches!(res.stop, StopReason::Budget), "{res:?}");
+    assert!(c.pan, "msr pan,#1 must set the tracked bit");
+    // exception entry (kernel-taken data abort) must save PAN → SPSR bit 23
+    c.take_exception(0x200, 0x96000005, Some(0x10), "load");
+    assert_eq!(
+        (c.sys.spsr_el1 >> 23) & 1,
+        1,
+        "exception entry must save PAN into SPSR bit 23"
+    );
+    // the handler runs with PAN off (kernel does this around uaccess)
+    c.pan = false;
+    // ERET at word[1] (pc=4) restores PSTATE from SPSR — PAN must come back
+    c.pc = 4;
+    let res = c.step();
+    assert!(res.is_ok(), "eret must execute: {res:?}");
+    assert!(c.pan, "ERET must restore PAN from SPSR bit 23");
+}

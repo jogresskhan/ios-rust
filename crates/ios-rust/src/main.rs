@@ -737,6 +737,37 @@ fn cmd_adt(args: &[String]) -> i32 {
     }
 
     match cmd.as_str() {
+        "dump" => {
+            // M5-P diagnostic: full recursive node/property dump (names +
+            // sizes, printable values) — the tool that found /chosen/
+            // lock-regs missing its aperture-count property.
+            fn dump(node: &adt::AdtNode, depth: usize) {
+                let ind = "  ".repeat(depth);
+                println!("{ind}{} ({})", node.name, node.props.len());
+                for p in &node.props {
+                    let printable = p
+                        .data
+                        .iter()
+                        .all(|b| (0x20..0x7f).contains(b) || *b == 0);
+                    if printable && !p.data.is_empty() {
+                        let s: String = p
+                            .data
+                            .iter()
+                            .filter(|b| **b != 0)
+                            .map(|b| *b as char)
+                            .collect();
+                        println!("{ind}  {} = {:?} ({} bytes)", p.name, s, p.data.len());
+                    } else {
+                        println!("{ind}  {} ({} bytes)", p.name, p.data.len());
+                    }
+                }
+                for c in &node.children {
+                    dump(c, depth + 1);
+                }
+            }
+            dump(&root, 0);
+            0
+        }
         "windows" => {
             let mut rows: Vec<(String, Vec<(u64, u64)>, Vec<String>)> = Vec::new();
             walk(&root, "", &mut |path, n| {

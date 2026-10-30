@@ -143,11 +143,14 @@ impl Bus {
         match self.find(addr) {
             Some(i) => {
                 let r = &mut self.regions[i];
+                let v = r.device.read(addr - r.base, size);
                 if mmio_logging() && r.device.ram_mut().is_none() {
                     let name = r.device.name();
-                    mmio_log_line(&format!("{addr:#x},{size},r,{name}"));
+                    // M5-P: value appended (console-reconstruction aid — the
+                    // FIPSPOST/panic print stream rides the UART FIFO writes).
+                    mmio_log_line(&format!("{addr:#x},{size},r,{name},{v:#x}"));
                 }
-                r.device.read(addr - r.base, size)
+                v
             }
             None => {
                 if mmio_logging() {
@@ -166,14 +169,15 @@ impl Bus {
                 let r = &mut self.regions[i];
                 if mmio_logging() && r.device.ram_mut().is_none() {
                     let name = r.device.name();
-                    mmio_log_line(&format!("{addr:#x},{size},w,{name}"));
+                    // M5-P: value appended (console-reconstruction aid).
+                    mmio_log_line(&format!("{addr:#x},{size},w,{name},{val:#x}"));
                 }
                 let off = addr - r.base;
                 r.device.write(off, size, val);
             }
             None => {
                 if mmio_logging() {
-                    mmio_log_line(&format!("{addr:#x},{size},w,UNMAPPED"));
+                    mmio_log_line(&format!("{addr:#x},{size},w,UNMAPPED,{val:#x}"));
                 }
                 self.unmapped_writes += 1;
                 UNMAPPED_WRITES.fetch_add(1, Ordering::Relaxed);

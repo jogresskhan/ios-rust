@@ -459,6 +459,13 @@ pub enum Insn {
     /// MSR (immediate) SPSel — `msr spsel, #0/#1` (keystone: d50040bf /
     /// d50041bf; the stack-select bit is instruction bit 8).
     MsrSpsel { use_sp: bool },
+    /// MSR (immediate) PAN — `msr pan, #0/#1` (real 18C66 bytes:
+    /// #0=D500409F, #1=D500419F — op2=4, value bit 8; 95 boot-path sites).
+    /// REAL-DATA BUG #42: previously swallowed by the SPSel mask.
+    MsrPan { set: bool },
+    /// MRS Xt, pan — `mrs x8, pan` (0xD5384268, machine_switch_context PAN
+    /// invariant ×2 sites). REAL-DATA BUG #42.
+    MrsPan { rt: u8 },
     // ------------------------------------------------------------------
     // PAC (v8.3 pointer authentication — ARM hint-space group 0xDA)
     // ------------------------------------------------------------------
@@ -1132,6 +1139,13 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
     }
     if (w & 0xFFFF_FC1F) == 0xD63F_0000 {
         return Some(Insn::Blr { rn: reg(w, 5) });
+    }
+
+    // --- MRS Xt, pan (18C66: d5384268 = mrs x8, pan; the scheduler PAN
+    //     invariant reads this — bug #42). MUST precede the generic MRS
+    //     arm, which would file it as an unknown sysreg read. ---
+    if (w & 0xFFFF_FFE0) == 0xD538_4260 {
+        return Some(Insn::MrsPan { rt: (w & 0x1F) as u8 });
     }
 
     // --- System register access ---
@@ -2110,11 +2124,21 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
         return Some(Insn::MsrImm { daifclr, imm4: ((w >> 8) & 0xF) as u8 });
     }
 
+    // --- MSR (immediate) PAN (18C66: pan,#0=D500409F pan,#1=D500419F —
+    //     same SPSel-family mask, op2=4, value bit 8; must precede the
+    //     SPSel match which would otherwise swallow it — bug #42) ---
+    if (w & 0xFFFF_C01F) == 0xD500_401F && (w >> 5) & 7 == 4 {
+        return Some(Insn::MsrPan { set: (w >> 8) & 1 == 1 });
+    }
+
     // --- MSR (immediate) SPSel (keystone oracle: #0=d50040bf, #1=d50041bf
-    //     → op1=0, CRm=4, value in bit 8; placed after the DAIF match) ---
-    if (w & 0xFFFF_C01F) == 0xD500_401F {
+    //     → op1=0, CRm=4, value in bit 8; op2 pinned to 5 so the PAN and
+    //     DIT/UAO siblings stay distinct — bug #42) ---
+    if (w & 0xFFFF_C01F) == 0xD500_401F && (w >> 5) & 7 == 5 {
         return Some(Insn::MsrSpsel { use_sp: (w >> 8) & 1 == 1 });
     }
+
+    // --- MRS Xt, pan handled above the generic MRS arm (bug #42) ---
 
     // --- PAC family: 1101 1010 100 S 1 001010? (group bits31:24 = 0xDA) ---
     if (w & 0xFF00_0000) == 0xDA00_0000 && (w >> 16) & 0xFF == 0xC1 {

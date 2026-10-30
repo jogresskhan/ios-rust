@@ -1048,3 +1048,79 @@ enforcement stays an honest, tracked limit gated on M4 vectoring.
   outcomes leave X0..X30 frozen).
 * `cargo test --workspace`: **437 passed / 0 failed**. Docs: BOOT-PLAN M5
   session-O block; tools/re/notes/m5-session-O-percpu-wall.md.
+
+### 2.14 — Session P (2026-10-30): THREE real-data bugs — the waitqs wall was OUR W-form arithmetic, the DT lock-regs stub, and PSTATE.PAN — boot frontier 22.5M-panic → 155M FIPS POST
+
+**Method note:** every bug below carries its measured number from the live
+boot (release build, IOS_RUST_DRAM_MB=1024, panic wrapper probe 0x…987b99c
++ capstone cross-check of verbatim kernel bytes; oracle scripts in
+tools/re/reports/m5p_*.py).
+
+* **REAL-DATA BUG #40 — W-form add/sub + logical-register upper-half leak
+  (the global_waitqs wall root).** waitq_bootstrp's whsize arithmetic
+  (verbatim words 0x128004E9 `mov w9,#-0x28`, 0x1B097D08 `mul w8,w8,w9`,
+  0x12124508 `and w8,w8,#0xffffc000`, **0x4B0803F3 `neg w19,w8`**,
+  0x…7ab6d68..0x…7ab6d74) ran the 64-bit SUB 0 − 0x00000000FFFFC000 =
+  **x19 = 0xffffffff00004000** with CLEAN inputs (W-form must zero-extend:
+  x19 = 0x4000). That size to kernel_memory_allocate trips vm_kern.c's
+  wired-extent check (map_size > MAX(1<<31, sane_size/64)) →
+  KERN_RESOURCE_SHORTAGE → the kernel's OWN panic "kernel_memory_allocate()
+  failed to alloc global_waitqs" at insn 22,505,463. The same class leaked
+  in AddImm/SubImm (operand read + result), AddSubReg (Rn read + result;
+  Rm was already masked via shift()), and LogicReg (ORR/EOR/BIC/EON via
+  unmasked Rn — AND was safe by accident: result ⊆ masked Rm). Bug #38
+  fixed only the IMMEDIATE logical forms.
+  *Fix:* mask operands & zero-extend results in all four arms
+  (a13-cpu/src/interp.rs). *Goldens (+4):* gap40_neg_wform_zero_extends
+  (verbatim 0x4B0803F3), gap40_waitq_whsize_chain_verbatim (the 4-insn
+  chain, x8=256 → x19=0x4000), gap40_addsub_imm_wform_masks_operand_and_
+  result, gap40_logic_reg_wform_zero_extends.
+* **REAL-DATA BUG #41 — /chosen/lock-regs aperture stub (iBoot job).** With
+  waitqs fixed the boot advanced 182,713 insns to the kernel's OWN panic
+  "lock-regs: cannot find required property 'aperture-count'" at insn
+  22,688,176 (fmt 0x…736724f, x1='aperture-count' 0x…7367220). RE: the
+  parser (0x…7b7c390, caller 0x…7b7c0a0) requires /chosen/lock-regs/amcc:
+  aperture-count(<17,u32), aperture-size(u32≠0), plane-count(<17),
+  plane-stride, aperture-phys-addr(count×8, ≤0x80), cache-status-reg-
+  offset/mask/value; amcc-ctrr-a: page-size-shift + lower-limit/upper-
+  limit/lock/enable/disable-reg-offset/mask/value. The IPSW EDT ships the
+  node stub-EMPTY (name + AAPL,phandle only — `ios-rust adt dump`, new
+  diagnostic subcommand). *Fix (iBoot-equivalent, honest):*
+  dt_populate_amcc_lockregs stages 1×16KB aperture @ DRAM midpoint
+  (RAM-backed, self-consistent), page-size-shift 14 (T8030 16K pages), reg
+  locks 0 (the kernel's consistency check trivially passes at count=1);
+  22 props staged. Real iBoot AMCC geometry stays a documented gap.
+* **REAL-DATA BUG #42 — PSTATE.PAN unsupported (+ the SPSel mask
+  misdecode).** machine_switch_context's helper (0x…7b91904) does
+  `mrs x8, pan` (0xD5384268) then `cbz → panic "context switch with PAN
+  disabled"` at insn 23,684,722 — the scheduler was RUNNING, our PSTATE had
+  no PAN. 95 `msr pan, #0/#1` sites (0xD500409F/0xD500419F) were dropped,
+  AND the SPSel-immediate mask (0xFFFFC01F, no op2 pin) silently decoded
+  PAN words as SPSel. *Fix:* MsrPan/MrsPan insns, `pan` bit tracked, SPSR
+  bit 23 saved on exception entry + restored on ERET; SPSel arm pins op2==5.
+  Access GATING (PAN=1 blocking user-page accesses) is NOT enforced —
+  honest limit. *Goldens (+3):* gap42_pan_decode_from_kernel_bytes,
+  gap42_pan_msr_mrs_roundtrip, gap42_pan_spsr_save_restore.
+* **Measured frontier move:** 22.5M waitqs-panic → 48M CLEAN budget stop
+  (0 panics, 0 sync aborts) → 400M: the kernel runs zone/scheduler
+  bring-up, lock-regs, and corecrypto_kext_start and reaches **its own FIPS
+  Kernel POST Failed (%d) at insn 155,032,147** (err −1075 = 0xfffffbcd
+  via the 0x…82e2b58 → 0x…82e8670 landing).
+* **Bug #43 (OPEN, next block):** the failure decomposes to
+  fipspost_post (0x…829fb3c) → fipspost_post_hmac (0x…82a4ce0) vector 0:
+  the 20-byte HMAC-SHA1 KAT memcmp (0x…7b85714 at 0x…82a4e00, len 0x14)
+  compares computed 491327a2e130799174899c2f7a9cbef2002b9571 vs expected
+  886eae70f36bd3805eeb1274b3248fccf5e15b80 (stop-memdump diagnostic,
+  IOS_RUST_STOP_PC_RANGE=0x…82a4e00 IOS_RUST_STOP_DUMP_MEM=1). The SHA1
+  crypto-instruction VALUE semantics (sha1c/p/m 4-round-group + Vn
+  writeback, sha1su0/su1 schedule) were never oracle-verified — goldens
+  are decode-level only (crates/a13-cpu/src/crypto.rs has no SHA1 reference
+  unlike AES/SHA512). Next: reconstruct the pipeline against a real oracle
+  and re-verify the KAT.
+* **New diagnostics (env-gated, report-only):** `ios-rust adt dump`
+  (full node/property tree), MMIO log now records the VALUE per access
+  (console-reconstruction aid), stop-memdump (x0/x1/x2 0x40-byte guest
+  dumps at IOS_RUST_STOP_PC_RANGE hits).
+* `cargo test --workspace`: **444 passed / 0 failed** (+7 gap40/gap42
+  goldens; DRAM_MB=768 documented). Docs: BOOT-PLAN M5 session-P block;
+  tools/re/notes/m5-session-P-blocks.md.

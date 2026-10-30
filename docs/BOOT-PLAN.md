@@ -714,3 +714,49 @@ workspace tests 0 failed):**
   corruption (log format `[watch] insn=… pc=…`).
 
 `cargo test --workspace`: **437 passed / 0 failed** (+3 gap39 goldens).
+
+## M5 — peripherals the real boot path touches  [~] (session P 2026-10-30: THREE real-data bugs — #40 W-form add/sub+logic upper-half leak (THE waitqs wall), #41 /chosen/lock-regs aperture populate, #42 PSTATE.PAN — frontier 22.5M-panic → 155M FIPS POST; next wall = bug #43 the SHA1 crypto-op value semantics in the HMAC KAT)
+
+**Session P evidence (release build, IOS_RUST_DRAM_MB=1024, 437→444
+workspace tests 0 failed):**
+
+* **#40 (the waitqs wall root):** waitq_bootstrp `neg w19,w8`
+  (0x4B0803F3) ran at 64-bit width → x19 = 0xffffffff00004000 (whsize
+  garbage) → kernel_memory_allocate → KERN_RESOURCE_SHORTAGE → the
+  kernel's OWN "failed to alloc global_waitqs" panic at 22,505,463. The
+  W-form masking discipline from bug #38 (logical-IMMEDIATE) was missing
+  in AddImm/SubImm/AddSubReg (result + Rn read) and LogicReg (Orr/Eor/
+  Bic/Eon). Fixed + 4 verbatim-word goldens.
+* **#41:** with the wall down the kernel reached its own "lock-regs:
+  cannot find required property 'aperture-count'" at 22,688,176 — the
+  AMCC aperture parser (0x…7b7c390) needs 22 properties the IPSW EDT
+  stub doesn't carry (iBoot fills them). New `adt dump` diagnostic
+  pinned the stub; dt_populate_amcc_lockregs stages the honest
+  emulator config (1×16KB RAM-backed aperture @ DRAM midpoint,
+  page-size-shift 14, reg locks 0). Real iBoot AMCC geometry = tracked
+  gap.
+* **#42:** the scheduler INVARIANT `mrs x8, pan; cbz → panic "context
+  switch with PAN disabled"` fired at 23,684,722 — the kernel was
+  context-switching threads and our PSTATE had no PAN bit; 95 msr-pan
+  sites were dropped and the SPSel decode mask even swallowed PAN
+  words. PAN now tracked (Msr/Mrs + SPSR bit23 save/restore), SPSel
+  arm op2-pinned. Access gating NOT enforced (honest limit). +3
+  goldens.
+* **Frontier:** 48M budget stop now CLEAN (0 panics/aborts); 400M run
+  advances through zone/scheduler bring-up and dies in the kernel's
+  own **"FIPS Kernel POST Failed"** at 155,032,147 — decomposed to the
+  HMAC-SHA1 KAT vector 0 memcmp: computed
+  491327a2e130799174899c2f7a9cbef2002b9571 vs expected
+  886eae70f36bd3805eeb1274b3248fccf5e15b80 (stop-memdump). **Bug #43
+  (open):** sha1c/p/m + sha1su0/su1 VALUE semantics never
+  oracle-verified; next block rebuilds them against a real oracle and
+  re-runs the KAT.
+* **M5 task 1 status:** unchanged — 17/17 device accesses named at the
+  48M frontier; PMGR/AIC/WDT/SART/ANS still 0-touch (pre-scheduler at
+  48M is now past — re-census at the 155M frontier pending #43).
+* **New tools:** `ios-rust adt dump`; MMIO log value column;
+  IOS_RUST_STOP_DUMP_MEM stop-memdump; oracle script
+  tools/re/oracle/derive_sha1_arm.py (pipeline reconstruction, first
+  pass).
+
+`cargo test --workspace`: **444 passed / 0 failed** (+7 goldens).

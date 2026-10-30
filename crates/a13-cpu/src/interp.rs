@@ -265,6 +265,16 @@ pub struct Interpreter {
     sysreg_store: HashMap<u16, u64>,
     /// SPSel flag (single-bank SP model: SP_EL0/SP_EL1 share `sp`).
     pub sp_sel: bool,
+    /// PSTATE.PAN (ARMv8.1 privileged-access-never). REAL-DATA BUG #42
+    //  (M5-P): the kernel's scheduler invariant `mrs x8, pan; cbz → panic
+    //  "context switch with PAN disabled"` (machine_switch_context helper
+    //  0x…7b91904, fired at insn 23,684,722) read 0 because every
+    //  `msr pan, #0/#1` (95 sites: copyin/copyout wrappers, pmap, arm_vm_
+    //  init 0x…7b80ad4) was dropped and the old SPSel decode MASK even
+    //  swallowed the PAN words as SPSel. Bit-level model: MSR (imm) sets/
+    //  clears, MRS reads, SPSR bit 23 saves/restores. ACCESS GATING (PAN=1
+    //  blocking user-page loads/stores) is NOT enforced — honest limit.
+    pub pan: bool,
     /// First N unknown-sysreg encodings, for the honest report.
     pub unknown_sysreg_seen: Vec<u16>,
     /// Optional instruction trace ring (pc, word, x regs snapshot) — boot
@@ -485,6 +495,7 @@ impl Interpreter {
             mmu: Mmu::new(),
             sysreg_store: HashMap::new(),
             sp_sel: false,
+            pan: false,
             unknown_sysreg_seen: Vec::new(),
             trace_enabled: false,
             trace: std::collections::VecDeque::new(),
@@ -901,7 +912,7 @@ impl Interpreter {
     /// M4 exception delivery to the EL1 vector table. `off` = VBAR offset
     /// (current-EL SPx: sync 0x200, IRQ 0x280, FIQ 0x300), `esr` = 0 for
     /// IRQ/FIQ, `far` set for synchronous aborts.
-    fn take_exception(&mut self, off: u64, esr: u64, far: Option<u64>, kind: &'static str) {
+    pub fn take_exception(&mut self, off: u64, esr: u64, far: Option<u64>, kind: &'static str) {
         // M5-O: on the FIRST vectored data abort, walk the interrupted
         // context's FP chain (x29) and record the kernel caller path. xnu
         // arm64 frames are FP-chained (pacibsp + stp x29, x30), so [fp+8]
@@ -978,8 +989,9 @@ impl Interpreter {
                 ));
             }
         }
-        // SPSR_EL1 = NZCV | DAIF | M[3:0]=EL1h (0b0101)
-        self.sys.spsr_el1 = ((self.nzcv as u64) << 28) | self.sys.daif | 0x5;
+        // SPSR_EL1 = NZCV | DAIF | PAN(bit23) | M[3:0]=EL1h (0b0101)
+        self.sys.spsr_el1 =
+            ((self.nzcv as u64) << 28) | self.sys.daif | ((self.pan as u64) << 23) | 0x5;
         self.sys.elr_el1 = self.pc;
         self.sys.esr_el1 = esr;
         if let Some(f) = far {
@@ -1069,7 +1081,7 @@ impl Interpreter {
         & mask | (if amt >= bits { 0 } else { 0 })
     }
 
-    fn step(&mut self) -> Result<(), StopReason> {
+    pub fn step(&mut self) -> Result<(), StopReason> {
         let pc = self.pc;
         let word = self.fetch(pc)?;
         self.trace_tick(pc, word);
@@ -1127,7 +1139,20 @@ impl Interpreter {
                 self.set_r(rd, v);
             }
             Insn::AddImm { rd, rn, imm12, shift, setflags, is64 } => {
-                let a = self.rsp(rn);
+                // REAL-DATA BUG #40 (M5-P): W-form (sf=0) add/sub must mask
+                // BOTH the operand read AND the result — the raw 64-bit
+                // `a.wrapping_add(b)` kept a stale upper half from the base
+                // register and never zero-extended into Xd. Measured live:
+                // waitq_bootstrp `mov w9,#-0x28; mul w8,w8,w9; and w8,#…
+                // neg w19,w8` (0x4B0803F3) produced x19 = 0xffffffff00004000
+                // (0 − 0xFFFFC000 at 64-bit width) instead of 0x4000; that
+                // garbage size to kernel_memory_allocate → KERN_RESOURCE_
+                // SHORTAGE → the kernel's OWN panic "failed to alloc global_
+                // waitqs" at insn 22,505,463. ARM DDI0487: 32-bit forms read
+                // bits 31:0 and write Wd (upper Xd = 0); WSP writes zero the
+                // upper SP bits too — masking is correct for SP as well.
+                let mask = if is64 { u64::MAX } else { 0xFFFF_FFFF };
+                let a = self.rsp(rn) & mask;
                 let b = (imm12 as u64) << if shift { 12 } else { 0 };
                 if setflags {
                     // S=1 with Rd=31 is the CMP/CMN alias — discard (bug #31
@@ -1136,18 +1161,20 @@ impl Interpreter {
                     let r = self.add_with_flags(a, b, false, is64, false);
                     self.set_r(rd, r);
                 } else {
-                    self.set_rsp(rd, a.wrapping_add(b));
+                    self.set_rsp(rd, a.wrapping_add(b) & mask);
                 }
             }
             Insn::SubImm { rd, rn, imm12, shift, setflags, is64 } => {
-                let a = self.rsp(rn);
+                // bug #40: same W-form masking as AddImm (see above).
+                let mask = if is64 { u64::MAX } else { 0xFFFF_FFFF };
+                let a = self.rsp(rn) & mask;
                 let b = (imm12 as u64) << if shift { 12 } else { 0 };
                 if setflags {
                     // S=1: Rd=31 = ZR discard (cmp sp, #imm) — see AddImm.
                     let r = self.add_with_flags(a, b, true, is64, true);
                     self.set_r(rd, r);
                 } else {
-                    self.set_rsp(rd, a.wrapping_sub(b));
+                    self.set_rsp(rd, a.wrapping_sub(b) & mask);
                 }
             }
             Insn::AddSubReg { rd, rn, rm, kind, imm6, subtract, setflags, is64 } => {
@@ -1165,7 +1192,13 @@ impl Interpreter {
                 // partition step: reading SP here produced sp−stride as the
                 // negated stride → wild sort pointers → the #32 physmap abort
                 // cascade (compare args x1=phystokv(sp−0x4C8) measured live).
-                let a = self.r(rn);
+                // REAL-DATA BUG #40 (M5-P): W-form masking — see AddImm.
+                // `neg w19, w8` (0x4B0803F3, waitq_bootstrp whsize path) ran
+                // the 64-bit sub 0 − 0x00000000FFFFC000 = 0xffffffff00004000
+                // into x19 (W-form must zero-extend 0x4000). shift() already
+                // masks Rm; Rn and the RESULT needed the same mask.
+                let mask = if is64 { u64::MAX } else { 0xFFFF_FFFF };
+                let a = self.r(rn) & mask;
                 let b = self.shift(self.r(rm), kind, imm6, is64);
                 if setflags {
                     // carry-in: ADCS only. ADDS gets 0; SUBS uses it as the
@@ -1174,9 +1207,9 @@ impl Interpreter {
                     let r = self.add_with_flags(a, b, subtract, is64, subtract);
                     self.set_r(rd, r);
                 } else if subtract {
-                    self.set_rsp(rd, a.wrapping_sub(b));
+                    self.set_rsp(rd, a.wrapping_sub(b) & mask);
                 } else {
-                    self.set_rsp(rd, a.wrapping_add(b));
+                    self.set_rsp(rd, a.wrapping_add(b) & mask);
                 }
             }
             Insn::AndImm { rd, rn, imm, setflags, is64 } => {
@@ -3438,10 +3471,12 @@ impl Interpreter {
                 // M4: ERET restores PSTATE from SPSR (NZCV + DAIF + SP bit).
                 // xnu's exception RETURN path depends on the DAIF restore:
                 // handlers ERET with SPSR.I=0 to re-enable interrupts.
+                // M5-P bug #42: PAN restores from SPSR bit 23 too.
                 let spsr = self.sys.spsr_el1;
                 self.nzcv = ((spsr >> 28) & 0xF) as u32;
                 self.sys.daif = (self.sys.daif & !0x3C0) | (spsr & 0x3C0);
                 self.sp_sel = spsr & 1 == 1;
+                self.pan = (spsr >> 23) & 1 == 1;
                 return Ok(());
             }
             Insn::Genter { .. } => {
@@ -3685,16 +3720,22 @@ impl Interpreter {
                 self.set_r(rd, r as u64);
             }
             Insn::LogicReg { rd, rn, rm, kind, imm6, op, setflags, invert, is64 } => {
+                // REAL-DATA BUG #40 (M5-P, logical-register half): W-form
+                // AND is safe by accident (result ⊆ masked Rm) but
+                // ORR/EOR/BIC/EON leak Rn's stale upper-32 into Xd — the
+                // same class the IMMEDIATE forms fixed in bug #38 (AndImm/
+                // OrrImm/EorImm). Mask Rn and zero-extend the result.
+                let mask = if is64 { u64::MAX } else { 0xFFFF_FFFF };
                 let mut b = self.shift(self.r(rm), kind, imm6, is64);
                 if invert {
                     b = !b;
                 }
-                let a = self.r(rn);
-                let r = match op {
+                let a = self.r(rn) & mask;
+                let r = (match op {
                     LogicOp::And => a & b,
                     LogicOp::Orr => a | b,
                     LogicOp::Eor => a ^ b,
-                };
+                }) & mask;
                 if setflags {
                     self.logical_flags(r, is64);
                 }
@@ -3845,6 +3886,18 @@ impl Interpreter {
                 // start.s switches banks right before loading the stack it
                 // then uses through the same `sp`).
                 self.sp_sel = use_sp;
+            }
+            Insn::MsrPan { set } => {
+                // REAL-DATA BUG #42 (M5-P): PSTATE.PAN write (95 kernel
+                // sites — copyin/copyout wrappers, pmap, arm_vm_init). The
+                // bit is tracked; memory ACCESS GATING is not enforced
+                // (honest limit, see the field comment).
+                self.pan = set;
+            }
+            Insn::MrsPan { rt } => {
+                // REAL-DATA BUG #42: the scheduler's PAN invariant read
+                // (`mrs x8, pan; cbz → panic`) — returns the tracked bit.
+                self.set_r(rt, self.pan as u64);
             }
             Insn::MsrImm { daifclr, imm4 } => {
                 let bits = (imm4 as u64) << 6; // DAIF bits D[9] A[8] I[7] F[6]

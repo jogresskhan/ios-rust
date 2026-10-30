@@ -87,6 +87,10 @@ pub struct SystemRegs {
     pub gxf_far_m: u64,
     /// TPIDR_EL1 (s3_0_c13_c0_4) — percpu/thread pointer.
     pub tpidr_el1: u64,
+    /// PAR_EL1 — result of the last `AT S1E1R`-family instruction (M4-M).
+    /// Bit0=0 translated (PA[47:12] at [47:12]); bit0=1 fault (FST skipped:
+    /// xnu's kvtophys only tests bit0).
+    pub par_el1: u64,
 }
 
 /// Canonical sysreg encodings (op0:1 op1:3 CRn:4 CRm:4 op2:3 → 15 bits).
@@ -124,6 +128,27 @@ pub mod sysreg {
     pub const TPIDR_EL1: u16 = enc(1, 0, 13, 0, 4);
     pub const TPIDR_EL0: u16 = enc(1, 3, 13, 0, 2);
     pub const TPIDRRO_EL0: u16 = enc(1, 3, 13, 0, 3);
+    /// TPIDRRO_EL1 (s3_0_c13_c0_3) — per-CPU number. BUG #33: reads dropped
+    /// → the sched/percpu paths read 0. Boot CPU is 0 in the single-core
+    /// model, so the honest read is the constant 0.
+    pub const TPIDRRO_EL1: u16 = enc(1, 0, 13, 0, 3);
+    // --- M4-M: PAR_EL1 + AT (address-translation) family ---
+    /// PAR_EL1 (s3_0_c7_c4_0) — result of the last AT instruction.
+    pub const PAR_EL1: u16 = enc(1, 0, 7, 4, 0);
+    /// AT S1E1R (msr space op0raw=1, CRn=7, CRm=8, op2=0) — xnu 18C66's
+    /// kvtophys body: `at s1e1r, x0; isb; mrs x1, par_el1` + bfxil merge
+    /// (0x…8169574, capstone-verified).
+    pub const AT_S1E1R: u16 = enc(0, 0, 7, 8, 0);
+    pub const AT_S1E1W: u16 = enc(0, 0, 7, 8, 1);
+    pub const AT_S12E1R: u16 = enc(0, 0, 7, 8, 4);
+    pub const AT_S12E1W: u16 = enc(0, 0, 7, 8, 5);
+    pub const AT_S12E0R: u16 = enc(0, 0, 7, 8, 6);
+    pub const AT_S12E0W: u16 = enc(0, 0, 7, 8, 7);
+    pub const AT_S1E0R: u16 = enc(0, 0, 7, 6, 0);
+    pub const AT_S1E0W: u16 = enc(0, 0, 7, 6, 1);
+    /// v8.9 PAN-permitted variants (same translation, CRm=9).
+    pub const AT_S1E1RP: u16 = enc(0, 0, 7, 9, 0);
+    pub const AT_S1E1WP: u16 = enc(0, 0, 7, 9, 1);
     /// Apple `s3_4_c15_c0_4` — start.s polls bit 1 before touching the
     /// core (boot-stage handshake). Modeled: reads OR-in bit 1.
     pub const APPLE_BOOT_STAGE: u16 = enc(1, 4, 15, 0, 4);
@@ -263,6 +288,15 @@ pub struct Interpreter {
     pub fiq_taken: u64,
     pub irq_taken: u64,
     pub sync_aborts: u64,
+    /// M4-M: AT (address-translation) instructions executed — the honest
+    /// counter for "kvtophys sites now return real PAs".
+    pub at_ops: u64,
+    /// M4-M: the pc/word/lr/sp of the first BRK/SVC/HVC/SMC stop — the
+    /// report used to print a bare `Panic` with zero context.
+    pub last_panic: Option<(u64, u32, u64, u64)>,
+    /// M4-M: AUT instructions whose pointer we did not sign (build-time
+    /// __auth_ptr) — accept-and-strip semantics, counted for the ledger.
+    pub pac_aut_unverified: u64,
     /// M4-b: undefined-instruction exceptions vectored to the guest
     /// (ESR EC=UNCATEGORIZED — the kernel's own 0xE7FFDEFF GDB-trap
     /// markers in the panic path, measured at 2 file sites).
@@ -454,6 +488,9 @@ impl Interpreter {
             fiq_taken: 0,
             irq_taken: 0,
             sync_aborts: 0,
+            at_ops: 0,
+            last_panic: None,
+            pac_aut_unverified: 0,
             wfi_count: 0,
             wfi_wakeups: 0,
             vector_budget: 100_000,
@@ -1090,21 +1127,31 @@ impl Interpreter {
                 }
             }
             Insn::AndImm { rd, rn, imm, setflags, is64 } => {
-                let r = self.r(rn) & imm;
+                // REAL-DATA BUG #38 (M4-M): 32-bit logical forms must ZERO-
+                // extend into Xd — the unmasked `self.r(rn)` leaked stale
+                // upper-32 garbage into the result (measured: `mov w9,
+                // #0x3ffffffc` = ORR-imm left x9 = 0x3ffffffc3ffffffc, the
+                // hw_lock destroy path's `cmp x9, x8, lsr #2` then FAILED
+                // and re-acquired a destroyed lock → "hw_lock_bit(): timed
+                // out" panic at insn 34,620,897).
+                let mask = if is64 { u64::MAX } else { 0xFFFF_FFFF };
+                let r = (self.r(rn) & mask) & (imm & mask);
                 if setflags {
                     self.logical_flags(r, is64);
                 }
                 self.set_r(rd, r);
             }
             Insn::OrrImm { rd, rn, imm, setflags, is64 } => {
-                let r = self.r(rn) | imm;
+                let mask = if is64 { u64::MAX } else { 0xFFFF_FFFF };
+                let r = ((self.r(rn) & mask) | (imm & mask)) & mask;
                 if setflags {
                     self.logical_flags(r, is64);
                 }
                 self.set_r(rd, r);
             }
             Insn::EorImm { rd, rn, imm, setflags, is64 } => {
-                let r = self.r(rn) ^ imm;
+                let mask = if is64 { u64::MAX } else { 0xFFFF_FFFF };
+                let r = ((self.r(rn) & mask) ^ (imm & mask)) & mask;
                 if setflags {
                     self.logical_flags(r, is64);
                 }
@@ -3273,6 +3320,10 @@ impl Interpreter {
                 // Software breakpoint / debug-state exception: the guest
                 // halts here (xnu release kernels hit BRK only on panic
                 // paths, so reaching one is a genuine boot finding).
+                // M4-M: capture the site — the report printed a bare
+                // `Panic` with no pc, making RE blind.
+                let word = self.fetch(self.pc).unwrap_or(0);
+                self.last_panic = Some((self.pc, word, self.r(30), self.sp));
                 return Err(StopReason::Panic);
             }
             Insn::AddSubExt { rd, rn, rm, option, imm3, subtract, setflags, is64 } => {
@@ -3318,8 +3369,16 @@ impl Interpreter {
             Insn::Msr { sysreg, rt } => {
                 self.write_sysreg(sysreg, self.r(rt));
             }
-            Insn::Svc { .. } => return Err(StopReason::Panic),
-            Insn::Hvc { .. } | Insn::Smc { .. } => return Err(StopReason::Panic),
+            Insn::Svc { .. } => {
+                let word = self.fetch(self.pc).unwrap_or(0);
+                self.last_panic = Some((self.pc, word, self.r(30), self.sp));
+                return Err(StopReason::Panic);
+            }
+            Insn::Hvc { .. } | Insn::Smc { .. } => {
+                let word = self.fetch(self.pc).unwrap_or(0);
+                self.last_panic = Some((self.pc, word, self.r(30), self.sp));
+                return Err(StopReason::Panic);
+            }
             Insn::Isb | Insn::Dsb | Insn::Dmb => {}
             Insn::Eret => {
                 self.pc = self.sys.elr_el1;
@@ -3771,8 +3830,18 @@ impl Interpreter {
                     if let Some(p) = crypto::aut(r, modifier, k0, k1) {
                         self.set_r(rd, p);
                     } else {
-                        // AUTH failure: bits 54..53 set (ARM behavior model)
-                        self.set_r(rd, (r & !0x00C0_0000_0000_0000) | 0x0080_0000_0000_0000);
+                        // M4-M: AUT of a pointer WE did not sign — the
+                        // kernel file's __auth_ptr/__PPLDATA pointers are
+                        // signed at Apple's build time with keys no public
+                        // QARMA model can reproduce. Real HW accepts them
+                        // (they are valid slide-0 signatures); the old
+                        // poison-bits model broke the pmap walk's
+                        // `autda; xpacd; cmp` check → `brk #0xc472` at
+                        // 0x…7b78664 (insn 10,836,209). Faithful emulator
+                        // semantics here: accept-and-strip, counted so the
+                        // ledger sees every unverified auth.
+                        self.pac_aut_unverified += 1;
+                        self.set_r(rd, crypto::canonical(r));
                     }
                 } else {
                     // Sign: the model PAC places the 16-bit tag in bits 48..63
@@ -4354,6 +4423,9 @@ impl Interpreter {
             sysreg::SPSR_EL1 => self.sys.spsr_el1,
             sysreg::ESR_EL1 => self.sys.esr_el1,
             sysreg::FAR_EL1 => self.sys.far_el1,
+            // M4-M: PAR_EL1 + per-CPU number (BUG #33 read half)
+            sysreg::PAR_EL1 => self.sys.par_el1,
+            sysreg::TPIDRRO_EL1 => 0, // boot CPU number 0 (single-core model)
             sysreg::GXF_CONFIG_EL1 => self.gxf_config,
             sysreg::GXF_STATUS_EL1 => self.gxf_status,
             // M4 timer + GXF surface
@@ -4558,6 +4630,27 @@ impl Interpreter {
             _ if (enc >> 14) & 1 == 0 && (enc >> 7) & 0xF == 8 => {
                 self.mmu.flush();
                 self.group_exec[17] += 1;
+            }
+            // M4-M: AT S1E1R family (op0raw=1, CRn=7, CRm∈{6,8,9}) —
+            // real-address translation into PAR_EL1. THE physmap abort
+            // root (insn 8,514,106): xnu's kvtophys (0x…8169574) is
+            // `at s1e1r, x0; isb; mrs x1, par_el1` + bfxil — with AT a
+            // silent no-op it returned PA 0, the pmap-walk fallback then
+            // failed and phystokv(0) landed at gVirtBase−gPhysBase.
+            // Honest model: one stage-1 regime (the EL1 walk) for all
+            // S1E0/S1E1/S12E1/S12E0 variants — no separate EL0/EL2
+            // regime is modeled yet (tracked honest limit).
+            _ if (enc >> 14) & 1 == 0
+                && (enc >> 7) & 0xF == 7
+                && matches!((enc >> 3) & 0xF, 6 | 8 | 9) =>
+            {
+                let va = v;
+                self.sys.par_el1 = match self.mmu.translate(&mut *self.mem, va, XlateKind::Load)
+                {
+                    Ok(pa) => pa & 0x0000_FFFF_FFFF_F000, // PA[47:12]; xnu bfxil ORs va[11:0]
+                    Err(_) => 0x1,                        // F=1 — xnu tests only bit0
+                };
+                self.at_ops += 1;
             }
             // Cache maintenance (op0=1, CRn=7): no cache model — except
             // DC ZVA, which really zeroes the 64-byte aligned line.

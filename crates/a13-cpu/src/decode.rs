@@ -1736,9 +1736,21 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
         let rn = reg(w, 5);
         if (w >> 21) & 1 == 1 {
             if (w >> 10) & 0x1F == 0x1F && (w >> 16) & 0x1F != 0x1F {
+                // REAL-DATA BUG #37 (M4-M, 2026-10-30): the CAS fields were
+                // SWAPPED. LSE CAS encoding: the COMPARAND/receiver (Xt,
+                // printed FIRST by capstone/LLVM — "casa x1, x2, [x2]" =
+                // 0xC8E17C42: x1 at bits[20:16], x2 at bits[4:0]) sits in
+                // bits[20:16], the NEW-value source (Xs) in bits[4:0]. The
+                // old mapping compared the NEW-value register against memory
+                // and stored the comparand — every CAS in the real 18C66
+                // boot silently failed to store (measured: kernel_pmap's
+                // lck_rw word never gained the lock bit → lck_rw_done
+                // panicked "Releasing non-exclusive RW lock without a
+                // reader refcount!" at insn 11,463,447 via the PPL pmap
+                // path 0x…988a87c → lock 0x…7b868dc / unlock 0x…7b87124).
                 return Some(Insn::Cas {
-                    rt,
-                    rs: reg(w, 16),
+                    rt: reg(w, 16),
+                    rs: reg(w, 0),
                     rn,
                     size_log2,
                     acquire: (w >> 22) & 1 == 1,

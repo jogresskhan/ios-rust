@@ -157,6 +157,15 @@ impl T8030Machine {
         let Some(armio) = adt.find("arm-io") else {
             return 0;
         };
+        // M5-M fix (first live MMIO census, 2026-10-30): the kernel emits
+        // its FIRST device accesses at the TRANSLATED arm-io bases
+        // (console UART0 write @0x235200000 — real SoC base) while this
+        // attach used the RAW ADT reg (0x35200000). The arm-io `ranges`
+        // property maps child windows into the SoC address space; for
+        // n104ap every <0x1_00000000 child lives at parent +0x2_00000000
+        // (session-H #21 pinned from the real ranges bytes). Translate
+        // through the real property, fall back to the pinned rule.
+        let translate = |base: u64| -> u64 { translate_armio_child(armio, base) };
         let children = armio.children.clone();
         for child in &children {
             let compat = child.compatible();
@@ -164,6 +173,7 @@ impl T8030Machine {
             let Some((base, size)) = reg.first().copied() else {
                 continue;
             };
+            let base = translate(base);
             let name = compat
                 .first()
                 .cloned()
@@ -283,6 +293,33 @@ impl AdpV4 {
             mem_read: None,
             unknown_reads: 0,
         }
+    }
+}
+
+/// M5-M: translate a raw `/arm-io/<child>` reg base into the SoC address
+/// space via the arm-io `ranges` property (u64 triples: child, parent,
+/// size — the real n104ap property). Falls back to the session-H #21
+/// pinned rule when the property is absent or has no matching window:
+/// children below 0x1_00000000 live at parent +0x2_00000000, higher
+/// windows are identity. Ground truth for this rule: the kernel's first
+/// live MMIO (console UART0 at 0x235200000 = ADT 0x35200000 + 0x2_00000000).
+fn translate_armio_child(armio: &adt::AdtNode, base: u64) -> u64 {
+    if let Some(r) = armio.prop_bytes("ranges") {
+        let mut k = 0usize;
+        while k + 24 <= r.len() {
+            let child = u64::from_le_bytes(r[k..k + 8].try_into().unwrap());
+            let parent = u64::from_le_bytes(r[k + 8..k + 16].try_into().unwrap());
+            let size = u64::from_le_bytes(r[k + 16..k + 24].try_into().unwrap());
+            if base >= child && base < child.wrapping_add(size) {
+                return parent + (base - child);
+            }
+            k += 24;
+        }
+    }
+    if base < 0x1_0000_0000 {
+        base + 0x2_0000_0000
+    } else {
+        base
     }
 }
 

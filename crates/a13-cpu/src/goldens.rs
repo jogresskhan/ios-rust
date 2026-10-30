@@ -113,34 +113,36 @@ fn lse_capstone_bf_goldens() {
         d(0xF820_7041),
         Some(Insn::Atomic { op: AtomicOp::UMin, rt: 1, rs: 0, rn: 2, size_log2: 3, acquire: false, release: false })
     );
-    // CAS family: capstone C8A17C42 = "cas x1, x2, [x2]" (plain: A=0, R=0)
+    // CAS family: capstone C8A17C42 = "cas x1, x2, [x2]" (plain: A=0, R=0).
+    // REAL-DATA BUG #37: rt (comparand, FIRST asm operand) = bits[20:16];
+    // rs (new value, SECOND) = bits[4:0] — the old mapping had them swapped.
     assert_eq!(
         d(0xC8A1_7C42),
-        Some(Insn::Cas { rt: 2, rs: 1, rn: 2, size_log2: 3, acquire: false, release: false })
+        Some(Insn::Cas { rt: 1, rs: 2, rn: 2, size_log2: 3, acquire: false, release: false })
     );
     // CASA = casa x1, x2, [x2] = C8E17C42 (A=bit22)
     assert_eq!(
         d(0xC8E1_7C42),
-        Some(Insn::Cas { rt: 2, rs: 1, rn: 2, size_log2: 3, acquire: true, release: false })
+        Some(Insn::Cas { rt: 1, rs: 2, rn: 2, size_log2: 3, acquire: true, release: false })
     );
     // CASL / CASAL (bit15 = release)
     assert_eq!(
         d(0xC8A1_FC42),
-        Some(Insn::Cas { rt: 2, rs: 1, rn: 2, size_log2: 3, acquire: false, release: true })
+        Some(Insn::Cas { rt: 1, rs: 2, rn: 2, size_log2: 3, acquire: false, release: true })
     );
     assert_eq!(
         d(0xC8E1_FC42),
-        Some(Insn::Cas { rt: 2, rs: 1, rn: 2, size_log2: 3, acquire: true, release: true })
+        Some(Insn::Cas { rt: 1, rs: 2, rn: 2, size_log2: 3, acquire: true, release: true })
     );
     // W-form CASB: capstone 08A17C42 = "casb w1, w2, [x2]"
     assert_eq!(
         d(0x08A1_7C42),
-        Some(Insn::Cas { rt: 2, rs: 1, rn: 2, size_log2: 0, acquire: false, release: false })
+        Some(Insn::Cas { rt: 1, rs: 2, rn: 2, size_log2: 0, acquire: false, release: false })
     );
     // CASH: 48A17C42
     assert_eq!(
         d(0x48A1_7C42),
-        Some(Insn::Cas { rt: 2, rs: 1, rn: 2, size_log2: 1, acquire: false, release: false })
+        Some(Insn::Cas { rt: 1, rs: 2, rn: 2, size_log2: 1, acquire: false, release: false })
     );
 }
 

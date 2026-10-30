@@ -29,6 +29,7 @@ mod goldens;
 mod goldens_ext;
 #[cfg(test)]
 mod goldens_m1;
+mod m4m_probe;
 #[cfg(test)]
 mod goldens_m4;
 

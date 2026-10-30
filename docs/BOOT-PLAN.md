@@ -274,6 +274,66 @@ xnu builds its own page tables during early boot; the interpreter must walk them
    T0SZ=T1SZ=25, TBI0=1, IPS=40-bit) and now surfaced live in the boot
    report's MMU config line.]**
 
+## M4 — IRQ / AIC / timers  [~] (session M 2026-10-30: FIVE engine bugs + one staging gap fixed — the #32 physmap abort is GONE, the 10.8M panic is GONE, the 34.6M hw_lock panic is GONE; boot runs the 48M budget CLEAN with live UART init + the first real MMIO census; WFI clause still open)
+
+**Session M evidence (2026-10-30, release build, IOS_RUST_DRAM_MB=1024):**
+SIX REAL-DATA bugs found+fixed in one block (430 workspace tests 0 failed, +1 golden
+update + 1 isolated probe test):
+
+* **AT S1E1R + PAR_EL1 (a13-cpu, THE session-L physmap abort root):** xnu's kvtophys
+  (0x…8169574) is `at s1e1r, x0; isb; mrs x1, par_el1` + bfxil — with AT decoded into
+  the op0=1/CRn=7 catch-all it returned PA 0; the pmap-walk fallback then failed and
+  phystokv(0) landed at gVirtBase−gPhysBase = 0xFFFFFFE806000000 (the session-L abort,
+  FAR measured). Implemented: PAR_EL1 (read/write) + the full AT family (S1E0R/W,
+  S1E1R/W, S12E0/E1R/W, S1E1RP/WP) executing the REAL stage-1 walk with F-bit fault
+  reporting; at_ops counter in the report (63 AT ops in the final run). TPIDRRO_EL1
+  (bug #33 read half) reads 0 (boot CPU). xnu source ground truth: osfmk/arm/
+  arm_vm_init.c from apple-oss-distributions xnu-7195.121.3 (the exact 18C66 tree) —
+  the whole physmap pre-init loop decoded against it.
+* **PAC AUT accept-and-strip + XPACD sign-extension (a13-cpu):** the pmap walk's
+  `autda x16; xpacd x17; cmp` check brk'd (#0xc472 @0x…7b78664, insn 10,836,209) —
+  build-time-signed __auth_ptr pointers cannot validate under a public QARMA model and
+  the old poison-bits model broke the compare. AUT of a pointer we did not sign now
+  accept-and-strips, COUNTED (pac_aut_unverified: 163 in the final run); XPACD now
+  sets bits[63:48] = copies of bit 47 (ARM DDI 0487) — the old mask-only form made
+  the accept-and-strip compare fail.
+* **arm-io ranges translation in attach_from_adt (apple-soc, THE first-MMIO root):**
+  the first live MMIO census (IOS_RUST_MMIO_LOG — 17 accesses!) caught the kernel
+  writing the CONSOLE UART at 0x235200000 (real SoC base) while devices attached at
+  the raw ADT reg (0x35200000). /arm-io children now translate through the real
+  `ranges` property (u64 triples), fallback = the session-H pinned rule (+0x2_00000000
+  below 0x1_00000000). Result: UART0/1/2/3 + pmgr/aic/wdt/dart/ans2 all live at the
+  kernel's addresses; s3c-uart serves the console writes.
+* **/chosen/dram-base + dram-size staging (boot_real, kernel-NAMED):** the panic
+  formatter caught the kernel's own message: "%s: Unable to find 'dram-base' entry in
+  the 'chosen' DT node" (arm_init, SecureDTGetProperty @0x…7b80d34; fmt 0x…73676f4;
+  GDB-trap 0xE7FFDEFF at insn 11,419,858). The IPSW template ships neither prop
+  (iBoot adds them); staging now inserts both u64s = the machine's real DRAM geometry
+  (0x800000000/0x40000000), consistent with boot_args and the DRAM region.
+* **#37 LSE CAS fields swapped (a13-cpu, THE lck_rw panic root):** capstone prints the
+  COMPARAND first ("casa x1, x2, [x2]" = 0xC8E17C42: x1@bits[20:16], x2@bits[4:0]) —
+  the decoder mapped rt→bits[4:0]/rs→bits[20:16], so every CAS compared the NEW-value
+  register against memory and never stored. Measured: kernel_pmap's lck_rw word never
+  gained the lock bit → lck_rw_done panicked "Releasing non-exclusive RW lock without
+  a reader refcount!" at insn 11,463,447 (PPL pmap path 0x…988a87c → lock 0x…7b868dc /
+  unlock 0x…7b87124). Fixed + goldens corrected + the Atomic/LDADD family re-verified
+  (its field order is genuinely rs-first — distinct from CAS).
+* **#38 logical-immediate W-form upper-half leak (a13-cpu, THE hw_lock panic root):**
+  AND/ORR/EOR immediate didn't zero Xd's upper 32 bits for W destinations — `mov w9,
+  #0x3ffffffc` (ORR-imm bitmask) left x9 = 0x3ffffffc3ffffffc, the hw_lock destroy
+  path's `cmp x9, x8, lsr #2` (0xEB48093F @0x…7b88174) then FAILED → w2=0 → the
+  destroy continuation RE-ACQUIRED the destroyed lock → "hw_lock_bit(): timed out"
+  at insn 34,620,897. Fixed for AndImm/OrrImm/EorImm (Movz/Movn/Movk were already
+  correct); isolated probe test cmp_lsr2_then_cset_eq_yields_one pins the sequence.
+
+Boot frontier: the panic-formatter chain (0x…7a58458 = panic-with-percpu-context)
+no longer fires anywhere in 48M insns; the boot's first kernel-named wall is now a
+kernel-HANDLED load abort FAR 0x10c @ELR 0x…7b1e150 (NULL+0x10c percpu-style deref,
+ESR 0x96000005 — delivered 1, panic 0, budget stop 48M clean). uart0 console writes
+land on s3c-uart (TX not yet observed — the kernel initializes ULCON/UCON/UFCON/baud
+but kprintf has not run by 48M). Bug #33's GXF-write half remains open. M4 acceptance
+(WFI-resume ≥10M) NOT cleared — honest.
+
 ## M4 — IRQ / AIC / timers  [~] (session L 2026-10-30: bugs #34/#35/#36 fixed — the #32 guard-spin is GONE; boot now executes arm_vm_init's physmap phase live; WFI clause still open)
 
 **Session L evidence (2026-10-30, debug build, IOS_RUST_DRAM_MB=1024, 48M budget):**

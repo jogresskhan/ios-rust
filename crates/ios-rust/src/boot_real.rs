@@ -181,6 +181,12 @@ pub struct BootRealReport {
     pub irq_taken: u64,
     /// Synchronous aborts vectored (subset of exc_taken).
     pub sync_aborts: u64,
+    /// M4-M: AT instructions executed (kvtophys sites now return real PAs).
+    pub at_ops: u64,
+    /// M4-M: AUT of build-signed pointers — accept-and-strip, counted.
+    pub pac_aut_unverified: u64,
+    /// M4-M: pc/word/lr/sp of a BRK/SVC/HVC/SMC terminal stop.
+    pub panic_site: Option<(u64, u32, u64, u64)>,
     pub wfi_count: u64,
     pub wfi_wakeups: u64,
     /// Last delivered exception (kind, esr, far, elr).
@@ -549,6 +555,108 @@ fn dt_insert_random_seed(dt: &mut Vec<u8>) -> Result<(), String> {
     }
 }
 
+
+/// M4-M: insert (or replace) a u64 `/chosen/<name>` property — the generic
+/// form of dt_insert_random_seed's mechanics. iBoot adds dram-base/dram-size
+/// to /chosen before the kernel jump (arm_init panics without them — the
+/// kernel-named blocker at insn 11,419,858). Values are the machine's real
+/// DRAM geometry so every staged memory description stays consistent.
+fn dt_insert_chosen_u64(dt: &mut Vec<u8>, prop_name: &str, val: u64) -> Result<(), String> {
+    assert!(prop_name.len() < 32, "prop name too long");
+    const NAME_LEN: usize = 32;
+    let rd = |b: &[u8], p: usize| -> u32 {
+        u32::from_le_bytes(b[p..p + 4].try_into().unwrap())
+    };
+    if dt.len() < 8 {
+        return Err("ADT too small for a root node".into());
+    }
+    let nprops_root = rd(dt, 0) as usize;
+    let nchildren_root = rd(dt, 4) as usize;
+    let mut p = 8usize;
+    for _ in 0..nprops_root {
+        let len = (rd(dt, p + 32) & 0x7FFF_FFFF) as usize;
+        p = (p + 36 + len + 3) & !3;
+    }
+    let mut chosen: Option<(usize, usize)> = None;
+    for _ in 0..nchildren_root {
+        let node_off = p;
+        let cnprops = rd(dt, node_off) as usize;
+        let _cnchildren = rd(dt, node_off + 4) as usize;
+        let mut q = node_off + 8;
+        let mut is_chosen = false;
+        for _ in 0..cnprops {
+            if &dt[q..q + 5] == b"name\x00" && dt[q + 5] == 0 {
+                let vlen = (rd(dt, q + 32) & 0x7FFF_FFFF) as usize;
+                let v = &dt[q + 36..q + 36 + vlen];
+                let v = &v[..v.iter().position(|&c| c == 0).unwrap_or(v.len())];
+                is_chosen = v == b"chosen";
+            }
+            let len = (rd(dt, q + 32) & 0x7FFF_FFFF) as usize;
+            q = (q + 36 + len + 3) & !3;
+        }
+        let mut end = q;
+        for _ in 0.._cnchildren {
+            end = walk_extent(dt, end);
+        }
+        if is_chosen {
+            chosen = Some((node_off, end));
+            break;
+        }
+        p = end;
+    }
+    let mut prop = Vec::with_capacity(36 + 8);
+    let mut name = [0u8; NAME_LEN];
+    name[..prop_name.len()].copy_from_slice(prop_name.as_bytes());
+    prop.extend_from_slice(&name);
+    prop.extend_from_slice(&8u32.to_le_bytes());
+    prop.extend_from_slice(&val.to_le_bytes());
+
+    match chosen {
+        Some((node_off, _node_end)) => {
+            let cnprops = rd(dt, node_off) as usize;
+            let mut q = node_off + 8;
+            let mut existing: Option<(usize, usize)> = None;
+            for _ in 0..cnprops {
+                let key = &dt[q..q + prop_name.len()];
+                let nul = dt[q + prop_name.len()];
+                if key == prop_name.as_bytes() && nul == 0 {
+                    existing = Some((q, rd(dt, q + 32) as usize));
+                }
+                let len = (rd(dt, q + 32) & 0x7FFF_FFFF) as usize;
+                q = (q + 36 + len + 3) & !3;
+            }
+            match existing {
+                Some((off, len)) if len == 8 => {
+                    dt[off + 36..off + 44].copy_from_slice(&val.to_le_bytes());
+                    Ok(())
+                }
+                Some((off, len)) => {
+                    let old_end = (off + 36 + len + 3) & !3;
+                    dt.splice(off..old_end, prop);
+                    Ok(())
+                }
+                None => {
+                    dt.splice(q..q, prop);
+                    dt[node_off..node_off + 4]
+                        .copy_from_slice(&((cnprops as u32) + 1).to_le_bytes());
+                    Ok(())
+                }
+            }
+        }
+        None => {
+            // /chosen absent — append (the random-seed pass would have
+            // created it first; this ordering keeps us robust anyway).
+            let mut node = Vec::with_capacity(8 + 2 * prop.len());
+            node.extend_from_slice(&2u32.to_le_bytes());
+            node.extend_from_slice(&0u32.to_le_bytes());
+            node.extend_from_slice(&prop);
+            dt.extend_from_slice(&node);
+            dt[4..8].copy_from_slice(&((nchildren_root as u32) + 1).to_le_bytes());
+            Ok(())
+        }
+    }
+}
+
 struct BusMem(Bus);
 impl MemAccess for BusMem {
     fn load(&mut self, addr: u64, size: u8) -> u64 {
@@ -625,6 +733,22 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
     // ships none. Deterministic emulated entropy, documented in the fn.
     dt_insert_random_seed(&mut dt_blob)?;
     println!("[stage] DeviceTree random-seed: 64 B staged (deterministic emulated entropy)");
+    // M4-M (kernel-named blocker): arm_init's memory-domain setup reads
+    // /chosen/dram-base + /chosen/dram-size (u64 each, SecureDTGetProperty
+    // at 0x…7b80d34/d60) and panics "Unable to find 'dram-base' entry in
+    // the 'chosen' DT node" (fmt 0x…73676f4, panic at insn 11,419,858 —
+    // the GDB-trap 0xE7FFDEFF path). The IPSW template ships neither prop
+    // (iBoot adds them). Stage the machine's REAL DRAM geometry — the
+    // same window the DRAM region is attached at and boot_args.memSize
+    // describes — so every memory description stays consistent.
+    let dram_mb = effective_dram_mb();
+    let dram_base: u64 = 0x8_0000_0000;
+    let dram_size: u64 = dram_mb as u64 * 1024 * 1024;
+    dt_insert_chosen_u64(&mut dt_blob, "dram-base", dram_base)?;
+    dt_insert_chosen_u64(&mut dt_blob, "dram-size", dram_size)?;
+    println!(
+        "[stage] DeviceTree dram-base/dram-size: {dram_base:#x}/{dram_size:#x} staged (machine DRAM geometry)"
+    );
 
     // ---- 3) machine assembly (iBoot equivalent) ----
     // Staging layout computed from the REAL sizes (BUG #22 — see
@@ -843,6 +967,9 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
         regs_dump: cpu.dump_state(),
         exc_taken: cpu.exc_taken,
         fiq_taken: cpu.fiq_taken,
+        at_ops: cpu.at_ops,
+        pac_aut_unverified: cpu.pac_aut_unverified,
+        panic_site: cpu.last_panic,
         irq_taken: cpu.irq_taken,
         sync_aborts: cpu.sync_aborts,
         wfi_count: cpu.wfi_count,
@@ -1065,6 +1192,18 @@ pub fn print_report(r: &BootRealReport) {
     println!(
         "real-kernel stop: {} after {} insns",
         stop, r.res.executed
+    );
+    // M4-M: honest counters — AT ops (kvtophys sites) + the panic site.
+    println!(
+        "M4-m AT ops: {} · pac-aut-unverified: {} · panic site: {}",
+        r.at_ops,
+        r.pac_aut_unverified,
+        match r.panic_site {
+            Some((pc, word, lr, sp)) => {
+                format!("pc={pc:#x} word={word:#010x} lr={lr:#x} sp={sp:#x}")
+            }
+            None => "none".to_string(),
+        }
     );
     println!(
         "MMU: {} · walks {} · tlb hits {} · faults {} (fetch {} / load {} / store {}) · leafs L0 {} L1 {} L2 {} L3 {}",

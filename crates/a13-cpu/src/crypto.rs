@@ -521,7 +521,13 @@ pub fn aut(signed: u64, modifier: u64, k0: u64, k1: u64) -> Option<u64> {
 
 /// XPACI/XPACD model: strip the tag (upper 16 bits of the VA space).
 pub fn xpac(ptr: u64) -> u64 {
-    ptr & 0x0000_FFFF_FFFF_FFFF
+    // M4-M fix: XPACD/XPACI set bits[63:48] to COPIES OF BIT 47 (ARM DDI
+    // 0487 — the result is a canonical address). The old mask-only form
+    // broke xnu's `autda x16; xpacd x17; cmp x16, x17` root-pointer check
+    // (brk #0xc472 @0x…7b78664): autda's accept-and-strip returned the
+    // sign-extended pointer while xpacd returned 0x0000_fff0_… ≠
+    // 0xffff_fff0_….
+    canonical(ptr & 0x0000_FFFF_FFFF_FFFF)
 }
 
 /// REAL-DATA BUG #30: the authenticated-strip canonical form. The model

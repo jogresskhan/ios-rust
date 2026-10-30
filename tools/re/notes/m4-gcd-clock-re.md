@@ -74,3 +74,80 @@ loop completes and the kernel moves on (486 MMU walks, 100% TLB hit).
 One delivered `undefined` exception at FAR=ELR=0x…7a584fc = the kernel's
 deliberate 0xE7FFDEFF ARM-GDB trap marker (session-I model — correct).
 2G run: /tmp/bf-bug28-2g.log.
+
+---
+
+# Session K continuation — bugs #29/#30/#31 fixed, #32 scoped (2026-10-30)
+
+## #29 MUL = MADD Ra=31 (XZR), never SP
+Panic: "Section __BOOTDATA,__init_entry_set has invalid size" @insn 8,255,200
+(lr 0x…7a8cf18, fmt 0x…735c26a). The check @0x…7a8ce24 is STATIC:
+size=0x2640 (section end 0x…9b02640 − seg start 0x…9b00000), the unsigned
+div-by-6 idiom `mul x9,x8,x9; ror x9,#3; cmp x9,0x0AAAAAAAAAAAAAAB; b.hs`.
+Keystone: `mul x9,x8,x9` ≡ `madd x9,x8,x9,xzr` = 0x9B097D09; `madd
+x0,x1,x2,sp` / `madd sp,x1,x2,x3` / `umaddl sp,w1,w2,sp` DO NOT ASSEMBLE.
+Fix: Insn::Madd/MaddW addend read via r() (ZR), Rd=31 discards.
+
+## #30 PAC canonical strip
+`blraa x27, x26` = 0xD73F0B7A (verbatim @0x…7f2f658) jumped RAW to the
+pac()-tagged pointer (tag 0x402f). Fix: crypto::canonical() (sign-extend
+bit 47); aut()/RetA/BrAuth all strip-and-restore; pac() now signs the
+48-bit VA only.
+
+## #31 add/sub register forms: Rn=31 reads SP (ALWAYS)
+The vector-page stack guard `cmp sp,x18; b.gt .; sub x18,#0x4000; cmp
+sp,x18; b.lt .` @0x…8160400 spun 2G insns: 0xEB3263FF (`cmp sp, x18`,
+add/sub EXTENDED form, capstone) read Rn=31 as ZR → nzcv=0000 → b.gt
+taken. ARM rule: Rn=31 is SP in both S=0/S=1; Rd=31 is SP (S=0) / ZR
+(S=1). Fixed CmpReg/CmnReg/CmpImm/CmnImm/AddSubReg/AddSubExt + the imm
+setflags Rd=31 discard.
+
+## #32 (OPEN) — the corrupted-ELR ERET / boot-stack frame corruption
+After the handled physmap load-abort (FAR 0xffffffe013611fb0, ESR
+0x96000005 — the callback's `ldr w9,[x1]` @0x…7a8d064, x1 = physmap of PA
+0x13611fb0), the kernel ERETs and later flow lands in the vector-page
+stack guard and spins (pc 0x…8160410 now, flags correct post-#31).
+
+MEASURED FACTS (deep-trace + guard-range stop, /tmp/bf-deep-guard.log):
+1. The abort vectors correctly: VBAR+0x200 → save helper @0x…816041c →
+   C sleh (0x…8137xxx region in the ring) → ERET path @0x…81609dc
+   (msr elr_el1) / 0x…8160acc (eret).
+2. The save helper writes the ENTIRE 0x350-byte frame (x2-x30 at
+   [x0+0x18..0xf8], q0-q31 at [x0+0x140..0x340]) where x0 = the
+   INCOMING sp — ON THE BOOT STACK (0x…9b0fe50). [sp+0x134] is ABOVE sp —
+   into the interrupted call chain's LIVE frames (dispatcher/callback
+   saved x30s). Same writes happen on real HW → the +0x200 stub MUST be
+   entered with sp on the per-cpu EXCEPTION stack.
+3. The exception-stack switch pattern exists in the vector page:
+   `mrs x1,tpidr_el1; ldr x1,[x1,#0x4f8]; ldr x1,[x1,#0x10]; mov sp,x1`
+   (@0x…8160180 and @0x…8160380 slots). The descriptor @0x…9a4ae60:
+   [+0x10] = switch target (NOT YET DUMPED), [+0x20]/[+0x28] =
+   0x…9b18000 (guard bound). [tpidr+0x498] (the OTHER switch field,
+   used by the 0x…81603cc stub) = 0 in our memory.
+4. Final jump: callback 2nd load @0x…7a8d064 → pc 0x…815f200 (in one
+   capture printed as 0x00FF_FFF0_0815_F200 — top byte lost; in the
+   deep capture as clean 0xFFFFFFF00815F200 — tag-vs-clean ambiguity)
+   → `b 0x…81601d8` → `b guard`. NO second vectoring in the ring →
+   consistent with a CORRUPTED x30 (frame overwrite) reached by `ret`,
+   or a partially-stripped tag through a plain branch.
+
+NEXT RE STEPS (concrete):
+a. Dump [desc+0x10] (the switch target) at stop; check whether it
+   equals 0x…9b18000 (the guard-pass window top).
+b. Decide the vector-offset question: does THIS kernel expect
+   current-EL-SPx sync (0x200) to arrive on the exc stack? Compare the
+   +0x200 stub (no switch) against +0x000/+0x080 (SP0 entries — the
+   `msr spsel,#0; sub sp,#0x350` @0x…8160198 block). If xnu's boot CPU
+   runs SPSel=1 (SPx), the 0x200 stub without a switch means the
+   kernel EXPECTS sp already on the exc stack — i.e. OUR engine should
+   deliver sync-aborts with sp switched, OR the kernel's own earlier
+   code should have been RUNNING on the exc stack (check: what sp does
+   the real kernel use after cpu_data_init? the boot stack at 0x…9b0fe50
+   vs exc top 0x…9b18000 — the kernel may switch to the intstack in
+   machine_idle/sched path we haven't reached).
+c. Verify the x30-corruption theory: read the boot-stack memory above
+   0x…9b0fe50 for the dispatcher's saved x30 (0x…7f2f74c) before/after
+   the exception — if the save helper overwrote it, the `ret` target
+   explains the jump.
+d. Tooling ready: IOS_RUST_STOP_PC_RANGE, IOS_RUST_TRACE_DEEP (2048),
+   guard-chain dump in the report.

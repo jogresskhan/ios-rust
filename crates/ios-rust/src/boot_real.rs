@@ -1557,7 +1557,14 @@ pub fn print_report(r: &BootRealReport) {
             .iter()
             .map(|&b| if (0x20..0x7f).contains(&b) || b == b'\n' { b as char } else { '.' })
             .collect();
-        println!("UART output ({} B): {:?}", r.serial.len(), text);
+        let dropped = apple_soc::s3c_uart::console_dropped_bytes();
+        let note = if dropped > 0 {
+            format!(" (console cap held RAM bounded — {dropped} early byte(s) dropped, showing the tail)"
+            )
+        } else {
+            String::new()
+        };
+        println!("UART output ({} B){note}: {:?}", r.serial.len(), text);
     } else {
         println!("UART output: (none yet)");
     }

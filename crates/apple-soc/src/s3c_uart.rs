@@ -6,6 +6,23 @@
 use std::sync::{Arc, Mutex};
 use vm_core::Device;
 
+/// RAM ceiling for the shared console sink (bytes). The sink used to be an
+/// unbounded `Vec<u8>`: a kernel panic loop that re-prints its banner every
+/// iteration keeps growing it for as long as the instruction budget runs —
+/// on a long session that alone can fill host RAM (the "session OOM" bug).
+/// 1 MiB of tail is orders of magnitude more than any boot report needs.
+pub const CONSOLE_SINK_CAP: usize = 1 << 20;
+/// Trim slack: the sink grows to CAP + SLACK before being cut back to CAP,
+/// so a print storm pays one memmove per SLACK bytes instead of one per byte.
+const CONSOLE_SINK_SLACK: usize = CONSOLE_SINK_CAP / 4;
+
+/// Console bytes dropped by the cap (process-wide, for the boot report).
+pub fn console_dropped_bytes() -> u64 {
+    CONSOLE_DROPPED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+static CONSOLE_DROPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub const ULCON: u64 = 0x0000;
 pub const UCON: u64 = 0x0004;
 pub const UFCON: u64 = 0x0008;
@@ -68,6 +85,11 @@ impl Device for S3cUart {
             UTXH => {
                 if let Ok(mut s) = self.sink.lock() {
                     s.push((val & 0xFF) as u8);
+                    if s.len() >= CONSOLE_SINK_CAP + CONSOLE_SINK_SLACK {
+                        let excess = s.len() - CONSOLE_SINK_CAP;
+                        s.drain(..excess);
+                        CONSOLE_DROPPED.fetch_add(excess as u64, std::sync::atomic::Ordering::Relaxed);
+                    }
                 }
             }
             URXH => {
@@ -91,5 +113,25 @@ mod tests {
         u.write(UTXH, 1, b'X' as u64);
         u.write(UTXH, 1, b'Y' as u64);
         assert_eq!(&*sink.lock().unwrap(), b"XY");
+    }
+
+    #[test]
+    fn sink_is_bounded_under_print_storms() {
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        let mut u = S3cUart::new(0, sink.clone());
+        // 3 MiB of guest console spam must not grow the sink past cap+slack.
+        let n = 3 * CONSOLE_SINK_CAP;
+        for i in 0..n {
+            u.write(UTXH, 1, (i & 0xFF) as u64);
+        }
+        let len = sink.lock().unwrap().len();
+        assert!(
+            len <= CONSOLE_SINK_CAP + CONSOLE_SINK_SLACK,
+            "sink grew to {len}"
+        );
+        assert!(console_dropped_bytes() >= (n - CONSOLE_SINK_CAP - CONSOLE_SINK_SLACK) as u64);
+        // the newest bytes survive — the tail is what the report shows
+        let tail = sink.lock().unwrap().clone();
+        assert_eq!(tail[tail.len() - 1], ((n - 1) & 0xFF) as u8);
     }
 }

@@ -21,6 +21,21 @@ use crate::{CpuBackend, InterpBudget, MemAccess, RunResult, StopReason};
 
 use std::collections::HashMap;
 
+/// Trace-ring capacity, resolved ONCE per process. `trace_tick` used to call
+/// `std::env::var("IOS_RUST_TRACE_DEEP")` on every executed instruction —
+/// one String allocation + global lock per insn, ~155M times on a long boot
+/// session, purely to pick between two constants.
+fn trace_ring_cap() -> usize {
+    static CAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CAP.get_or_init(|| {
+        if std::env::var("IOS_RUST_TRACE_DEEP").is_ok() {
+            2048
+        } else {
+            24
+        }
+    })
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SystemRegs {
     pub sctlr_el1: u64,
@@ -604,7 +619,7 @@ impl Interpreter {
         if !self.trace_enabled {
             return;
         }
-        let cap = if std::env::var("IOS_RUST_TRACE_DEEP").is_ok() { 2048 } else { 24 };
+        let cap = trace_ring_cap();
         if self.trace.len() >= cap {
             self.trace.pop_front();
         }

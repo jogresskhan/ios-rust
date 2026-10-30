@@ -343,8 +343,15 @@ impl T8030Machine {
         self.display.mem_read = Some(reader);
     }
 
+    /// Take the console bytes collected so far, clearing the sink.
+    /// (This used to CLONE the whole buffer and never clear it, so the
+    /// console history stayed resident for the entire session even when a
+    /// frontend drained it regularly.)
     pub fn drain_serial(&self) -> Vec<u8> {
-        self.serial.lock().map(|s| s.clone()).unwrap_or_default()
+        self.serial
+            .lock()
+            .map(|mut s| std::mem::take(&mut *s))
+            .unwrap_or_default()
     }
 
     pub fn summary(&self) -> String {

@@ -31,12 +31,12 @@ Requires: boto3 (pip3 install boto3). Large files use multipart automatically.
 """
 
 import hashlib
-import io
 import os
 import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 from pathlib import Path
 
 try:
@@ -90,15 +90,52 @@ def upload_file(c, local, bucket, key):
     c.upload_file(str(local), bucket, key, Config=CFG)
 
 
-def upload_dir(c, local_dir, bucket, prefix):
+def list_prefix(c, bucket, prefix):
+    """{key: size} for every object under prefix (paginated)."""
+    have = {}
+    kw = {"Bucket": bucket, "Prefix": prefix}
+    while True:
+        r = c.list_objects_v2(**kw)
+        for o in r.get("Contents", []):
+            have[o["Key"]] = o["Size"]
+        if not r.get("IsTruncated"):
+            break
+        kw["ContinuationToken"] = r["NextContinuationToken"]
+    return have
+
+
+def upload_dir(c, local_dir, bucket, prefix, prune=False):
+    """Mirror local_dir -> bucket/prefix.
+
+    Unlike the old walk-and-put-everything, this (a) skips files whose remote
+    size matches (the snapshot set is immutable-per-commit, so size equality
+    is a sound cheap check here), and (b) with prune=True DELETES remote keys
+    that no longer exist locally — the vault used to accumulate every stale
+    key from every session (223 orphaned build-artifact keys were measured),
+    which is exactly the "keep adding more data" failure mode.
+    """
     base = Path(local_dir)
-    n = 0
+    local_keys = {}
     for p in sorted(base.rglob("*")):
         if p.is_file():
-            key = f"{prefix}/{p.relative_to(base)}"
-            upload_file(c, p, bucket, key)
-            n += 1
-    print(f"  = {n} files -> s3://{bucket}/{prefix}/")
+            local_keys[f"{prefix}/{p.relative_to(base)}"] = p
+    have = list_prefix(c, bucket, prefix)
+    sent = skipped = 0
+    for key, p in local_keys.items():
+        if have.get(key) == p.stat().st_size:
+            skipped += 1
+            continue
+        upload_file(c, p, bucket, key)
+        sent += 1
+    stale = []
+    if prune:
+        stale = sorted(set(have) - set(local_keys))
+        if stale:
+            # boto3 delete_objects: 1000 keys per request
+            for i in range(0, len(stale), 1000):
+                chunk = [{"Key": k} for k in stale[i:i + 1000]]
+                c.delete_objects(Bucket=bucket, Delete={"Objects": chunk, "Quiet": True})
+    print(f"  = {sent} uploaded, {skipped} skipped, {len(stale)} pruned -> s3://{bucket}/{prefix}/")
 
 
 def cmd_buckets(c, _):
@@ -148,15 +185,7 @@ def cmd_get(c, args):
 def cmd_sync(c, args):
     local_dir, target = args
     bucket, prefix = split_target(target)
-    have = {}
-    kw = {"Bucket": bucket, "Prefix": prefix}
-    while True:
-        r = c.list_objects_v2(**kw)
-        for o in r.get("Contents", []):
-            have[o["Key"]] = o["Size"]
-        if not r.get("IsTruncated"):
-            break
-        kw["ContinuationToken"] = r["NextContinuationToken"]
+    have = list_prefix(c, bucket, prefix)
     base = Path(local_dir)
     sent = skipped = 0
     for p in sorted(base.rglob("*")):
@@ -168,7 +197,7 @@ def cmd_sync(c, args):
             continue
         upload_file(c, p, bucket, key)
         sent += 1
-    print(f"sync done: {sent} uploaded, {skipped} skipped (identical)")
+    print(f"sync done: {sent} uploaded, {skipped} skipped (identical size)")
 
 
 def cmd_snapshot(c, args):
@@ -180,28 +209,39 @@ def cmd_snapshot(c, args):
                               capture_output=True, text=True).stdout.strip()
         subj = subprocess.run(["git", "-C", str(repo), "log", "-1", "--format=%s"],
                               capture_output=True, text=True).stdout.strip()
-        # 1. re-archive the committed tree of HEAD (always current, never stale)
+        # 1. re-archive the committed tree of HEAD (always current, never
+        #    stale). The archive now STREAMS through a temp file — the old
+        #    capture_output + io.BytesIO held the whole tree (~50 MB with the
+        #    committed fixtures) in RAM twice, on top of everything else the
+        #    session was holding.
         if export.exists():
             shutil.rmtree(export)
         export.mkdir(parents=True)
-        archive = subprocess.run(["git", "-C", str(repo), "archive", "HEAD"],
-                                 capture_output=True, check=True).stdout
-        with tarfile.open(fileobj=io.BytesIO(archive)) as tf:
-            tf.extractall(export)
+        fd, archive_path = tempfile.mkstemp(suffix=".tar")
+        os.close(fd)
+        try:
+            with open(archive_path, "wb") as out:
+                subprocess.run(["git", "-C", str(repo), "archive", "HEAD"],
+                               stdout=out, check=True)
+            with tarfile.open(archive_path) as tf:
+                tf.extractall(export)
+        finally:
+            os.unlink(archive_path)
         (export / ".commit").write_text(head + "\n")
         (export / "MANIFEST.txt").write_text(
             "ios-rust full source export — generated by tools/s3_backup.py snapshot\n"
             f"HEAD: {head}\nsubject: {subj}\n"
             "files: committed tree of HEAD (+ .commit, MANIFEST.txt); fixtures NOT included\n"
             "history: git clone <this bucket>/ios-rust-repo-backup.bundle ios-rust\n")
-        print(f"HEAD = {head} — export re-archived from git archive")
+        print(f"HEAD = {head} — export re-archived from git archive (streamed)")
         # 2. refresh the full-history bundle
         subprocess.run(["git", "-C", str(repo), "bundle", "create", str(BUNDLE_PATH), "--all"], check=True)
         print(f"bundle refreshed: {Path(BUNDLE_PATH).stat().st_size / (1024 * 1024):.1f} MB")
     for local, key in SNAPSHOT_SET:
         p = Path(local)
         if p.is_dir():
-            upload_dir(c, p, bucket, key.rstrip("/"))
+            upload_dir(c, p, bucket, key.rstrip("/"),
+                       prune=(key.rstrip("/") == "research/ios-rust-export"))
         elif p.exists():
             upload_file(c, p, bucket, key)
         else:

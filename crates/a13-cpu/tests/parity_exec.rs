@@ -327,7 +327,7 @@ fn fcmla_exec() {
 
 #[test]
 fn dbg_words() {
-    for w in [0x6E82C420u32, 0xDAC10020, 0x0E829420, 0xD5088220, 0xCE020C20, 0x9AC14C00, 0x1AC24000] {
+    for w in [0xFA4E0160u32, 0xFA8E2C00u32, 0xEB48093Fu32, 0x6E82C420u32, 0xDAC10020, 0x0E829420, 0xD5088220, 0xCE020C20, 0x9AC14C00, 0x1AC24000] {
         println!("{w:08X} -> {:?}", a13_cpu::decode::decode(0, w));
     }
 }

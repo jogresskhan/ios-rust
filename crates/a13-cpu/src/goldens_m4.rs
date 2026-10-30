@@ -534,3 +534,75 @@ fn gap_qsort_med3_neighbors_with_fixed_neg() {
         "med3 add x22,x26,x19 must stay in-array with the fixed neg"
     );
 }
+
+// ==================== REAL-DATA BUG #39 (M5 session O) ====================
+// The vm_map coalesce path executes `ccmp x11, x14, #0, eq` at kernel
+// 0xfffffff007b0b598 (word read from the live image, capstone-verified:
+// ccmp x11, x14, #0, eq). The old ADC/SBCS decode arm checked bit23 but
+// NOT bit22, and with cond=eq (bits[15:12]=0000) + bits[11:10]=00 +
+// nzcv=0 the word ALSO matches the SBCS shape (bits[15:10]=000000,
+// Rd-slot=nzcv=0) → decoded as `sbcs x0, x11, x14` → X0 zeroed →
+// vm_map_store_entry_unlink(map=NULL, entry) → the FAR 0x10c percpu
+// abort + exception-prologue stack-guard self-spin (0x…8160410) that
+// burned the 48M→400M budget. Goldens: the word must decode as Ccmp
+// AND must leave every GPR untouched in BOTH nzcv outcomes.
+
+/// keystone: the kernel word decodes as the CCMP register form.
+#[test]
+fn gap39_ccmp_reg_eq_decodes_as_ccmp() {
+    match decode(0, 0xFA4E_0160) {
+        Some(crate::decode::Insn::Ccmp { rn, rm_imm, reg_form, nzcv, cond, ccmn, is64 }) => {
+            assert_eq!(rn, 11);
+            assert_eq!(rm_imm, 14);
+            assert!(reg_form, "register form");
+            assert_eq!(nzcv, 0);
+            assert_eq!(cond, crate::decode::Cond::Eq);
+            assert!(!ccmn, "CCMP not CCMN");
+            assert!(is64, "x-form");
+        }
+        other => panic!("0xFA4E0160 must decode as Ccmp, got {other:?}"),
+    }
+}
+
+/// ADC/ADCS/SBC/SBCS keystones must still decode as Adc (bit22/21 gate).
+/// All four words capstone-verified; the subtract field = bit30.
+#[test]
+fn gap39_adc_family_keystones_unchanged() {
+    for (w, subtract) in [
+        (0x1A02_0020u32, false), // adc  w0, w1, w2
+        (0x3A02_0020, false),    // adcs w0, w1, w2
+        (0x5A02_0020, true),     // sbc  w0, w1, w2
+        (0xBA02_0020, false),    // adcs x0, x1, x2 (capstone-verified)
+        (0xDA02_0020, true),     // sbcs x0, x1, x2 (capstone-verified)
+    ] {
+        match decode(0, w) {
+            Some(crate::decode::Insn::Adc { subtract: s, .. }) => {
+                assert_eq!(s, subtract, "subtract field for {w:#x}")
+            }
+            other => panic!("ADC-family keystone {w:#x} misdecoded: {other:?}"),
+        }
+    }
+}
+
+/// Executing the verbatim kernel ccmp (both flag outcomes) must leave
+/// X0..X30 EXACTLY as they were — CCMP writes NZCV only.
+#[test]
+fn gap39_kernel_ccmp_never_writes_gprs() {
+    // Case 1: EQ false (x11 != x14) → nzcv = #0, registers frozen.
+    let (mut c, _) = ram(&[0xFA4E_0160, HLT]);
+    c.x[11] = 0xFFFF_FFF0_6E2C_5EC0;
+    c.x[14] = 0xFFFF_FFE0_0019_C000;
+    let res = c.run(InterpBudget { max_insn: 2, max_ns: 1_000_000_000 });
+    assert!(matches!(res.stop, StopReason::Halted), "{res:?}");
+    assert_eq!(c.x[11], 0xFFFF_FFF0_6E2C_5EC0, "x11 must survive");
+    assert_eq!(c.x[14], 0xFFFF_FFE0_0019_C000, "x14 must survive");
+    assert_eq!(c.x[0], 0, "x0 must never be written by ccmp");
+    // Case 2: EQ true (x11 == x14) → add_with_flags(sub) path, still no GPR write.
+    let (mut c, _) = ram(&[0xFA4E_0160, HLT]);
+    c.x[11] = 0x1234;
+    c.x[14] = 0x1234;
+    let res = c.run(InterpBudget { max_insn: 2, max_ns: 1_000_000_000 });
+    assert!(matches!(res.stop, StopReason::Halted), "{res:?}");
+    assert_eq!(c.x[0], 0, "x0 untouched on the taken path too");
+    assert_eq!(c.x[11], 0x1234, "x11 survives the taken path");
+}

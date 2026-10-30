@@ -2002,7 +2002,12 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
     //     bit23 check `adc x0, x1, x2` (0x1A020020) decoded as CSEL x0,
     //     x1, x2, eq (keystone cross-check: 1A020020 adc vs 1A820020
     //     csel — the divider is bit23, NOT bit21: both have bit21=0). ---
-    if (w >> 24) & 0x1F == 0x1A && (w >> 29) & 1 == 0 && (w >> 22) & 1 == 0 && (w >> 23) & 1 == 1 {
+    if (w >> 24) & 0x1F == 0x1A
+        && (w >> 29) & 1 == 0
+        && (w >> 22) & 1 == 0
+        && (w >> 23) & 1 == 1
+        && (w >> 21) & 1 == 0
+    {
         // CSEL/CSINC (bit30=0) vs CSINV/CSNEG (bit30=1); op2 = bits 11:10
         let inv = (w >> 30) & 1 == 1;
         let op2 = (w >> 10) & 3;
@@ -2025,10 +2030,25 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
     }
 
     // --- Session D (bug #17 companion): ADC/ADCS/SBC/SBCS — bits 28:24 ==
-    //     11010, bit23=0, opcode bits 15:10 = 000000; op(30)=subtract,
-    //     S(29)=setflags. (keystone: 1A020020 adc, 3A020020 adcs,
-    //     5A020020 sbc, BA020020 adcs x.) ---
-    if (w >> 24) & 0x1F == 0x1A && (w >> 23) & 1 == 0 && (w >> 10) & 0x3F == 0 {
+    //     11010, bits 23:21 == 000, opcode bits 15:10 = 000000;
+    //     op(30)=subtract, S(29)=setflags. (keystone: 1A020020 adc,
+    //     3A020020 adcs, 5A020020 sbc, BA020020 adcs x.)
+    //     REAL-DATA BUG #39 (session O, M5): the first cut checked bit23
+    //     only — the CCMP family (bits 28:21 = 11010010, bit22=1) with
+    //     cond=eq (bits 15:12=0000) + bits[11:10]=00 + nzcv=0 has
+    //     bits[15:10]=000000 AND the Rd slot (=nzcv) = 0, so
+    //     `ccmp x11, x14, #0, eq` (FA4E0160, kernel 0x…7b0b598,
+    //     vm_map coalesce path) decoded as SBCS x0, x11, x14 and ZEROED
+    //     X0 mid-boot: vm_map_store_entry_unlink then got map=NULL →
+    //     the FAR 0x10c percpu abort + exception-prologue self-spin
+    //     (0x…8160410) that burned the 48M→400M budget. Bit22 check
+    //     added; bit21 pinned to 0 (RAZ space) for the same class.
+    if (w >> 24) & 0x1F == 0x1A
+        && (w >> 23) & 1 == 0
+        && (w >> 22) & 1 == 0
+        && (w >> 21) & 1 == 0
+        && (w >> 10) & 0x3F == 0
+    {
         return Some(Insn::Adc {
             rd: reg(w, 0),
             rn: reg(w, 5),
@@ -2056,7 +2076,11 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
     // golden word FA430822 was self-consistent with the swap (capstone:
     // `ccmp x1, #3, #2, eq` — cond EQ nzcv 2, not cond CS).
     // bit11 = 1 → immediate form (imm5@20:16), 0 → register form (Rm@20:16).
-    if (w >> 24) & 0x1F == 0x1A && (w >> 29) & 1 == 1 {
+    if (w >> 24) & 0x1F == 0x1A
+        && (w >> 29) & 1 == 1
+        && (w >> 22) & 1 == 1
+        && (w >> 21) & 1 == 0
+    {
         let ccmn = (w >> 30) & 1 == 0;
         let cond = Cond::from_bits((w >> 12) & 0xF)?;
         let nzcv = (w & 0xF) as u8;

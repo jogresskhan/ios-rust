@@ -200,6 +200,10 @@ pub struct BootRealReport {
     // --- M4-b percpu-blocker diagnostics ---
     /// First 8 vectored sync aborts (insn, elr, far, esr) — the storm origin.
     pub first_aborts: Vec<(u64, u64, u64, u64)>,
+    /// M5-O: FP chain of the FIRST vectored data abort + TPIDR_EL1 there.
+    pub abort_backtrace: Vec<(u64, u64)>,
+    pub abort_frames: Vec<[u64; 6]>,
+    pub abort_tpidr: u64,
     /// Last 24 vectored sync aborts (insn, elr, far, esr) — the loop shape.
     pub last_aborts: Vec<(u64, u64, u64, u64)>,
     pub sync_abort_total: u64,
@@ -1046,6 +1050,9 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
         },
         stack_write_log: cpu.stack_writes.iter().copied().collect(),
         first_aborts: cpu.first_aborts.clone(),
+        abort_backtrace: cpu.abort_backtrace.clone(),
+        abort_frames: cpu.abort_frames.iter().map(|w| *w).collect(),
+        abort_tpidr: cpu.abort_tpidr,
         last_aborts: cpu.abort_log.iter().rev().take(24).rev().copied().collect(),
         sync_abort_total: cpu.sync_aborts,
         data_stores: cpu.data_stores.iter().copied().collect(),
@@ -1300,6 +1307,19 @@ pub fn print_report(r: &BootRealReport) {
         println!("M4-b last sync aborts (of {}):", r.sync_abort_total);
         for (insn, elr, far, esr) in &r.last_aborts {
             println!("    insn={insn} elr={elr:#x} far={far:#x} esr={esr:#x}");
+        }
+    }
+    if !r.abort_backtrace.is_empty() {
+        println!(
+            "M5-O first-abort FP chain (tpidr_el1={:#x} — xnu arm64 current_thread()):",
+            r.abort_tpidr
+        );
+        for (i, (fp, lr)) in r.abort_backtrace.iter().enumerate() {
+            let w = r.abort_frames.get(i).copied().unwrap_or([0; 6]);
+            println!(
+                "    #{i:02} fp={fp:#x} lr={lr:#x} | [fp-8]={:>#18x} [fp-10]={:>#18x} [fp-18]={:>#18x} [fp-20]={:>#18x} [fp-28]={:>#18x}",
+                w[1], w[2], w[3], w[4], w[5]
+            );
         }
     }
     if !r.data_stores.is_empty() {

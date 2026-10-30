@@ -669,3 +669,48 @@ skip-list per m5-peripheral-queue §5). Order by what the boot trace touches fir
 * Honest limits stay listed until they are fixed — no silent upgrades.
 * Commit + S3 snapshot at the end of EVERY block (see loop above).
 * Schedule: a recurring job continues this plan every 2 hours.
+
+## M5 — peripherals the real boot path touches  [~] (session O 2026-10-30: REAL-DATA BUG #39 — the CCMP/SBCS decoder collision — killed the percpu wall; boot now reaches the kernel's OWN panic "kernel_memory_allocate() failed to alloc global_waitqs" at 22.5M; 0 sync aborts through 48M; next wall is vm_map hole-state in kernel_map)
+
+**Session O evidence (release build, IOS_RUST_DRAM_MB=1024, 434→437
+workspace tests 0 failed):**
+
+* **The percpu wall was OUR decoder, not the kernel.** The session-M wall
+  (kernel-HANDLED abort FAR 0x10c @ELR 0x…7b1e150, then a 48M→400M spin) is
+  fully deconstructed: first-abort FP-chain walk (new M5-O diagnostic) →
+  `vm_map_store_entry_unlink(map=NULL, entry=0x…6e2ee230)` ← coalesce ←
+  lookup+coalesce ← vm_map_wire-ish ← kernel_map-views table load ← zone
+  zinit callbacks ('zcc_magazine_zone') ← `kernel_bootstrap` stage walker.
+  Per-instruction PC watches isolated the X0 zeroing to 0x…7b0b598; the
+  verbatim word **0xFA4E0160** is `ccmp x11, x14, #0, eq` (capstone) but our
+  ADC/SBCS arm (bit23 check only) claimed it: cond=eq ⇒ bits[15:12]=0000,
+  bits[11:10]=00, nzcv=0 ⇒ the word fits SBCS's shape (bits[15:10]=000000,
+  Rd-slot=nzcv=0) → `sbcs x0, x11, x14` → X0=0 → unlink(NULL) → FAR 0x10c →
+  the vector-prologue stack-guard spin at 0x…8160410 ate the budget.
+* **Decoder fix:** ADC arm requires bits[23:21]==000; CSEL arm pins bit21;
+  CCMP arm pins bit22==1 && bit21==0. 0xFA8E2C00 (capstone-invalid) now
+  None. Keystone set (1A020020/3A020020/5A020020/BA020020/DA020020/
+  FA4891A0/FA4329A9/BA41C005) re-verified.
+* **Frontier move (measured):** 48M: aborts 1 → **0**, panic 0, budget stop
+  clean. 400M: no loop — the kernel advances into **waitq bootstrap** and
+  calls ITS OWN panic at insn 22,505,463:
+  `"kernel_memory_allocate() failed to alloc global_waitqs" ", error: %d,
+  whsize: 0x%x"` (fmt 0x…735e028; panic wrapper 0x…987b99c from 0x…7ab6f30;
+  whsize 0x4000). The post-panic prologue spin is the panic path's exception
+  loop (named, not silent).
+* **M5 task 1 status:** the device census (17/17 named through the old
+  frontier) is unaffected; PMGR/AIC/WDT/SART/ANS remain 0-touch because the
+  boot is still pre-scheduler. SART v1 + ANS dual-window + SMC specs stay
+  staged (attach-spec §5.4-5.6).
+* **Next block (M5/P):** RE the `kernel_memory_allocate` failure inside
+  kernel_map: kr value unpacking at the panic call, `vm_map_find_space`
+  hole/first_free state after kmem_init's pmap_virtual_region reservations,
+  and the kernel_map[4] views table fill (measured: 0x…2e8/0x…2f0/0x…2f8 =
+  0x…6e2c5ec0/0x…6e2c5c90/0x…6e2c5b78 at 21.48M-21.49M; count 0x…2d8=2,
+  budget 0x…2e0=0x16f18000). Then re-run: the waitqs allocation should
+  succeed and the boot frontier moves past 22.5M.
+* **New tools:** first-abort FP chain + per-frame saved-x19/x20 window in
+  the boot-real report; IOS_RUST_WATCH PC-watching used to bisect register
+  corruption (log format `[watch] insn=… pc=…`).
+
+`cargo test --workspace`: **437 passed / 0 failed** (+3 gap39 goldens).

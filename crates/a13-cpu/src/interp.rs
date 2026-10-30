@@ -374,6 +374,14 @@ pub struct Interpreter {
     /// ring of the LAST 512 plus the FIRST 8 verbatim (the storm origin).
     pub abort_log: std::collections::VecDeque<(u64, u64, u64, u64)>,
     pub first_aborts: Vec<(u64, u64, u64, u64)>,
+    /// M5-O: FP-chain of the FIRST vectored data abort — names the kernel
+    /// caller path of the kernel-HANDLED percpu wall (FAR 0x10c). Guest-read
+    /// only, taken once, zero behavior drift.
+    pub abort_backtrace: Vec<(u64, u64)>, // (fp, lr)
+    /// M5-O: per-frame saved-x19/x20 window (fp-0x20..fp) — the args each
+    /// caller frame held (arm64 callee-saves sit just below the FP).
+    pub abort_frames: Vec<[u64; 6]>, // [fp, [fp-0x8], [fp-0x10], [fp-0x18], [fp-0x20], [fp-0x28]]
+    pub abort_tpidr: u64, // TPIDR_EL1 at the first abort (xnu arm64: current_thread())
     /// Stores into the kernel __DATA window whose VALUE is a stack-range
     /// kernel VA — the cpu_stack_alloc(&BootCpuData) fingerprint
     /// (target+value filtered; no heuristic struct scan).
@@ -533,6 +541,9 @@ impl Interpreter {
             watch_last_hit: std::collections::HashMap::new(),
             abort_log: std::collections::VecDeque::new(),
             first_aborts: Vec::new(),
+            abort_backtrace: Vec::new(),
+            abort_frames: Vec::new(),
+            abort_tpidr: 0,
             data_stores: std::collections::VecDeque::new(),
             data_store_count: 0,
             poison_stores: std::collections::VecDeque::new(),
@@ -891,6 +902,48 @@ impl Interpreter {
     /// (current-EL SPx: sync 0x200, IRQ 0x280, FIQ 0x300), `esr` = 0 for
     /// IRQ/FIQ, `far` set for synchronous aborts.
     fn take_exception(&mut self, off: u64, esr: u64, far: Option<u64>, kind: &'static str) {
+        // M5-O: on the FIRST vectored data abort, walk the interrupted
+        // context's FP chain (x29) and record the kernel caller path. xnu
+        // arm64 frames are FP-chained (pacibsp + stp x29, x30), so [fp+8]
+        // is the return address one frame up. VAs go through debug_walk
+        // (post-mortem walker, no counter side effects); report-only.
+        if far.is_some() && self.abort_backtrace.is_empty() && matches!(kind, "load" | "store") {
+            let mut fp = self.x[29];
+            for _ in 0..10 {
+                if fp == 0 || fp & 7 != 0 {
+                    break;
+                }
+                let (lr, next) = match (
+                    self.debug_walk(fp.wrapping_add(8), crate::mmu::XlateKind::Load),
+                    self.debug_walk(fp, crate::mmu::XlateKind::Load),
+                ) {
+                    (Ok(pa_lr), Ok(pa_fp)) => {
+                        let lr = MemAccess::load(self.mem.as_mut(), pa_lr, 8);
+                        let next = MemAccess::load(self.mem.as_mut(), pa_fp, 8);
+                        (lr, next)
+                    }
+                    _ => break,
+                };
+                // per-frame saved-reg window (arm64: [fp-8]=x30, the
+                // callee-saved x19/x20 pair sits at fp-0x18/fp-0x20 in the
+                // unlink/coalesce/lookup frames of this path)
+                let mut words = [0u64; 6];
+                words[0] = fp;
+                for (k, off) in [0x8u64, 0x10, 0x18, 0x20, 0x28].iter().enumerate() {
+                    if let Ok(pa) = self.debug_walk(fp.wrapping_sub(*off), crate::mmu::XlateKind::Load)
+                    {
+                        words[k + 1] = MemAccess::load(self.mem.as_mut(), pa, 8);
+                    }
+                }
+                self.abort_frames.push(words);
+                self.abort_backtrace.push((fp, lr));
+                if next <= fp || next & 7 != 0 {
+                    break;
+                }
+                fp = next;
+            }
+            self.abort_tpidr = self.sys.tpidr_el1;
+        }
         // M4-b guardrail 1 — exception recursion: the same (kind, esr, far,
         // elr) re-entered 96 times with no retired insn between means a
         // closed report loop (measured session-H storm: 21,270 identical

@@ -1003,3 +1003,48 @@ enforcement stays an honest, tracked limit gated on M4 vectoring.
   sit behind the M4 wall; specs staged in m5-attach-spec §5.4-5.6.
 * `cargo test --workspace`: **434 passed / 0 failed**. Docs: BOOT-PLAN M5
   session-N block.
+
+### 2.13 — Session O (2026-10-30): REAL-DATA BUG #39 — the CCMP/SBCS decoder collision that WAS the percpu wall
+
+* **The wall, finally named and killed.** Session M's "kernel-HANDLED load abort
+  FAR 0x10c @ELR 0x…7b1e150 + the 48M→400M spin" is now fully explained end to
+  end: (a) new first-abort FP-chain diagnostic (guest-read walk of the x29
+  chain at vector entry, report-only) named the path:
+  `vm_map_store_entry_unlink(map, entry)` ← `vm_map_store_coalesce` ←
+  lookup-and-coalesce ← `vm_map_wire`-ish page-wiring loop ← kernel_map-views
+  table load ← zone-bootstrap zinit callbacks ← `kernel_bootstrap` stage
+  walker — the classic waitq/zone early-bootstrap vm_map churn; (b) the
+  unlink got `map=NULL` because the coalesce fn's X0 was zeroed MID-FUNCTION;
+  (c) per-instruction PC watches pinned the zeroing to the instruction at
+  0x…7b0b598; (d) capstone vs engine decode of the verbatim word
+  **0xFA4E0160 = `ccmp x11, x14, #0, eq`**: our ADC/ADCS/SBC/SBCS arm
+  checked bit23 but NOT bit22 — and with cond=eq (bits[15:12]=0000),
+  bits[11:10]=00 and nzcv=0, the CCMP word ALSO fits the SBCS shape
+  (bits[15:10]=000000, Rd-slot=nzcv=0) → decoded as `sbcs x0, x11, x14` →
+  **X0 = 0 mid-function** → unlink(NULL) → the FAR 0x10c abort → the
+  exception-prologue stack-guard self-spin at 0x…8160410 that burned the
+  budget. Capstone cross-check (keystone set re-run): CCMP family has
+  bits[28:21]=110100**1**0 (bit22=1); ADC family 110100**00**.
+* **Fix (a13-cpu/src/decode.rs):** the ADC arm now requires bits[23:21]==000
+  (bit22+bit21 added); the CSEL arm pins bit21==0; the CCMP arm pins
+  bit22==1 && bit21==0. The invalid-encoding word 0xFA8E2C00 now decodes to
+  None — capstone-confirmed invalid.
+* **Measured frontier move:** 48M run went from "1 kernel-HANDLED abort +
+  48M 'clean'" to **0 sync aborts, 0 panics, 48M clean**; the 400M extension
+  no longer loops — the kernel now runs into **its OWN panic at insn
+  22,505,463**: `kernel_memory_allocate() failed to alloc global_waitqs`
+  (fmt 0x…735e028 read from the image; whsize 0x4000; the panic wrapper at
+  0x…987b99c called from 0x…7ab6f30). The waitq-bootstrap allocation inside
+  kernel_map fails → next block's RE target is the vm_map_find_space /
+  hole-state modeling in kernel_map. Panic count at 400M: 1 (the
+  global_waitqs one); the post-panic spin (0x…8160410 prologue guard) is the
+  panic path's own exception loop, no longer a silent wall.
+* **New diagnostics (kept, env-gated, report-only):** first-abort FP chain +
+  per-frame saved-x19/x20 window in the boot-real report (M5-O); nothing in
+  the hot loop changed semantics.
+* **Goldens (+3, goldens_m4):** `gap39_ccmp_reg_eq_decodes_as_ccmp`,
+  `gap39_adc_family_keystones_unchanged` (1A020020/3A020020/5A020020/
+  BA020020/DA020020), `gap39_kernel_ccmp_never_writes_gprs` (both nzcv
+  outcomes leave X0..X30 frozen).
+* `cargo test --workspace`: **437 passed / 0 failed**. Docs: BOOT-PLAN M5
+  session-O block; tools/re/notes/m5-session-O-percpu-wall.md.

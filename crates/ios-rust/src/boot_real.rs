@@ -670,6 +670,11 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
                 out.push(format!(
                     "cpu_data[0]: not scanned · tpidr {tpidr:#x} (set by the kernel)"
                 ));
+                let (spsel, stopsp, vbar) = (cpu.sp_sel, cpu.sp, cpu.sys.vbar_el1);
+                out.push(format!(
+                    "  vector state at stop: SPSel={} · sp {:#x} · VBAR {:#x}",
+                    spsel, stopsp, vbar
+                ));
                 let mut rd = |va: u64| -> u64 {
                     let pa = va.wrapping_sub(cpu.kva_base);
                     let mut b = [0u8; 8];
@@ -845,6 +850,7 @@ pub fn print_report(r: &BootRealReport) {
             kind, esr, far, elr
         );
     }
+
     for line in &r.cpu_data0_report {
         println!("{line}");
     }

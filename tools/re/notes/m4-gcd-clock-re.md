@@ -169,3 +169,24 @@ block: RE the instruction that computed x22=0xffffffe013611fb0 (the
 callback's argument chain from 0x…7f2f730-48), find the truncation, fix +
 golden. Then the physmap load stops aborting, the whole guard question
 may go away, and the boot proceeds into the scheduler (WFI territory).
+
+## Session K FINAL findings (block close)
+1. **VBAR RELOCATES**: at the #32 stop VBAR = 0xfffffff00815f000 (NOT the
+   0x…8160000 table from the M4-B notes). The new table's +0x200 sync
+   stub = trampoline `b 0x…81601d8` → `b guard` — the stack guard is
+   UNCONDITIONAL on the relocated sync path. SPSel=true at the abort ✓
+   (SPx offsets correct). The guard fails because the boot CPU still
+   runs on the BOOT stack (0x…9b0fe50) at this stage — on real HW the
+   physmap access does NOT abort so the guard is never exercised here.
+2. **The physmap abort itself** (FAR 0xffffffe013611fb0 = phystokv(
+   0x813611fb0) — ARITHMETICALLY CORRECT: pa − 0x8_00000000 +
+   0xffffffe000000000) means the kernel's own tables SHOULD map the
+   physmap VA. Our walk reported DFSC 0x05 (L1 fault) → suspect our
+   walker misses the kernel's mapping (block descriptor parse, TLB
+   staleness vs guest page-table writes, or start-level selection for
+   the 0xffffffe0_ sub-range). THE #32 ROOT TASK.
+3. **BUG #33 (next block)**: unknown sysregs 17 reads / 24 writes —
+   includes s3_3_c13_c0_3 = TPIDRRO_EL1 (!!) and op1=4 EL2 Apple GXF
+   regs (s3_4_c15_c0_4, s3_4_c15_c1_0/1/4, s3_4_c15_c0_4) + s3_0_c15_*
+   set. TPIDRRO_EL1 must store/return the kernel's value; the EL2 GXF
+   writes likely seed the GXF context (gxf_ctx_seeded=false today).

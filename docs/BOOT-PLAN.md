@@ -274,6 +274,39 @@ xnu builds its own page tables during early boot; the interpreter must walk them
    T0SZ=T1SZ=25, TBI0=1, IPS=40-bit) and now surfaced live in the boot
    report's MMU config line.]**
 
+## M4 — IRQ / AIC / timers  [~] (session L 2026-10-30: bugs #34/#35/#36 fixed — the #32 guard-spin is GONE; boot now executes arm_vm_init's physmap phase live; WFI clause still open)
+
+**Session L evidence (2026-10-30, debug build, IOS_RUST_DRAM_MB=1024, 48M budget):**
+THREE REAL-DATA bugs found+fixed in one block (429 workspace tests 0 failed, +4 goldens):
+
+* **#34 (a13-cpu, THE #32 ROOT):** the #31 fix over-corrected — the SHIFTED-register
+  add/sub form reads Rn=31 as XZR (only the EXTENDED form maps Rn=31 to SP; `cmp sp, x18`
+  = 0xEB3263FF is EXTENDED, bit21=1). Live proof: the kernel qsort's `neg x19, x20`
+  (0xCB1403F3) produced sp−0x4C8 instead of −0x4C8 (watched at insn 8,255,253); the
+  corrupted stride made med3 hand the comparator a phystokv(sp−0x4C8) element pointer —
+  the entire #32 abort + corrupted-ELR cascade. Goldens: gap_neg_shifted_rn31_reads_xzr,
+  gap_cmp_xzr_shifted_ignores_sp, gap_cmp_sp_extended_still_reads_sp,
+  gap_qsort_med3_neighbors_with_fixed_neg. All prior #31 goldens re-verified (they are
+  extended-form encodings).
+* **#35 (boot_real staging):** flat-file staging put __BOOTDATA/__PRELINK_INFO 0xB0000
+  below their VA-implied PAs (fileoff != vmaddr−LINK_BASE after __DATA's BSS) — the
+  kernel's tables resolved __BOOTDATA VAs onto __PRELINK_INFO plist bytes; the
+  init-entry cursor 0x…9b031e8 read "<key>UID" (FAR 0x4449553e79656b3c). Fixed:
+  per-segment staging at PA = VA − LINK_BASE + LOAD_PA.
+* **#36 (boot_real DeviceTree):** the kernel reads /chosen/random-seed (helper
+  0x…81383ac: SecureDTLookupEntry(0, "/chosen") + SecureDTGetProperty(entry,
+  "random-seed"), expected 0x40) and panics "Expected 64 seed bytes from bootloader,
+  but got 0" when the value is the IPSW's 64-ZERO-byte template. Fixed:
+  iBoot-equivalent in-place fill with DETERMINISTIC emulated entropy (sha256 label ×2;
+  hardware-RNG parity = tracked honest limit).
+
+Boot frontier: init-entry sort+calls run on REAL entries; arm_vm_init's
+arm_vm_physmap_slide phase (0x7b82e34) executes FOR THE FIRST TIME in any session.
+New frontier (next block): the L2-table free-list allocation ([0x7701cf8] → 0x…7b72f88)
+returns empty → ptov_lookup(0) → phystokv(0) abort @0x…7b82fec (insn 8,514,106; FAR
+0xffffffe806000000; kernel-HANDLED, panic 0, 48M clean). Bug #33 (TPIDRRO_EL1 + Apple
+EL2 GXF sysregs) still open. M4 acceptance (WFI-resume ≥10M) NOT cleared — honest.
+
 ## M4 — IRQ / AIC / timers  [~] (session K 2026-10-30: bugs #28-#31 fixed — gcd loop + MUL/SP + PAC-strip + Rn=31-SP; boot panic-free through vm_mem_bootstrap __init_entry_set callbacks, one kernel-HANDLED physmap abort; WFI clause pending: #32 corrupted-ELR ERET stop)
 
 **Session K evidence (2026-10-30, release build, IOS_RUST_DRAM_MB=1024):**

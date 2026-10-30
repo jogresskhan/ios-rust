@@ -452,3 +452,85 @@ fn gap_cmp_sp_imm_reads_sp_and_discards() {
     assert_eq!(c.nzcv & C_BIT, C_BIT, "no borrow → C set");
     assert_eq!(c.sp, 0x1000, "cmp must not write SP");
 }
+
+// ==================== REAL-DATA BUG #34 — the #31 over-correction: the
+// SHIFTED-register form reads Rn=31 as XZR, NOT SP ====================
+//
+// The live boot (session-L trace, insn 8,255,253) caught `neg x19, x20`
+// (0xCB1403F3 = SUB x19,XZR,X20 SHIFTED — capstone `neg`) producing
+// x19 = sp − 0x4C8 instead of −0x4C8: the #31 fix had mapped Rn=31 → SP
+// in ALL register forms. ARM DDI0487: only the EXTENDED form (bit21=1,
+// option field) reads Rn=31 as SP; the SHIFTED form reads XZR (that is
+// why assemblers must use the extended form for `cmp sp, x18`). The
+// kernel's qsort negates the element stride with `neg x19, x20` per
+// partition step — the corrupted stride produced wild sort pointers and
+// the #32 physmap-abort cascade (comparator arg x1 = phystokv(sp−0x4C8)
+// measured live at the 0x…7a8d064 fault).
+//
+// NOTE on the #31 goldens above: 0xEB3263FF/0xEB3267FF/0x8B3263FF all
+// carry bit21=1 (EXTENDED, imm3 in bits 12:10) — capstone `cmp sp, x18`
+// / `cmp sp, x18, lsl #1` / `add sp, sp, x18` — so they remain the SP
+// path and stay green with the #34 split.
+
+/// The verbatim kernel qsort negate: `neg x19, x20` = 0xCB1403F3 must read
+/// Rn(31) as ZR — result −0x4C8, NEVER sp−0x4C8 (the #32 cascade origin).
+#[test]
+fn gap_neg_shifted_rn31_reads_xzr() {
+    let words = [0xCB14_03F3u32, HLT]; // neg x19, x20
+    let (mut c, _) = ram(&words);
+    c.x[20] = 0x4C8;
+    c.sp = 0xFFFF_FFF0_09B0_FE50; // the live boot value at insn 8,255,253
+    let res = c.run(InterpBudget { max_insn: 2, max_ns: 1_000_000_000 });
+    assert!(matches!(res.stop, StopReason::Halted), "{res:?}");
+    assert_eq!(
+        c.x[19],
+        0xFFFF_FFFF_FFFF_FB38u64, // −0x4C8
+        "neg x19,x20 must be 0−x20 (XZR), not sp−x20 — bug #34"
+    );
+}
+
+/// `cmp xzr, x19` (0xEB1303FF — SUBS xzr,xzr,x19 SHIFTED, Rn=31) must
+/// compare ZR: x19=0x1234 → negative → N set; sp value must be ignored.
+#[test]
+fn gap_cmp_xzr_shifted_ignores_sp() {
+    let words = [0xEB13_03FFu32, HLT]; // cmp xzr, x19
+    let (mut c, _) = ram(&words);
+    c.x[19] = 0x1234;
+    c.sp = 0xDEAD_BEEF_0000_1000;
+    let res = c.run(InterpBudget { max_insn: 2, max_ns: 1_000_000_000 });
+    assert!(matches!(res.stop, StopReason::Halted), "{res:?}");
+    assert_eq!(c.nzcv & N_BIT, N_BIT, "0 − 0x1234 is negative → N set");
+}
+
+/// `cmp sp, x18, lsl #1` (0xEB3267FF — EXTENDED, bit21=1, imm3=1) must
+/// still read SP (bug #31 regression guard for the #34 split).
+#[test]
+fn gap_cmp_sp_extended_still_reads_sp() {
+    let words = [0xEB32_67FFu32, HLT]; // cmp sp, x18, lsl #1 (extended)
+    let (mut c, _) = ram(&words);
+    c.sp = 0x1000;
+    c.x[18] = 0x800;
+    let res = c.run(InterpBudget { max_insn: 2, max_ns: 1_000_000_000 });
+    assert!(matches!(res.stop, StopReason::Halted), "{res:?}");
+    assert_eq!(c.nzcv & Z_BIT, Z_BIT, "extended cmp sp,x18,lsl#1: sp==x18<<1 → Z");
+}
+
+/// The verbatim 2-insn qsort chain from the live trace: `neg x19, x20` then
+/// `add x22, x26, x19` (the med3 add at 0x…7f2f738). With the fix the add
+/// stays inside the array; the old engine produced phystokv(sp−0x4C8).
+#[test]
+fn gap_qsort_med3_neighbors_with_fixed_neg() {
+    let words = [0xCB14_03F3u32, 0x8B13_0356u32, HLT]; // neg x19,x20 ; add x22,x26,x19
+    let (mut c, _) = ram(&words);
+    c.x[20] = 0x4C8;
+    c.x[26] = 0xFFFF_FFF0_09B0_2628; // the live last-element pointer
+    c.sp = 0xFFFF_FFF0_09B0_FE50; // the live boot stack pointer
+    let res = c.run(InterpBudget { max_insn: 3, max_ns: 1_000_000_000 });
+    assert!(matches!(res.stop, StopReason::Halted), "{res:?}");
+    assert_eq!(c.x[19], 0xFFFF_FFFF_FFFF_FB38u64, "stride must be −0x4C8");
+    assert_eq!(
+        c.x[22],
+        0xFFFF_FFF0_09B0_2160u64, // 0x…2628 − 0x4C8 — INSIDE the array
+        "med3 add x22,x26,x19 must stay in-array with the fixed neg"
+    );
+}

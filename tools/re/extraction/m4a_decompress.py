@@ -2,7 +2,7 @@
 """Step 0 (M4-a): decompress IM4P/LZFSE kernelcache.release.iphone12b -> /tmp/kc18c66.macho"""
 import struct, sys, liblzfse
 
-path = '/home/z/work/ios-rust/fixtures/kernelcache.release.iphone12b'
+path = '/home/z/my-project/s3-work/ios-rust/fixtures/kernelcache.release.iphone12b'
 out = '/tmp/kc18c66.macho'
 raw = open(path, 'rb').read()
 print(f'fixture size: {len(raw):#x}')

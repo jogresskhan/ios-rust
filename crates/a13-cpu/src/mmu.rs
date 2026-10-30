@@ -375,6 +375,12 @@ impl Mmu {
         self.tlb.len()
     }
 
+    /// Diagnostic accessor (M4-L #32): current TTBR bases (t0, t1) for the
+    /// stop-time page-table dump. Read-only; zero behavior impact.
+    pub fn ttbr_bases(&self) -> (u64, u64) {
+        (self.ttbr0, self.ttbr1)
+    }
+
     pub fn config_str(&self) -> String {
         format!(
             "granule {}K t0sz {} t1sz {} ttbr0 {:#x} ttbr1 {:#x} tbi0 {} tbi1 {}",

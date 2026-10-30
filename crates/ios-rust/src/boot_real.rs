@@ -227,7 +227,7 @@ fn u64le(buf: &[u8], off: usize) -> Result<u64, String> {
 
 /// Top-level Mach-O scan: segments + entry point (the kernelcache is one
 /// contiguous MH_EXECUTE prelinked image).
-fn parse_kernel(img: &[u8]) -> Result<(u64, u64, Vec<(String, u64, u64, u64)>), String> {
+fn parse_kernel(img: &[u8]) -> Result<(u64, u64, Vec<(String, u64, u64, u64, u64)>), String> {
     let hdr = MachHeader::parse(img)?;
     let mut segs = Vec::new();
     let mut entry = 0u64;
@@ -244,8 +244,9 @@ fn parse_kernel(img: &[u8]) -> Result<(u64, u64, Vec<(String, u64, u64, u64)>), 
                     .collect();
                 let vmaddr = u64le(img, off + 24)?;
                 let vmsize = u64le(img, off + 32)?;
+                let fileoff = u64le(img, off + 40)?;
                 let filesize = u64le(img, off + 48)?;
-                segs.push((name, vmaddr, vmsize, filesize));
+                segs.push((name, vmaddr, vmsize, fileoff, filesize));
             }
             LC_UNIXTHREAD => {
                 if cmdsize >= UNIXTHREAD_PC_OFF + 8 {
@@ -372,6 +373,182 @@ fn dt_clear_placeholder_flags(dt: &mut [u8]) -> Result<usize, String> {
     Ok(cleared)
 }
 
+/// Extent of the node at `off` (its header + props + full subtree), using
+/// the same record math as `dt_clear_placeholder_flags`' walk.
+fn walk_extent(dt: &[u8], off: usize) -> usize {
+    let rd = |p: usize| -> u32 { u32::from_le_bytes(dt[p..p + 4].try_into().unwrap()) };
+    let nprops = rd(off) as usize;
+    let nchildren = rd(off + 4) as usize;
+    let mut p = off + 8;
+    for _ in 0..nprops {
+        let len = (rd(p + 32) & 0x7FFF_FFFF) as usize;
+        p = (p + 36 + len + 3) & !3;
+    }
+    for _ in 0..nchildren {
+        p = walk_extent(dt, p);
+    }
+    p
+}
+
+/// REAL-DATA BUG #36 fix — iBoot-equivalent `random-seed` staging. The real
+/// kernel reads **/chosen/random-seed** (measured RE: the seed helper
+/// 0x…81383ac does `SecureDTLookupEntry(0, "/chosen")` with the path string
+/// @0x…73ae1a0, then `SecureDTGetProperty(entry, "random-seed")` with the
+/// name @0x…73adf81, requiring ≥ 0x40 bytes — "Expected %lu seed bytes from
+/// bootloader, but got %u" fired at insn 8,418,563 in the first post-#35
+/// boot). On real hardware iBoot fills it with entropy gathered from the
+/// hardware RNG (Secure Enclave/sepo RNG) before the kernel jump. The IPSW
+/// DeviceTree template ships NO such property (measured: absent from the
+/// decoded blob — it is an iBoot-side addition, not an IPSW one), so the
+/// honest emulator equivalent is to stage the property exactly like iBoot
+/// would, with a DETERMINISTIC 64-byte value (sha256 of a fixed label,
+/// doubled). Honesty note: this is emulated entropy — a fixed, reproducible
+/// seed, NOT hardware randomness; a real-RNG source stays a tracked gap.
+/// Property layout per crates/adt (parse_flat): {name[32], u32 len,
+/// data[len] 4-aligned}; node = {u32 nprops, u32 nchildren}; children
+/// pre-order. The /chosen node is created (appended as the LAST root
+/// child, the blob grown) when absent — child order is not semantic.
+fn dt_insert_random_seed(dt: &mut Vec<u8>) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+    // 64 deterministic bytes: two SHA-256 blocks over a fixed label.
+    let mut h = Sha256::new();
+    h.update(b"ios-rust emulator boot random-seed v1");
+    let h1 = h.finalize_reset();
+    h.update(&h1);
+    h.update(b"ios-rust emulator boot random-seed v1");
+    let h2 = h.finalize();
+    let seed: Vec<u8> = h1.iter().copied().chain(h2.iter().copied()).collect();
+    assert_eq!(seed.len(), 64);
+
+    const NAME_LEN: usize = 32;
+    let rd = |b: &[u8], p: usize| -> u32 {
+        u32::from_le_bytes(b[p..p + 4].try_into().unwrap())
+    };
+    if dt.len() < 8 {
+        return Err("ADT too small for a root node".into());
+    }
+    // ---- locate the /chosen child of the root (pre-order walk) ----
+    let nprops_root = rd(dt, 0) as usize;
+    let nchildren_root = rd(dt, 4) as usize;
+    let mut p = 8usize;
+    for _ in 0..nprops_root {
+        let len = (rd(dt, p + 32) & 0x7FFF_FFFF) as usize;
+        p = (p + 36 + len + 3) & !3;
+    }
+    let mut chosen: Option<(usize, usize)> = None; // (node_off, node_end)
+    for _ in 0..nchildren_root {
+        let node_off = p;
+        let cnprops = rd(dt, node_off) as usize;
+        let _cnchildren = rd(dt, node_off + 4) as usize;
+        let mut q = node_off + 8;
+        let mut is_chosen = false;
+        for _ in 0..cnprops {
+            if &dt[q..q + 5] == b"name\x00" && dt[q + 5] == 0 {
+                // the node's "name" property: value = "chosen"
+                let vlen = (rd(dt, q + 32) & 0x7FFF_FFFF) as usize;
+                let v = &dt[q + 36..q + 36 + vlen];
+                let v = &v[..v.iter().position(|&c| c == 0).unwrap_or(v.len())];
+                is_chosen = v == b"chosen";
+            }
+            let len = (rd(dt, q + 32) & 0x7FFF_FFFF) as usize;
+            q = (q + 36 + len + 3) & !3;
+        }
+        // measure the node's extent: its own subtree (children pre-order)
+        let mut end = q;
+        for _ in 0.._cnchildren {
+            end = walk_extent(dt, end);
+        }
+        if is_chosen {
+            chosen = Some((node_off, end));
+            break;
+        }
+        p = end;
+    }
+    let mut prop = Vec::with_capacity(36 + 64);
+    let mut name = [0u8; NAME_LEN];
+    name[..11].copy_from_slice(b"random-seed");
+    prop.extend_from_slice(&name);
+    prop.extend_from_slice(&64u32.to_le_bytes());
+    prop.extend_from_slice(&seed);
+
+    match chosen {
+        Some((node_off, node_end)) => {
+            println!(
+                "[stage] random-seed: /chosen found @ blob+{:#x} (extent {:#x}), root children {}",
+                node_off, node_end, nchildren_root
+            );
+            // insert/replace random-seed inside /chosen's own prop list
+            let cnprops = rd(dt, node_off) as usize;
+            let mut q = node_off + 8;
+            let mut existing: Option<(usize, usize)> = None;
+            for _ in 0..cnprops {
+                if &dt[q..q + 11] == b"random-seed" && dt[q + 11] == 0 {
+                    existing = Some((q, rd(dt, q + 32) as usize));
+                }
+                let len = (rd(dt, q + 32) & 0x7FFF_FFFF) as usize;
+                q = (q + 36 + len + 3) & !3;
+            }
+            if let Some((off, raw_len)) = existing {
+                let val = &dt[off + 36..off + 36 + (raw_len & 0x7FFF_FFFF)];
+                println!(
+                    "[stage] random-seed: existing prop @ blob+{off:#x} raw_len={raw_len:#x} val[:16]={:02x?}",
+                    &val[..val.len().min(16)]
+                );
+            }
+            match existing {
+                Some((off, len)) if len == 64 => {
+                    // REAL-DATA BUG #36, measured: the IPSW template ships the
+                    // property as 64 ZERO bytes — on real hardware iBoot
+                    // overwrites them with entropy before the kernel jump,
+                    // and the kernel's read helper (0x…81383ac) treats an
+                    // all-zero seed as "bootloader didn't fill it" (it counts
+                    // original zero bytes and returns 0 on all-zero — the
+                    // panic we measured). Stage = overwrite the zero template
+                    // with the deterministic emulated entropy, in place.
+                    let val = &mut dt[off + 36..off + 36 + 64];
+                    if val.iter().all(|&b| b == 0) {
+                        val.copy_from_slice(&seed);
+                        println!(
+                            "[stage] random-seed: zero template @ blob+{off:#x} → 64 B deterministic entropy staged"
+                        );
+                    } else {
+                        println!("[stage] random-seed: already filled (non-zero) — blob untouched");
+                    }
+                    Ok(())
+                }
+                Some((off, len)) => {
+                    println!("[stage] random-seed: replacing wrong-size ({len}) prop");
+                    let old_end = (off + 36 + len + 3) & !3;
+                    dt.splice(off..old_end, prop);
+                    Ok(())
+                }
+                None => {
+                    println!("[stage] random-seed: inserting into /chosen props");
+                    dt.splice(q..q, prop);
+                    dt[node_off..node_off + 4]
+                        .copy_from_slice(&((cnprops as u32) + 1).to_le_bytes());
+                    Ok(())
+                }
+            }
+        }
+        None => {
+            println!(
+                "[stage] random-seed: /chosen ABSENT — appending node (root children {})",
+                nchildren_root
+            );
+            // /chosen absent — append a new node as the LAST root child and
+            // bump the root's nchildren.
+            let mut node = Vec::with_capacity(8 + prop.len());
+            node.extend_from_slice(&1u32.to_le_bytes()); // nprops
+            node.extend_from_slice(&0u32.to_le_bytes()); // nchildren
+            node.extend_from_slice(&prop);
+            dt.extend_from_slice(&node);
+            dt[4..8].copy_from_slice(&((nchildren_root as u32) + 1).to_le_bytes());
+            Ok(())
+        }
+    }
+}
+
 struct BusMem(Bus);
 impl MemAccess for BusMem {
     fn load(&mut self, addr: u64, size: u8) -> u64 {
@@ -443,6 +620,11 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
         "[stage] DeviceTree placeholders: {placeholders} bit31 length flags cleared \
          (iBoot SysCfg pass — values stay the blob's own reference bytes)"
     );
+    // REAL-DATA BUG #36 (see dt_insert_random_seed): iBoot stages a 64-byte
+    // /random-seed property the kernel hard-requires; the IPSW template
+    // ships none. Deterministic emulated entropy, documented in the fn.
+    dt_insert_random_seed(&mut dt_blob)?;
+    println!("[stage] DeviceTree random-seed: 64 B staged (deterministic emulated entropy)");
 
     // ---- 3) machine assembly (iBoot equivalent) ----
     // Staging layout computed from the REAL sizes (BUG #22 — see
@@ -471,7 +653,33 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
     let machine_irq_line = machine.irq_line.clone();
     let mut bus = std::mem::replace(&mut machine.bus, Bus::new());
 
-    bus.write_raw(LOAD_PA, &img);
+    // REAL-DATA BUG #35 (session L, 2026-10-30): per-segment staging at the
+    // VA-implied PA (PA = VA − LINK_BASE + LOAD_PA — the mapping the
+    // kernel's own start.s tables implement). The old flat
+    // `write_raw(LOAD_PA, &img)` staged the FILE contiguously, which is
+    // only equivalent while fileoff == vmaddr − LINK_BASE. That identity
+    // breaks at __DATA's BSS (vmsize > filesize): every segment after it
+    // (__BOOTDATA, __PRELINK_INFO) landed 0xB0000 BELOW its VA-implied PA,
+    // so the kernel's tables resolved __BOOTDATA VAs onto __PRELINK_INFO
+    // plist bytes — the init-entry cursor @0x…9b031e8 read "<key>UID"
+    // ASCII (measured: FAR 0x4449553e79656b3c) and the entry calls
+    // deranged. Segments BEFORE the BSS are byte-identical under both
+    // schemes (fileoff == vmaddr − LINK_BASE there), so this is a strict
+    // generalization, verified by the boot contract below.
+    for (name, vmaddr, vmsize, fileoff, filesize) in segs.iter() {
+        // Skip zero-size prelink placeholders and segments below the link
+        // base (__PRELINK_TEXT vmaddr 0xfffffff004004000 < LINK_BASE — the
+        // old-style bare kernel ships them zero-size; start.s maps nothing
+        // there and the real iBoot stages nothing either).
+        if *vmsize == 0 || *filesize == 0 || *vmaddr < link_base {
+            continue;
+        }
+        let seg_pa = LOAD_PA + (vmaddr - link_base);
+        let fo = *fileoff as usize;
+        let fsz = *filesize as usize;
+        bus.write_raw(seg_pa, &img[fo..fo + fsz]);
+        let _ = name;
+    }
     // REAL-DATA BUG #26 — iBoot-equivalent BSS zero-fill. The flat
     // `write_raw` above stages the whole FILE, but segments with
     // vmsize > filesize (BSS) must be ZERO beyond their file bytes. The
@@ -481,7 +689,7 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
     // cursor global at BSS 0x…9adf638 read plist ASCII as a POINTER and
     // the IOCatalogue path deref-faulted (far = 0x696d614674736f48,
     // measured @ insn 8,148,893 — the post-bug-#25 blocker).
-    for (name, vmaddr, vmsize, filesize) in segs.iter() {
+    for (name, vmaddr, vmsize, _fileoff, filesize) in segs.iter() {
         if vmsize > filesize {
             let bss_pa = LOAD_PA + (vmaddr + filesize - link_base);
             let n = (vmsize - filesize) as usize;
@@ -519,7 +727,7 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
     cpu.trace_enabled = true;
     // M4: give the cpu_data[0] discovery scan the kernel's __DATA window
     // (PA = load PA + segment offset from the link base).
-    if let Some((_, data_va, _, _)) = segs.iter().find(|(n, _, _, _)| n == "__DATA") {
+    if let Some((_, data_va, _, _, _)) = segs.iter().find(|(n, _, _, _, _)| n == "__DATA") {
         let pa = LOAD_PA + (data_va - link_base);
         cpu.cpu_data_scan = Some((pa, pa + 0x300_000));
     }
@@ -537,7 +745,7 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
     }
     // M4-b guardrail: an exception entry with SP below __TEXT_EXEC means
     // the exception stack descended into the kernel image (named stop).
-    if let Some((_, text_exec_va, _, _)) = segs.iter().find(|(n, _, _, _)| *n == "__TEXT_EXEC") {
+    if let Some((_, text_exec_va, _, _, _)) = segs.iter().find(|(n, _, _, _, _)| *n == "__TEXT_EXEC") {
         cpu.text_floor_kva = Some(*text_exec_va);
     }
     // M4 debug: capture the kernel's boot-stack-pointer stores (cpu_data
@@ -744,6 +952,78 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
                 if d != 0 {
                     probe.push(format!("L1'[{k}] = {d:#018x}"));
                 }
+            }
+            // M4-L (#32): FULL descriptor scan of the CURRENT TTBR0/TTBR1
+            // tables — every nonzero entry in the first 16 KiB (2048 slots)
+            // of each table, so "the kernel never filled the physmap L1
+            // entry" is MEASURED, not inferred. Cap 80 lines/table.
+            for (name, ttbr) in [("TTBR1", cpu.mmu.ttbr_bases().1), ("TTBR0", cpu.mmu.ttbr_bases().0)] {
+                let base = ttbr & 0x0000_FFFF_FFFF_FFF8;
+                let mut shown = 0;
+                for slot in 0..2048u64 {
+                    let addr = base + slot * 8;
+                    let mut b = [0u8; 8];
+                    cpu.mem().read_bytes(addr, &mut b);
+                    let d = u64::from_le_bytes(b);
+                    if d != 0 {
+                        shown += 1;
+                        probe.push(format!("{name}[{slot}] @ {addr:#x} = {d:#018x}"));
+                        if shown >= 80 {
+                            probe.push(format!("{name}: … (more nonzero entries exist)"));
+                            break;
+                        }
+                    }
+                }
+                if shown == 0 {
+                    probe.push(format!("{name} table @ {base:#x}: ALL ZERO (2048 slots)"));
+                }
+            }
+            // M4-L (#32): physmap page-table mechanism globals — the L2
+            // array ptr, bump cursor, ptov_table head. File ships 0; the
+            // kernel must init them before granular_prot can fill tables.
+            for (label, gva) in [
+                ("[0x7701d10] L2-array ptr", 0xfffffff007701d10u64),
+                ("[0x7701cf8] L2 free head", 0xfffffff007701cf8),
+                ("[0x7702460] L2 bump cursor", 0xfffffff007702460),
+                ("[0x7702450] gPhysBase", 0xfffffff007702450),
+                ("[0x7702458] gVirtBase", 0xfffffff007702458),
+                ("[0x7702568] end_kern", 0xfffffff007702568),
+            ] {
+                // kernel VA → PA via the load map: PA = gva − link_base + LOAD_PA
+                let gpa = gva - 0xfffffff007004000 + LOAD_PA;
+                let mut b = [0u8; 8];
+                cpu.mem().read_bytes(gpa, &mut b);
+                let v = u64::from_le_bytes(b);
+                probe.push(format!("{label} @PA {gpa:#x} = {v:#x}"));
+            }
+            // ptov_table entries (stride 0x18 from 0x7702128 per the commit
+            // stores measured at insn 8.13M)
+            for k in 0..8 {
+                let gpa = LOAD_PA + (0x7702128 + k * 0x18 - 0x7004000);
+                let mut b = [0u8; 24];
+                cpu.mem().read_bytes(gpa, &mut b);
+                let (pa, va, len) = (
+                    u64::from_le_bytes(b[0..8].try_into().unwrap()),
+                    u64::from_le_bytes(b[8..16].try_into().unwrap()),
+                    u64::from_le_bytes(b[16..24].try_into().unwrap()),
+                );
+                if pa != 0 || va != 0 || len != 0 {
+                    probe.push(format!("ptov[{k}] pa={pa:#x} va={va:#x} len={len:#x}"));
+                }
+            }
+            // M4-L (#36): the kernel's own DT globals — did SecureDTInit see
+            // the staged blob (with random-seed) at all?
+            for (label, gva) in [
+                ("DTRootNode [0x7744988]", 0xfffffff007744988u64),
+                ("DTInitialized [0x7744998]", 0xfffffff007744998),
+                ("DTEnd [0x7744990]", 0xfffffff007744990),
+                ("DTSize [0x77449a0]", 0xfffffff0077449a0),
+                ("SecureDTIsLockedDown flag? [0x7701a78]", 0xfffffff007701a78),
+            ] {
+                let gpa = LOAD_PA + (gva - 0xfffffff007004000);
+                let mut b = [0u8; 8];
+                cpu.mem().read_bytes(gpa, &mut b);
+                probe.push(format!("{label} = {:#x}", u64::from_le_bytes(b)));
             }
             // stop-pc re-walk under the final table state: separates "the
             // kernel remapped this page" from "our walker misread it".

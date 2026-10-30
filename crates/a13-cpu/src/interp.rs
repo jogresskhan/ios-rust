@@ -311,6 +311,20 @@ pub struct Interpreter {
     /// first 64 hits per address, zero behavior drift.
     pub watch_store_vas: Vec<u64>,
     watch_store_hits: std::collections::HashMap<u64, u32>,
+    /// M4-L diagnostic (env IOS_RUST_WATCH_PA="0xlo-0xhi,…", default empty):
+    /// log every store whose TRANSLATED PA lands in an inclusive range —
+    /// the decisive probe for "did the kernel ever write page-table page
+    /// X" (a VA watch can't answer it: the fill may go through any alias).
+    /// First 200 hits, zero behavior drift.
+    pub watch_store_pas: Vec<(u64, u64)>,
+    watch_store_pa_count: u32,
+    /// M4-L diagnostic (env IOS_RUST_WATCH_VAL=1, default off): log every
+    /// 8-byte store whose VALUE looks like a page-table descriptor with
+    /// DRAM PA bits — (val&1)==1 && (val>>32)&0xFFFF==0x8 — regardless of
+    /// target PA. Catches "the physmap fill wrote tables SOMEWHERE".
+    /// First 512 hits, zero behavior drift.
+    pub watch_store_val: bool,
+    watch_store_val_count: u32,
     /// M4-K diagnostic: stop when pc enters [lo, hi) (env
     /// IOS_RUST_STOP_PC_RANGE="0xlo,0xhi"). The trace ring then holds the
     /// entry path instead of a self-spin filling it.
@@ -345,6 +359,31 @@ pub struct Interpreter {
 }
 
 const N: u32 = 1 << 3;
+
+/// Parse `IOS_RUST_WATCH_PA` style ranges: "0xlo-0xhi,0xlo2-0xhi2" →
+/// inclusive (lo, hi) pairs. Empty/invalid tokens are skipped silently
+/// (diagnostic-only knob; a malformed value must never break a boot).
+fn parse_pa_ranges(s: &str) -> Vec<(u64, u64)> {
+    let mut out = Vec::new();
+    for tok in s.split(',') {
+        let tok = tok.trim();
+        if tok.is_empty() {
+            continue;
+        }
+        let mut it = tok.split('-');
+        let lo = it
+            .next()
+            .and_then(|v| u64::from_str_radix(v.trim().trim_start_matches("0x"), 16).ok());
+        let hi = it
+            .next()
+            .and_then(|v| u64::from_str_radix(v.trim().trim_start_matches("0x"), 16).ok());
+        if let (Some(lo), Some(hi)) = (lo, hi) {
+            out.push((lo, hi));
+        }
+    }
+    out
+}
+
 const Z: u32 = 1 << 2;
 const C: u32 = 1 << 1;
 const V: u32 = 1;
@@ -437,6 +476,12 @@ impl Interpreter {
                 .filter_map(|s| u64::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok())
                 .collect(),
             watch_store_hits: std::collections::HashMap::new(),
+            watch_store_pas: parse_pa_ranges(
+                std::env::var("IOS_RUST_WATCH_PA").unwrap_or_default().as_str(),
+            ),
+            watch_store_pa_count: 0,
+            watch_store_val: std::env::var("IOS_RUST_WATCH_VAL").ok().as_deref() == Some("1"),
+            watch_store_val_count: 0,
             stop_pc_range: std::env::var("IOS_RUST_STOP_PC_RANGE").ok().and_then(|s| {
                 let mut it = s.split(',');
                 let lo = u64::from_str_radix(it.next()?.trim_start_matches("0x"), 16).ok()?;
@@ -645,7 +690,30 @@ impl Interpreter {
             }
         }
         let pa = self.vaddr(va, XlateKind::Store)?;
+        if !self.watch_store_pas.is_empty()
+            && val != 0
+            && self.watch_store_pa_count < 4096
+        {
+            if self.watch_store_pas.iter().any(|&(lo, hi)| pa >= lo && pa <= hi) {
+                self.watch_store_pa_count += 1;
+                eprintln!(
+                    "[watch-pa] insn={} pc={:#x} va={va:#x} pa={pa:#x} val={val:#x} size={size}",
+                    self.executed, self.pc
+                );
+            }
+        }
         if size == 8 {
+            if self.watch_store_val
+                && self.watch_store_val_count < 512
+                && val & 1 == 1
+                && (val >> 32) & 0xFFFF == 0x8
+            {
+                self.watch_store_val_count += 1;
+                eprintln!(
+                    "[watch-val] insn={} pc={:#x} va={va:#x} pa={pa:#x} val={val:#x}",
+                    self.executed, self.pc
+                );
+            }
             // M4-b: cpu_stack_alloc fingerprint — a stack-range kernel VA
             // stored into the kernel __DATA window (BootCpuData fields live
             // there; the boot stack in __BOOTDATA is excluded by design).
@@ -997,12 +1065,17 @@ impl Interpreter {
                 // DISCARDED, never written to SP (QEMU op_add_sub_reg: is_cmp
                 // path). Real-data bug #10: `cmp x1, x2, lsl #2` clobbered SP
                 // with the comparison result and zeroed the kernel stack.
-                // REAL-DATA BUG #31: Rn=31 reads SP in the add/sub register
-                // forms ALWAYS (S=0 and S=1 — `cmp sp, x18` is
-                // `subs xzr, sp, x18`); the old "ZR on the compare path"
-                // special-case compared 0 against the bound and the kernel's
-                // exception-stack guard at 0x…8160400 spun on stale flags.
-                let a = self.rsp(rn);
+                // REAL-DATA BUG #31: the exception-stack guard `cmp sp, x18`
+                // is the EXTENDED form (0xEB3263FF) — handled in AddSubExt.
+                // REAL-DATA BUG #34 (fixes the #31 over-correction): in the
+                // SHIFTED-register form Rn=31 reads XZR, NOT SP (ARM DDI0487:
+                // `NEG Xd,Xm` = SUB Xd,XZR,Xm shifted, Rn=31=XZR; only the
+                // extended form — bit21=1, option field — maps Rn=31 to SP).
+                // The kernel's qsort does `neg x19, x20` (0xCB1403F3) per
+                // partition step: reading SP here produced sp−stride as the
+                // negated stride → wild sort pointers → the #32 physmap abort
+                // cascade (compare args x1=phystokv(sp−0x4C8) measured live).
+                let a = self.r(rn);
                 let b = self.shift(self.r(rm), kind, imm6, is64);
                 if setflags {
                     // carry-in: ADCS only. ADDS gets 0; SUBS uses it as the
@@ -1050,14 +1123,17 @@ impl Interpreter {
                 self.add_with_flags(a, b, false, is64, false);
             }
             Insn::CmnReg { rn, rm, kind, imm6, is64 } => {
-                // REAL-DATA BUG #31: rn=31 = SP (`cmn sp, x18`).
-                let a = self.rsp(rn);
+                // REAL-DATA BUG #34: shifted form Rn=31 = XZR (SP only in the
+                // extended form — see AddSubReg comment).
+                let a = self.r(rn);
                 let b = self.shift(self.r(rm), kind, imm6, is64);
                 self.add_with_flags(a, b, false, is64, false);
             }
             Insn::CmpReg { rn, rm, kind, imm6, is64 } => {
-                // REAL-DATA BUG #31: rn=31 = SP (`cmp sp, x18`).
-                let a = self.rsp(rn);
+                // REAL-DATA BUG #34: shifted form Rn=31 = XZR (`cmp sp, x18`
+                // is the EXTENDED form and lives in AddSubExt — SP read kept
+                // there, regression-guarded by a golden).
+                let a = self.r(rn);
                 let b = self.shift(self.r(rm), kind, imm6, is64);
                 self.add_with_flags(a, b, true, is64, true);
             }

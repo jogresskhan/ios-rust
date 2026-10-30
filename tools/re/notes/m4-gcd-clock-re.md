@@ -151,3 +151,21 @@ c. Verify the x30-corruption theory: read the boot-stack memory above
    explains the jump.
 d. Tooling ready: IOS_RUST_STOP_PC_RANGE, IOS_RUST_TRACE_DEEP (2048),
    guard-chain dump in the report.
+
+## #32 addendum (end of session K block)
+Measured at stop: exc-stack descriptor @0x…9a4ae60 → [+0x10] (stub switch
+target) = 0x…9b10000, [+0x20]/[+0x28] (guard bound) = 0x…9b18000 — the
+guard window (0x…9b14000, 0x…9b18000] does NOT contain the switch target:
+the guard belongs to a DIFFERENT (nested) stack level; the +0x200 stub is
+simply not the right entry for a boot-stack sync abort, or the real boot
+never takes this abort.
+STRONG LEAD: the faulting FAR 0xffffffe013611fb0 decodes as
+physmap(PA=0x13611fb0); the DRAM window here is 0x8_00000000..0x8_40000000
+— the kernel almost certainly wanted PA 0x8_13611fb0 (physmap VA
+0xffffffe0_81361fb0). The 0x8_00000000 bit was LOST = a 33rd-bit
+truncation somewhere in the kvtophys/physmap computation — ANOTHER engine
+mis-model (candidate: a W-form addsub/ext or a shift/extend site). Next
+block: RE the instruction that computed x22=0xffffffe013611fb0 (the
+callback's argument chain from 0x…7f2f730-48), find the truncation, fix +
+golden. Then the physmap load stops aborting, the whole guard question
+may go away, and the boot proceeds into the scheduler (WFI territory).

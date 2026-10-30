@@ -684,8 +684,10 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
                 if intstack != 0 {
                     let bound = rd(intstack + 0x28);
                     let base = rd(intstack + 0x20);
+                    let switch_top = rd(intstack + 0x10);
+                    let irq_sp = rd(tpidr + 0x498);
                     out.push(format!(
-                        "  exc-stack descriptor @{intstack:#x}: [+0x20] = {base:#x} · [+0x28] (guard bound) = {bound:#x} · sp at stop {:#x}",
+                        "  exc-stack descriptor @{intstack:#x}: [+0x10] (stub switch target) = {switch_top:#x} · [+0x20] = {base:#x} · [+0x28] (guard bound) = {bound:#x} · [tpidr+0x498] = {irq_sp:#x} · sp at stop {:#x}",
                         cpu.sp
                     ));
                 }

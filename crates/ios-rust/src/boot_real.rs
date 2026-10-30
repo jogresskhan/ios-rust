@@ -585,8 +585,8 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
         .iter()
         .map(|(pc, w, regs, nzcv)| {
             format!(
-                "{pc:#x}: {w:#010x} nzcv={nzcv:04b} x9={:x} x10={:x} x12={:x} x13={:x} x16={:x} x22={:x} sp={:x} lr={:x}",
-                regs[9], regs[10], regs[12], regs[13], regs[16], regs[22],
+                "{pc:#x}: {w:#010x} nzcv={nzcv:04b} x9={:x} x10={:x} x12={:x} x13={:x} x16={:x} x18={:x} x22={:x} sp={:x} lr={:x}",
+                regs[9], regs[10], regs[12], regs[13], regs[16], regs[18], regs[22],
                 cpu.sp, regs[30]
             )
         })
@@ -660,6 +660,33 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
                     out.push(format!(
                         "  cpu_data[0]+{name} = {:#018x}",
                         u64::from_le_bytes(b)
+                    ));
+                }
+            } else if cpu.sys.tpidr_el1 != 0 {
+                // M4-K: the guard-chain dump — the kernel's own tpidr is set;
+                // follow the exception-stack-guard chain [tpidr+0x4f8] → +0x28
+                // and the intstack-switch field [tpidr+0x498].
+                let tpidr = cpu.sys.tpidr_el1;
+                out.push(format!(
+                    "cpu_data[0]: not scanned · tpidr {tpidr:#x} (set by the kernel)"
+                ));
+                let mut rd = |va: u64| -> u64 {
+                    let pa = va.wrapping_sub(cpu.kva_base);
+                    let mut b = [0u8; 8];
+                    cpu.mem().read_bytes(pa, &mut b);
+                    u64::from_le_bytes(b)
+                };
+                let intstack = rd(tpidr + 0x4f8);
+                let switch_sp = rd(tpidr + 0x498);
+                out.push(format!(
+                    "  guard chain: [tpidr+0x4f8] = {intstack:#x} · [tpidr+0x498] (irq-switch sp) = {switch_sp:#x}"
+                ));
+                if intstack != 0 {
+                    let bound = rd(intstack + 0x28);
+                    let base = rd(intstack + 0x20);
+                    out.push(format!(
+                        "  exc-stack descriptor @{intstack:#x}: [+0x20] = {base:#x} · [+0x28] (guard bound) = {bound:#x} · sp at stop {:#x}",
+                        cpu.sp
                     ));
                 }
             } else {
@@ -889,8 +916,9 @@ pub fn print_report(r: &BootRealReport) {
         println!("UART output: (none yet)");
     }
     if !r.trace.is_empty() {
+        let depth = if std::env::var("IOS_RUST_TRACE_DEEP").is_ok() { 2048 } else { 48 };
         println!("last instructions:");
-        for t in r.trace.iter().rev().take(48).collect::<Vec<_>>().iter().rev() {
+        for t in r.trace.iter().rev().take(depth).collect::<Vec<_>>().iter().rev() {
             println!("    {t}");
         }
     }

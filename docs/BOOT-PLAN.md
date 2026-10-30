@@ -274,7 +274,30 @@ xnu builds its own page tables during early boot; the interpreter must walk them
    T0SZ=T1SZ=25, TBI0=1, IPS=40-bit) and now surfaced live in the boot
    report's MMU config line.]**
 
-## M4 — IRQ / AIC / timers  [ ] (session J 2026-10-30: bug #27 BFM family fixed — boot 8.19M → 2,000,000,000 CLEAN insns, zero aborts; insn gate clause cleared 244×, WFI clause pending: new #28 gcd-divergence stop)
+## M4 — IRQ / AIC / timers  [~] (session K 2026-10-30: bugs #28-#31 fixed — gcd loop + MUL/SP + PAC-strip + Rn=31-SP; boot panic-free through vm_mem_bootstrap __init_entry_set callbacks, one kernel-HANDLED physmap abort; WFI clause pending: #32 corrupted-ELR ERET stop)
+
+**Session K evidence (2026-10-30, release build, IOS_RUST_DRAM_MB=1024):**
+FOUR engine-semantics bugs fixed in one block (all keystone/capstone-pinned,
+19 new goldens, 425 workspace tests 0 failed):
+* **#28 MSUB operand order** (`Xd = Xa − Xn·Xm`): the session-J gcd
+  divergence RESOLVED — the timebase helper @0x…7b92d20 completes
+  (ratio 125/3, Hz 24e6) and the boot advances past arm_vm_init's
+  clock setup. Notes: tools/re/notes/m4-gcd-clock-re.md.
+* **#29 MUL = MADD with Ra=31 → XZR**: the "Section
+  __BOOTDATA,__init_entry_set has invalid size" vm_mem_bootstrap panic
+  (insn 8,255,200) resolved — the div-by-6 multiply-magic check passes.
+* **#30 PAC canonical strip**: `blraa x27,x26` (0xD73F0B7A
+  @0x…7f2f658) no longer fetches tagged pointers; the
+  __init_entry_set constructor callbacks run (the physmap load-abort
+  they trigger is handled BY THE KERNEL — delivered 1, panic 0).
+* **#31 add/sub Rn=31 = SP**: the vector-page stack guard's
+  `cmp sp, x18` now compares the real SP (N=1 verified in-golden).
+* **#32 (open, next block):** after the handled physmap abort the
+  ERET lands on a corrupted ELR 0x00FFFFF00815F200 (top 16 bits
+  0x00FF, should be 0xFFFF) → `b 0x…81601d8` → the guard → spin.
+  Candidate: a top-half mis-model in the C sleh path (BFM/extr/MOVK
+  family). Tooling added: IOS_RUST_STOP_PC_RANGE, IOS_RUST_TRACE_DEEP,
+  guard-chain dump.
 
 **Session J evidence (2026-10-30, IOS_RUST_DRAM_MB=1024):** boot-first
 8,194,993 → 48,000,000 (48M budget stop, clean) → **2,000,000,000 insns

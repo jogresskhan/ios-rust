@@ -890,3 +890,80 @@ enforcement stays an honest, tracked limit gated on M4 vectoring.
   768; +3 goldens over session I's 403). Report improvement: the
   cpu_data[0] line now prints tpidr_el1 even when the scan never ran
   (the kernel sets TPIDR itself — 0 aborts through 2G insns).
+
+### 2.12d — Session K (2026-10-30): bugs #28+#29+#30+#31 — four engine-semantics bugs in one block
+
+* **REAL-DATA BUG #28 (MSUB subtract operand order) — the gcd loop
+  RESOLVED:** the interpreter computed `Xn·Xm − Xa` where the ARM spec
+  (C6.2.349) says `MSUB Xd,Xn,Xm,Xa → Xd = Xa − Xn·Xm`. MADD hid the flip
+  for every other site (addition commutes); the kernel's Euclid remainder
+  step `mov x11,x12; udiv x12,x10,x12; msub x12,x12,x11,x10` (verbatim
+  words 0xAA0C03EB/0x9ACC094C/0x9B0BA98C @0x…7b92d68-70, keystone
+  round-trip) requires `r = a − q·b ∈ [0,b)`; the flipped form returned
+  `2⁶⁴−(a mod b)` — "the residue stays wrapped", exactly session J's
+  observation. The helper @0x…7b92d20 is xnu's timebase-ratio
+  computation: `{clock=24e6 (pexpert default), divisor=1}` →
+  gcd(1e9, 24e6)=8e6 → ratio 125/3, Hz 24e6, kHz 24000 stored to
+  0x…98e4658. Two latent W-form defects fixed on the same path: the
+  addend was not masked to 32 bits and the result not truncated/
+  zero-extended; `Insn::MaddW` (umsubl/smsubl) had the same flipped
+  subtract. 6 goldens incl. the verbatim kernel sequence (1e9,24e6 →
+  16e6).
+* **REAL-DATA BUG #29 (MUL = MADD with Ra=31 → XZR, never SP):** with
+  the gcd fixed the boot advanced to `vm_mem_bootstrap` and panicked
+  **"Section __BOOTDATA,__init_entry_set has invalid size"** (insn
+  8,255,200, lr 0x…7a8cf18, fmt @0x…735c26a). The check is a static
+  divide-by-6 multiply-magic idiom on the section size 0x2640
+  (`mul x9,x8,x9; ror x9,x9,#3; cmp; b.hs` @0x…7a8ce6c-84 — 0x2640 IS
+  divisible by 6, real HW passes). Our MADD read the addend with the SP
+  rule: every `mul` computed product + SP (SP was the boot stack inside
+  __BOOTDATA!) → rotated product huge → b.hs → panic. Keystone proof:
+  `mul x9,x8,x9` ≡ `madd x9,x8,x9,xzr` = 0x9B097D09, and the `sp`
+  spellings DO NOT ASSEMBLE (`madd x0,x1,x2,sp`, `madd sp,x1,x2,x3`,
+  `umaddl sp,w1,w2,sp` all KS-FAIL) — dp3 Rd/Ra are XZR-only. Fixed
+  Ra=31 read (ZR) + Rd=31 discard (the old set_rsp(31) wrote SP).
+* **REAL-DATA BUG #30 (authenticated branches must strip to CANONICAL):**
+  next stop: fetch abort at **0x402fff007a8d060** (ESR 0x92000010) — the
+  model pac() tag 0x402f at bits 63:48 of the callback pointer
+  `pacia x16,x17(0xe4fe)` @0x…7a8cea0, dispatched by `blraa x27, x26`
+  (0xD73F0B7A verbatim @0x…7f2f658, capstone) which our BrAuth jumped
+  RAW. Fix: `crypto::canonical()` (sign-extend bit 47 → kernel VAs
+  restore the 0xFFFF top), applied to aut(), RetA and BrAuth; plus pac()
+  now signs the 48-bit VA only (aut's re-derivation never matched
+  kernel pointers before). Goldens: the verbatim blraa word, retab,
+  pac→aut round-trip.
+* **REAL-DATA BUG #31 (add/sub register forms: Rn=31 reads SP):** next
+  the exception-stack GUARD in the vector page
+  (`cmp sp,x18; b.gt .; sub x18,#0x4000; cmp sp,x18; b.lt .`
+  @0x…8160400, x18 = *([tpidr+0x4f8]+0x28) = 0x…9b18000) spun for the
+  rest of a 2G run: `cmp sp, x18` (0xEB3263FF = the add/sub EXTENDED
+  form, option LSL#0 — capstone) read Rn=31 as ZR → compared 0 vs the
+  bound → nzcv=0000 → b.gt taken forever. ARM rule: in add/sub register
+  forms (shifted AND extended, S=0 AND S=1) **Rn=31 is SP**; only Rd
+  differs (S=0 → SP, S=1 → ZR). Fixed CmpReg/CmnReg/CmpImm/CmnImm/
+  AddSubReg/AddSubExt (`a = rsp(rn)` always) + the immediate setflags
+  path now discards Rd=31 (the bug #10 class in `cmp sp,#imm`).
+  Goldens: verbatim guard prologue, in-window fall-through, shifted and
+  immediate SP compares, `add sp,sp,x18`.
+* **Measured (release build, IOS_RUST_DRAM_MB=1024):** boot 8.19M →
+  panic-free through `vm_mem_bootstrap` callbacks (`__init_entry_set`
+  constructors dispatched via pacia'd pointers + blraa), the one
+  delivered exception = a physmap load translation fault (FAR
+  0xffffffe013611fb0, ESR 0x96000005) which the kernel HANDLES
+  (exception delivered 1, panic 0, bus unmapped 0/0). New diagnostics:
+  `IOS_RUST_STOP_PC_RANGE=lo,hi` (stop on pc entering a range — catches
+  entry paths instead of spin-filled rings), `IOS_RUST_TRACE_DEEP`
+  (2048-deep trace ring + report), guard-chain dump in the cpu_data
+  report.
+* **NEW STOP CLASS (bug #32, next block's RE target):** after the
+  handled physmap abort the kernel's exception-return ERETs to a
+  CORRUPTED ELR — **0x00FFFFF00815F200** (bits 63:56 = 0x00, bits
+  55:48 = 0xFF) instead of 0xFFFFFFF00815F200 — lands on
+  `b 0x…81601d8` → `b guard` → spins. Some instruction in the C sleh
+  path still mis-models a top-half operation (0x00FF/0xFFFF pattern —
+  candidate: a BFM/extr/ror-family or MOVK-width bug). Trace-capture
+  tooling is in place; RE next: the sleh dispatcher's return-value
+  computation for the handled-abort path.
+* `cargo test --workspace`: **425 passed / 0 failed** (+19 over session
+  J's 406). RE notes: `tools/re/notes/m4-gcd-clock-re.md` (+ companion
+  script `tools/re/reports/m4_gcd_clock.py`).

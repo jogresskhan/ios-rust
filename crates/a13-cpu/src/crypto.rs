@@ -491,6 +491,13 @@ fn qarma_inverse(p: u64, k0: u64, k1: u64, tweak: u64) -> u64 {
 /// Apple key schedule is not public); parity gate: round-trip
 /// sign/verify + avalanche tests.
 pub fn pac(ptr: u64, modifier: u64, k0: u64, k1: u64) -> u64 {
+    // REAL-DATA BUG #30 (model consistency): the tag covers the 48-bit VA
+    // only — real PAC signs the address and REPLACES the upper bits with
+    // the tag, so signing must ignore the input's upper bits. Hashing the
+    // full 64-bit input made pac(0xffff…VA) ≠ pac(0x0000…VA) and aut()'s
+    // re-derivation (which sees the stripped form) never matched for
+    // kernel pointers.
+    let ptr = ptr & 0x0000_FFFF_FFFF_FFFF;
     let tweak = modifier ^ (ptr & 0xFFFF_FFFF_FFFF);
     let tag = qarma_forward(ptr, k0, k1, tweak);
     // Tag = XOR of all four 16-bit lanes of the core output. The 6-round
@@ -506,7 +513,7 @@ pub fn aut(signed: u64, modifier: u64, k0: u64, k1: u64) -> Option<u64> {
     let ptr = signed & 0x0000_FFFF_FFFF_FFFF;
     let expected = pac(ptr, modifier, k0, k1);
     if expected == signed {
-        Some(ptr)
+        Some(canonical(ptr))
     } else {
         None
     }
@@ -515,6 +522,22 @@ pub fn aut(signed: u64, modifier: u64, k0: u64, k1: u64) -> Option<u64> {
 /// XPACI/XPACD model: strip the tag (upper 16 bits of the VA space).
 pub fn xpac(ptr: u64) -> u64 {
     ptr & 0x0000_FFFF_FFFF_FFFF
+}
+
+/// REAL-DATA BUG #30: the authenticated-strip canonical form. The model
+/// pac() writes its 16-bit tag at bits 63:48 and keeps bits 47:0 intact;
+/// the authenticate side must restore the CANONICAL pointer by
+/// sign-extending bit 47 (kernel VAs 0xfffffff0_… have bit 47 set → the
+/// 0xFFFF top comes back; userspace VAs restore 0x0000). Stripping to the
+/// raw 48-bit form (or jumping to the tagged value) broke the real boot:
+/// `blraa x27, x26` (0xD73F0B7A @0xfffffff007f2f658, the vm_mem_bootstrap
+/// callback dispatch) fetched the TAGGED pointer 0x402fff007a8d060.
+pub fn canonical(ptr: u64) -> u64 {
+    if ptr & (1 << 47) != 0 {
+        ptr | 0xFFFF_0000_0000_0000
+    } else {
+        ptr & 0x0000_FFFF_FFFF_FFFF
+    }
 }
 
 // ---------------------------------------------------------------------------

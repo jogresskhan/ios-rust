@@ -311,6 +311,10 @@ pub struct Interpreter {
     /// first 64 hits per address, zero behavior drift.
     pub watch_store_vas: Vec<u64>,
     watch_store_hits: std::collections::HashMap<u64, u32>,
+    /// M4-K diagnostic: stop when pc enters [lo, hi) (env
+    /// IOS_RUST_STOP_PC_RANGE="0xlo,0xhi"). The trace ring then holds the
+    /// entry path instead of a self-spin filling it.
+    pub stop_pc_range: Option<(u64, u64)>,
     /// Diagnostic watchpoints (env IOS_RUST_WATCH="0xaddr,…" — default
     /// empty, zero behavior drift): on pc match, log pc/lr/x0..x3 to
     /// stderr. Kernel-RE breakpoint aid, not emulation semantics.
@@ -433,6 +437,12 @@ impl Interpreter {
                 .filter_map(|s| u64::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok())
                 .collect(),
             watch_store_hits: std::collections::HashMap::new(),
+            stop_pc_range: std::env::var("IOS_RUST_STOP_PC_RANGE").ok().and_then(|s| {
+                let mut it = s.split(',');
+                let lo = u64::from_str_radix(it.next()?.trim_start_matches("0x"), 16).ok()?;
+                let hi = u64::from_str_radix(it.next()?.trim_start_matches("0x"), 16).ok()?;
+                Some((lo, hi))
+            }),
             watch_addrs: std::env::var("IOS_RUST_WATCH")
                 .unwrap_or_default()
                 .split(',')
@@ -490,7 +500,8 @@ impl Interpreter {
         if !self.trace_enabled {
             return;
         }
-        if self.trace.len() >= 24 {
+        let cap = if std::env::var("IOS_RUST_TRACE_DEEP").is_ok() { 2048 } else { 24 };
+        if self.trace.len() >= cap {
             self.trace.pop_front();
         }
         self.trace.push_back((pc, word, self.x.to_vec(), self.nzcv));
@@ -904,6 +915,12 @@ impl Interpreter {
         let pc = self.pc;
         let word = self.fetch(pc)?;
         self.trace_tick(pc, word);
+        if let Some((lo, hi)) = self.stop_pc_range {
+            if pc >= lo && pc < hi {
+                self.pc = pc;
+                return Err(StopReason::Budget);
+            }
+        }
         let Some(insn) = crate::decode::decode(pc, word) else {
             // M4-b (session I): an undecodable word is NOT a model stop
             // once the guest has exception vectoring — real hardware raises
@@ -955,8 +972,11 @@ impl Interpreter {
                 let a = self.rsp(rn);
                 let b = (imm12 as u64) << if shift { 12 } else { 0 };
                 if setflags {
+                    // S=1 with Rd=31 is the CMP/CMN alias — discard (bug #31
+                    // family: the old set_rsp(31) wrote the compare result
+                    // into SP). S=0 with Rd=31 is `add sp, …` — SP write.
                     let r = self.add_with_flags(a, b, false, is64, false);
-                    self.set_rsp(rd, r);
+                    self.set_r(rd, r);
                 } else {
                     self.set_rsp(rd, a.wrapping_add(b));
                 }
@@ -965,8 +985,9 @@ impl Interpreter {
                 let a = self.rsp(rn);
                 let b = (imm12 as u64) << if shift { 12 } else { 0 };
                 if setflags {
+                    // S=1: Rd=31 = ZR discard (cmp sp, #imm) — see AddImm.
                     let r = self.add_with_flags(a, b, true, is64, true);
-                    self.set_rsp(rd, r);
+                    self.set_r(rd, r);
                 } else {
                     self.set_rsp(rd, a.wrapping_sub(b));
                 }
@@ -976,8 +997,12 @@ impl Interpreter {
                 // DISCARDED, never written to SP (QEMU op_add_sub_reg: is_cmp
                 // path). Real-data bug #10: `cmp x1, x2, lsl #2` clobbered SP
                 // with the comparison result and zeroed the kernel stack.
-                // Rn=31 reads ZR only on the compare path, SP otherwise.
-                let a = if setflags && rd == 31 { self.r(rn) } else { self.rsp(rn) };
+                // REAL-DATA BUG #31: Rn=31 reads SP in the add/sub register
+                // forms ALWAYS (S=0 and S=1 — `cmp sp, x18` is
+                // `subs xzr, sp, x18`); the old "ZR on the compare path"
+                // special-case compared 0 against the bound and the kernel's
+                // exception-stack guard at 0x…8160400 spun on stale flags.
+                let a = self.rsp(rn);
                 let b = self.shift(self.r(rm), kind, imm6, is64);
                 if setflags {
                     // carry-in: ADCS only. ADDS gets 0; SUBS uses it as the
@@ -1013,22 +1038,26 @@ impl Interpreter {
                 self.set_r(rd, r);
             }
             Insn::CmpImm { rn, imm12, shift, is64 } => {
-                let a = self.r(rn);
+                // REAL-DATA BUG #31: rn=31 = SP (`cmp sp, #imm`).
+                let a = self.rsp(rn);
                 let b = (imm12 as u64) << if shift { 12 } else { 0 };
                 self.add_with_flags(a, b, true, is64, true);
             }
             Insn::CmnImm { rn, imm12, shift, is64 } => {
-                let a = self.r(rn);
+                // REAL-DATA BUG #31: rn=31 = SP (`cmn sp, #imm`).
+                let a = self.rsp(rn);
                 let b = (imm12 as u64) << if shift { 12 } else { 0 };
                 self.add_with_flags(a, b, false, is64, false);
             }
             Insn::CmnReg { rn, rm, kind, imm6, is64 } => {
-                let a = self.r(rn);
+                // REAL-DATA BUG #31: rn=31 = SP (`cmn sp, x18`).
+                let a = self.rsp(rn);
                 let b = self.shift(self.r(rm), kind, imm6, is64);
                 self.add_with_flags(a, b, false, is64, false);
             }
             Insn::CmpReg { rn, rm, kind, imm6, is64 } => {
-                let a = self.r(rn);
+                // REAL-DATA BUG #31: rn=31 = SP (`cmp sp, x18`).
+                let a = self.rsp(rn);
                 let b = self.shift(self.r(rm), kind, imm6, is64);
                 self.add_with_flags(a, b, true, is64, true);
             }
@@ -3146,13 +3175,18 @@ impl Interpreter {
                 }
             }
             Insn::RetA { .. } => {
-                // QARMA-model auth: our interpreter runs with its own key
-                // schedule, so the authenticated strip is identity here.
-                self.pc = self.r(30);
+                // REAL-DATA BUG #30: the model pac() tags bits 63:48, so the
+                // authenticated return must STRIP AND RESTORE the canonical
+                // pointer (sign-extend bit 47) — the raw `self.pc = self.r(30)`
+                // fetched the TAGGED return address (e.g. 0x402fff007a8d060).
+                self.pc = crypto::canonical(self.r(30));
                 return Ok(());
             }
             Insn::BrAuth { rn, link, .. } => {
-                let target = self.r(rn);
+                // REAL-DATA BUG #30: same canonical strip as RetA — the real
+                // boot's `blraa x27, x26` (0xD73F0B7A @0x…7f2f658) jumped to
+                // the tagged pointer before this fix.
+                let target = crypto::canonical(self.r(rn));
                 if link {
                     self.x[30] = pc + 4;
                 }
@@ -3170,8 +3204,10 @@ impl Interpreter {
                 // #10 (THE boot stopper): `cmp x17, w16, uxtw` wrote its
                 // comparison result into SP via set_rsp(31, …), zeroing the
                 // kernel stack mid-boot → `str xzr, [sp, #8]` faulted at
-                // 0xfffffff007ff97ac. Rn=31 → ZR on the compare path.
-                let a = if setflags && rd == 31 { self.r(rn) } else { self.rsp(rn) };
+                // 0xfffffff007ff97ac. REAL-DATA BUG #31: Rn=31 reads SP in
+                // both the S=0 and S=1 forms (`cmp sp, w16, uxtw` is a real
+                // kernel sequence).
+                let a = self.rsp(rn);
                 let b = option.apply(self.r(rm)) << imm3 as u64;
                 if setflags {
                     // carry-in: ADCS only (see AddSubReg — bug #10b).
@@ -3412,14 +3448,43 @@ impl Interpreter {
             }
             // ==================== 3-source / data-proc ====================
             Insn::Madd { rd, rn, rm, ra, subtract, is64 } => {
+                // REAL-DATA BUG #28 (engine half): the subtract form is
+                // MSUB Xd, Xn, Xm, Xa → Xd = Xa − Xn·Xm (ARM ARM C6.2.349),
+                // NOT Xn·Xm − Xa. MADD hides the flip (addition commutes);
+                // the kernel's Euclid remainder step `udiv q,a,b;
+                // msub r,q,b,a` (0x9B0BA98C @0x…7b92d70, keystone-pinned)
+                // requires r = a − q·b ∈ [0,b) — the flipped form returned
+                // 2⁶⁴−(a mod b) and the gcd loop at 0x…7b92d68 diverged
+                // forever (bug #28 stop after 2G clean insns).
+                // REAL-DATA BUG #29: MUL is the MADD alias with Ra=31 = XZR
+                // (keystone: `mul x9,x8,x9` ≡ `madd x9,x8,x9,xzr` =
+                // 0x9B097D09; `madd x0,x1,x2,sp` DOES NOT ASSEMBLE — dp3 has
+                // no SP forms for Rd/Ra). The addend MUST read the ZR rule;
+                // reading rsp(31) added SP to EVERY mul the kernel executes
+                // — the div-by-6 size check `mul x9,x8,x9; ror #3; cmp;
+                // b.hs` at 0x…7a8ce6c turned rot(0xcc0+SP) huge and panicked
+                // "Section __BOOTDATA,__init_entry_set has invalid size"
+                // (vm_mem_bootstrap, insn 8,255,200). Rd=31 likewise
+                // discards (XZR), never SP.
+                // W-form (sf=0): all operands are W regs — the addend reads
+                // Wc (bits 31:0 only) and the result is (… ) mod 2³²
+                // zero-extended into Xd.
                 let a = self.r(rn);
                 let b = self.r(rm);
-                let c = self.rsp(ra);
                 let (a, b) = if is64 { (a, b) } else { (a & 0xFFFF_FFFF, b & 0xFFFF_FFFF) };
-                let r = if subtract { a.wrapping_mul(b).wrapping_sub(c) } else { a.wrapping_mul(b).wrapping_add(c) };
-                self.set_rsp(rd, r);
+                let c = if is64 { self.r(ra) } else { self.r(ra) & 0xFFFF_FFFF };
+                let prod = a.wrapping_mul(b);
+                let r = if subtract { c.wrapping_sub(prod) } else { prod.wrapping_add(c) };
+                let r = if is64 { r } else { r & 0xFFFF_FFFF };
+                self.set_r(rd, r);
             }
             Insn::MaddW { rd, rn, rm, ra, subtract, unsigned } => {
+                // umaddl/umsubl/smaddl/smsubl: Xd = Xa −/+ ZExt/SExt(Wn)·…
+                // — same operand-order fix as Insn::Madd's subtract form
+                // (real kernel umsubl sites share the Euclid pattern) and
+                // the same dp3 reg-31 rule as bug #29: Ra=31 reads XZR
+                // (keystone: `umaddl xzr,w1,w2,xzr` = 0x9BA27C3F; the sp
+                // spelling does not assemble), Rd=31 discards.
                 let a = self.r(rn) as u32;
                 let b = self.r(rm) as u32;
                 let prod: i64 = if unsigned {
@@ -3427,9 +3492,9 @@ impl Interpreter {
                 } else {
                     (a as i32 as i64).wrapping_mul(b as i32 as i64)
                 };
-                let c = self.rsp(ra) as i64;
-                let r = if subtract { prod.wrapping_sub(c) } else { prod.wrapping_add(c) };
-                self.set_rsp(rd, r as u64);
+                let c = self.r(ra) as i64;
+                let r = if subtract { c.wrapping_sub(prod) } else { prod.wrapping_add(c) };
+                self.set_r(rd, r as u64);
             }
             Insn::LogicReg { rd, rn, rm, kind, imm6, op, setflags, invert, is64 } => {
                 let mut b = self.shift(self.r(rm), kind, imm6, is64);

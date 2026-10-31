@@ -492,11 +492,20 @@ fn dt_append_prop(dt: &mut Vec<u8>, at: usize, node_off: usize, name: &str, data
 /// Returns the number of properties written.
 fn dt_populate_amcc_lockregs(dt: &mut Vec<u8>, aperture_pa: u64) -> Result<usize, String> {
     let rd = |p: usize| -> u32 { u32::from_le_bytes(dt[p..p + 4].try_into().unwrap()) };
-    // root → chosen → lock-regs → amcc (pre-order path walk)
+    // root → chosen → lock-regs → amcc (pre-order path walk).
+    // Measured: the iOS 14.3 (18C66) EDT ships the subtree STUB-EMPTY
+    // (name + AAPL,phandle only); the iOS 13.7 (17H35) EDT does NOT ship
+    // it at all — the RE addresses in this file are pinned to 18C66, so
+    // an older EDT is a fixture mismatch, not a staging bug.
     let mut off = 0usize;
     for want in ["chosen", "lock-regs", "amcc"] {
-        off = dt_find_child(dt, off, want)
-            .ok_or_else(|| format!("lock-regs populate: /{want} node not found"))?;
+        off = dt_find_child(dt, off, want).ok_or_else(|| {
+            format!(
+                "lock-regs populate: /{want} node not found \
+                 (boot-real is pinned to the iOS 14.3 18C66 EDT, which ships \
+                 /chosen/lock-regs stub-empty — an older EDT lacks the node)"
+            )
+        })?;
     }
     let amcc = off;
 

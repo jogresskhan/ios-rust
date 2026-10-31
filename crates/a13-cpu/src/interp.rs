@@ -1970,16 +1970,35 @@ impl Interpreter {
                 let lanes: u16 = (if q { 16 } else { 8 }) / ebytes;
                 let per_reg = (lanes * ebytes) as u64; // 8 or 16
                 let base = self.rsp(rn);
+                // REAL-DATA BUG #46 (found via the fipspost HMAC-SHA1 KAT
+                // repro, tests/fips_hmac_kat.rs): op4 {0x2,0x6,0x7,0xA} are
+                // LD1/ST1 — every register copies one CONTIGUOUS structure
+                // (reg r = mem[r*regbytes..(r+1)*regbytes)). Only LD2/LD3/
+                // LD4 (op4 0x8/0x4/0x0) INTERLEAVE elements across registers
+                // (element l of reg r at (l*regs+r)*ebytes). The old code
+                // interleaved everything — an LD4 layout applied to LD1 —
+                // lossless across a st1/ld1 spill round-trip (which is why
+                // 155M insns of kernel NEON survived) but corrupting every
+                // layout consumer: the kernel's SHA-1 vng `ld1 {v0..v3},
+                // [x2], #64` fed the schedule v0=W[0,16,32,48]… and the
+                // FIPS POST HMAC-SHA1 KAT computed 6c829016… instead of
+                // 886eae70…f5e15b80.
+                let interleave = matches!(op4, 0x0 | 0x4 | 0x8);
+                // byte offset of element `l` of register `r` within the
+                // in-memory structure array
+                let elem_off = |l: u16, r: u8| -> u64 {
+                    if interleave {
+                        (l as u64) * (regs as u64) + (r as u64)
+                    } else {
+                        (r as u64) * (lanes as u64) + (l as u64)
+                    }
+                };
                 if load {
                     for l in 0..lanes {
                         for r in 0..regs {
-                            let addr = base + (l as u64) * (regs as u64) * (ebytes as u64)
-                                + (r as u64) * (ebytes as u64);
+                            let addr = base + elem_off(l, r) * (ebytes as u64);
                             let val = self.load_vec(addr, ebytes)?;
                             let sh = (l as u32) * (ebytes as u32) * 8;
-                            let keep = !((0xFu128 << ((r as u32) * 64)) << (sh / 8) * 8
-                                >> (sh / 8) * 8);
-                            let _ = keep;
                             // write into v[rt+r] lane l
                             let lane_bytes = ebytes as u32;
                             let mask = (1u128 << (lane_bytes * 8)) - 1;
@@ -1991,8 +2010,7 @@ impl Interpreter {
                 } else {
                     for l in 0..lanes {
                         for r in 0..regs {
-                            let addr = base + (l as u64) * (regs as u64) * (ebytes as u64)
-                                + (r as u64) * (ebytes as u64);
+                            let addr = base + elem_off(l, r) * (ebytes as u64);
                             let lane_bytes = ebytes as u32;
                             let mask = (1u128 << (lane_bytes * 8)) - 1;
                             let sh = (l as u32) * lane_bytes * 8;

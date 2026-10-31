@@ -3,5 +3,6 @@
 *.log
 .DS_Store
 fixtures/
+fixtures-*/
 boot-first-staged/
 tools/re/coverage-probe/target/

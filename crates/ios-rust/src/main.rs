@@ -85,7 +85,8 @@ fn main() {
                     max_insn = n;
                 }
             }
-            match boot_full::fixtures_dir()
+            match fixtures
+                .or_else(boot_full::fixtures_dir)
                 .map(|d| boot_real::run(&d, max_insn))
             {
                 Some(Ok(r)) => {

@@ -31,7 +31,7 @@ use apple_soc::t8030::{effective_dram_mb, T8030Machine};
 use img4::im4p::Im4p;
 use macho::header::MachHeader;
 use restore::lzfse;
-use vm_core::{Bus, Ram};
+use vm_core::{Bus, Device, Ram};
 
 pub const BOOT_REAL_ID: &str = "boot-real v1 (real XNU 18C66 handoff → first boot)";
 
@@ -1014,7 +1014,9 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
 
     // HLT canary page (a stray RET lands here and halts cleanly)
     let mut pause = Ram::new("boot-pause", 0x1000);
-    pause.data[..4].copy_from_slice(&0xD440_0000u32.to_le_bytes());
+    // lazy Ram: Device::write commits the backing (a bare data[..4] slice
+    // panics on the now-empty Vec)
+    pause.write(0, 4, 0xD440_0000);
     bus.attach(PAUSE_PA, 0x1000, Box::new(pause));
 
     // ---- 4) CPU state: the iBoot→xnu handoff ----
@@ -1135,6 +1137,54 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
             let want: usize = if *reg == 19 { 0x80 } else { 0x40 };
             let mut buf = vec![0u8; want];
             let mut line = format!("M5-P stop-memdump x{i} @ {va:#x}:");
+            let mut got = 0usize;
+            for (off, chunk) in buf.chunks_mut(8).enumerate() {
+                if let Ok(pa) =
+                    cpu.debug_walk(va + (off * 8) as u64, a13_cpu::mmu::XlateKind::Load)
+                {
+                    cpu.mem().read_bytes(pa, chunk);
+                    got += chunk.len();
+                }
+            }
+            if got == 0 {
+                line.push_str(" <unmapped>");
+            } else {
+                for (k, b) in buf.iter().take(got).enumerate() {
+                    if k % 16 == 0 {
+                        line.push_str(&format!("\n    +{:02x}:", k));
+                    }
+                    line.push_str(&format!(" {b:02x}"));
+                }
+            }
+            println!("{line}");
+        }
+    }
+
+    // M5-S stop-dump-addrs (BUG #50): dump N bytes at explicit VAs when the
+    // run stopped via IOS_RUST_STOP_PC_RANGE — env
+    // IOS_RUST_STOP_DUMP_ADDRS="0xva[:0xlen],…" (len default 0x40, capped
+    // 0x200). Reads the RUNNING memory (post self-rebase) so PAC'd
+    // descriptor slots / GOT entries can be read without a debugger.
+    // Report-only, zero behavior drift.
+    if let Some(spec) = std::env::var("IOS_RUST_STOP_DUMP_ADDRS").ok() {
+        for ent in spec.split(',') {
+            let ent = ent.trim();
+            if ent.is_empty() {
+                continue;
+            }
+            let (va_s, len_s) = match ent.split_once(':') {
+                Some((v, l)) => (v, l),
+                None => (ent, "0x40"),
+            };
+            let Ok(va) = u64::from_str_radix(va_s.trim_start_matches("0x"), 16) else {
+                eprintln!("stop-dump-addrs: bad va {ent:?}");
+                continue;
+            };
+            let want = u64::from_str_radix(len_s.trim_start_matches("0x"), 16)
+                .unwrap_or(0x40)
+                .min(0x200) as usize;
+            let mut buf = vec![0u8; want];
+            let mut line = format!("M5-S stop-dump {va:#x} ({want:#x} B):");
             let mut got = 0usize;
             for (off, chunk) in buf.chunks_mut(8).enumerate() {
                 if let Ok(pa) =

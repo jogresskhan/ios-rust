@@ -95,3 +95,63 @@ fn aes128_fips197_via_instructions() {
     let got = u128::from_le_bytes(cpu.v.v[0].to_be_bytes()); // back to BE
     assert_eq!(got, EXPECT, "AES-128 through real AESE/AESMC/EOR words");
 }
+
+/// AES-128 DECRYPT through real AESD/AESIMC/EOR words (FIPS-197 C.1
+/// inverse: ciphertext 69c4e0d8… → plaintext 00112233…). The equivalent-
+/// inverse-cipher key schedule: state ^= rk10; 9×(AESD aesimc(rk_r);
+/// AESIMC); final AESD rk0 — probes the aesd/aesimc pair that the
+/// fipspost AES-ECB KAT (POST test 4, the current −4075 wall) exercises.
+#[test]
+fn aes128_decrypt_fips197_via_instructions() {
+    // forward round keys (rk0..rk10) computed in aes_fips197 unit test
+    // style; decrypt feeds aesimc(rk_r) for rounds 9..1 and rk0 last.
+    const FRK: [u128; 11] = [
+        0x000102030405060708090a0b0c0d0e0f,
+        0xd6aa74fdd2af72fadaa678f1d6ab76fe,
+        0xb692cf0b643dbdf1be9bc5006830b3fe,
+        0xb6ff744ed2c2c9bf6c590cbf0469bf41,
+        0x47f7f7bc95353e03f96c32bcfd058dfd,
+        0x3caaa3e8a99f9deb50f3af57adf622aa,
+        0x5e390f7df7a69296a7553dc10aa31f6b,
+        0x14f9701ae35fe28c440adf4d4ea9c026,
+        0x47438735a41c65b9e016baf4aebf7ad2,
+        0x549932d1f08557681093ed9cbe2c974e,
+        0x13111d7fe3944a17f307a78b4d2b30c5,
+    ];
+    let aesd_word = |vd: u8, vn: u8| 0x4E28_5800u32 | ((vn as u32) << 5) | vd as u32;
+    let aesimc_word = |vd: u8, vn: u8| 0x4E28_7800u32 | ((vn as u32) << 5) | vd as u32;
+
+    let mut code = Vec::new();
+    let put = |c: &mut Vec<u8>, w: u32| c.extend_from_slice(&w.to_le_bytes());
+    put(&mut code, eor16b_word(0, 0, 11)); // state ^= rk10 (v11)
+    for r in (1..10).rev() {
+        put(&mut code, aesd_word(0, r as u8 + 1)); // aesd v0, v{r+1} = aesimc(rk_r)
+        put(&mut code, aesimc_word(0, 0));
+    }
+    put(&mut code, aesd_word(0, 1)); // final aesd with rk0
+    put(&mut code, hlt_word());
+
+    let mut ram = vec![0u8; 0x4000];
+    ram[0x1000..0x1000 + code.len()].copy_from_slice(&code);
+    let mut cpu = Interpreter::new(Box::new(Ram(ram)));
+    let set = |cpu: &mut Interpreter, r: u8, v: u128| {
+        cpu.v.v[r as usize] = u128::from_be_bytes(v.to_le_bytes());
+    };
+    // Decrypt feed schedule (verified against the python reference):
+    // FIPS InvCipher applies AddRoundKey BEFORE InvMixColumns, so the
+    // AESD key for rounds 9..1 is the PLAIN rk_r (unlike encrypt, where
+    // AESMC pulls MixColumns over the key and needs aesimc(rk_r)).
+    set(&mut cpu, 0, EXPECT); // ciphertext in
+    set(&mut cpu, 1, FRK[0]); // rk0 (final aesd key)
+    for (i, k) in FRK[1..10].iter().enumerate() {
+        set(&mut cpu, i as u8 + 2, *k); // v2..v10 = rk1..rk9 (plain)
+    }
+    set(&mut cpu, 11, FRK[10]); // rk10 (initial eor)
+    cpu.set_reset_vector(0x1000);
+    let res = cpu.run(a13_cpu::InterpBudget { max_insn: 100, max_ns: 60_000_000_000 });
+    assert_eq!(res.stop, StopReason::Halted, "stop={res:?}");
+    let got = u128::from_le_bytes(cpu.v.v[0].to_be_bytes());
+    println!("decrypt got  {got:032x}");
+    println!("       want  {PT:032x}");
+    assert_eq!(got, PT, "AES-128 decrypt through real AESD/AESIMC/EOR words");
+}

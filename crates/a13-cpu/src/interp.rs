@@ -2662,18 +2662,37 @@ impl Interpreter {
             }
             Insn::VExt { rd, rn, rm, imm4, q } => {
                 self.group_exec[1] += 1;
-                // concat(rn, rm) >> (imm4 * 8) bytes; .16b always (Q=1) —
-                // .8b form writes the low 8 bytes and zeroes the rest.
-                let concat = (self.v.v[rn as usize] << 64)
-                    | (self.v.v[rm as usize] >> 64)
-                    | (self.v.v[rn as usize] & u128::from(u64::MAX) << 0);
-                // proper concat: low half = rm, high half = rn
-                let cat = ((self.v.v[rn as usize] as u128) << 64)
-                    | (self.v.v[rm as usize] & u128::from(u64::MAX));
-                let _ = concat;
-                let sh = (imm4 as u32) * 8;
-                let out = cat >> sh;
-                self.v.v[rd as usize] = if q { out } else { out & u128::from(u64::MAX) };
+                // REAL-DATA BUG #49 (found via the fipspost HMAC-SHA-512
+                // KAT repro, tests/fips_sha512_kat.rs): EXT's byte source
+                // is the concatenation (Vn:Vm) with **Vn's bytes FIRST**
+                // (low positions 0..16) and Vm's second (16..32);
+                // result.B[i] = concat.B[i + imm4]. The old code built
+                // (Rm.low8 : Rn.low8) — operands SWAPPED and only the low
+                // 8 bytes of each — so every .16b EXT with index ≥ 8
+                // produced zeros in the high half and crossed operands in
+                // the low half (the SHA-512 schedule ext v18.16b, v4.16b,
+                // v5.16b, #8 read W8 instead of W9 and 0 instead of W10).
+                let mut cat = [0u8; 32];
+                let n = self.v.v[rn as usize].to_le_bytes();
+                let m = self.v.v[rm as usize].to_le_bytes();
+                if q {
+                    // .16b: full 16+16-byte concatenation, 16-byte window
+                    cat[..16].copy_from_slice(&n);
+                    cat[16..].copy_from_slice(&m);
+                } else {
+                    // .8b: low 8 bytes of each operand, 8-byte window
+                    cat[..8].copy_from_slice(&n[..8]);
+                    cat[8..16].copy_from_slice(&m[..8]);
+                }
+                // window start in BYTES (imm4 is the byte index)
+                let start = imm4 as usize;
+                let width = if q { 16 } else { 8 };
+                let end = (start + width).min(32);
+                let mut out = [0u8; 16];
+                if start < end {
+                    out[..end - start].copy_from_slice(&cat[start..end]);
+                }
+                self.v.v[rd as usize] = u128::from_le_bytes(out);
             }
             Insn::VTbl { rd, rn, rm, len, tbx, q } => {
                 self.group_exec[1] += 1;

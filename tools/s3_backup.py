@@ -54,7 +54,17 @@ CFG = TransferConfig(multipart_threshold=64 * 1024 * 1024, multipart_chunksize=1
 # Curated backup set (repo-local paths are absolute at call time)
 EXPORT_DIR = "/home/z/my-project/download/ios-rust"
 BUNDLE_PATH = "/home/z/my-project/download/ios-rust-repo-backup.bundle"
-REPO_DIR = "/home/z/work/ios-rust"
+# The repo location moved with the sandbox (session-R note: /home/z/work
+# was the old container; the tree now lives under /home/z/my-project).
+# Resolution order: $IOS_RUST_REPO env, the old path, the new path.
+REPO_DIR = next(
+    (p for p in [
+        os.environ.get("IOS_RUST_REPO"),
+        "/home/z/work/ios-rust",
+        "/home/z/my-project/ios-rust/repo",
+    ] if p and Path(p).joinpath(".git").exists()),
+    "/home/z/work/ios-rust",
+)
 SNAPSHOT_SET = [
     (EXPORT_DIR, "research/ios-rust-export/"),  # full export of HEAD (re-archived below)
     (BUNDLE_PATH, "research/ios-rust-repo-backup.bundle"),

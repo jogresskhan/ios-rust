@@ -1271,3 +1271,62 @@ build; fetch_fixtures.py's 13.7 URL serves the *test-suite* fixtures — the
   expansion / KAT plumbing. Engine smoke frontier now three walls past
   session Q.
 * `cargo test --workspace`: **455 passed / 0 failed**.
+
+### Session S (2026-10-31) — #50 closed: AESE/AESD AddRoundKey order; the FIPS POST AES-ECB KAT passes
+
+* **Host-OOM class fixed for good (two parts):** (1) `Ram` is now
+  lazily committed — the eager `vec![0u8; size]` 4 GiB DRAM allocation
+  aborted every test/boot on a 4 GiB host before a single insn retired;
+  uncommitted bytes read 0 (identical semantics, pinned by 6
+  ram_lazy_tests incl. the region-end quirks), `Device::write_ram_bulk`
+  keeps Bus::write_raw/DMA lazy-aware, peak RSS for a 10M-insn boot on
+  IOS_RUST_DRAM_MB=1024 is **112 MB** (was: the full window up front).
+  (2) The last direct `pause.data[..4]` slice (boot_real staging) —
+  caught because `cargo test` does NOT rebuild `target/release/ios-rust`
+  and the post-fix "zero drift" check had silently run the stale eager
+  binary; the frontier re-verified on the fresh build.
+* **New diagnostic:** `IOS_RUST_STOP_DUMP_ADDRS="0xva[:0xlen],…"` — dump
+  running memory at explicit VAs at a stop-PC stop. This is how the
+  corecrypto ECB mode structs were read: the STATIC kernelcache's
+  __DATA_CONST slots hold Apple pre-signed pointers whose bits 47:0 are
+  NOT slide-0 VAs; the runtime slots (re-signed by the kernel's own
+  PACIA during slide) expose the real targets (encrypt: init 0x82a8aa0
+  / ecb 0x82cae30; decrypt: init 0x82a8b10 / ecb 0x82b2320).
+* **#50 (fixed):** AESE/AESD applied the round key AFTER the SubBytes/
+  ShiftRows table; ARM applies it BEFORE — `AESE(Vd,Vn) =
+  SubBytes(ShiftRows(Vd ^ Vn))` (QEMU aese_kernel: "The Arm AddRoundKey
+  comes first, while the API AddRoundKey comes last"). Chain: POST test
+  4 identified by the per-test error encoding in fipspost_post
+  (0x829fb3c): `sub w0, wN, #0x3e8/#0x7d0/#0xbb8/#0xfa0` = err
+  −1000·test#; test 4 = 0x82a37a4 whose rodata string is
+  `fipspost_post_aes_ecb`. KAT extracted + python-verified: key
+  e680747f… @0x703c08a (the csel-eq NORMAL key; 0x703c078 is the
+  recovery blob), pt 7fea96f9… @0x73c2ed0, ct 3d30e636… @0x73c2ee1.
+  The engine computed 3f8770c4… at the memcmp (stop-dump) — byte-equal
+  to a python model of the loop, so the engine faithfully executed a
+  wrong table. NEW repro `tests/fips_aes_ecb_kat.rs`: the kernel's OWN
+  keyexp (0x82a87d0, bit-parallel one-round-key-per-iteration with the
+  real Sbox/Rcon) + vng ECB (0x82cae30) at their REAL VAs in one 24 MiB
+  window (the kernel's own ADRPs resolve unchanged). Bisection: keyexp
+  = FIPS-197 golden ✓ / ECB diverges ✓; step-dump proved every round
+  key loads correctly — the table itself was wrong. Both directions
+  verified numerically AND through the kernel's own code (decrypt pairs
+  the XOR-first AESD with the kernel's AESIMC'd middle-key schedule
+  from init 0x82a89f0).
+* **The old aes_vaes_kat "ARM-feed" was a circular golden:** its
+  pre-InvMixColumns'd middle keys exactly compensated the XOR-last bug,
+  so FIPS-197 C.1 passed while every real kernel AES block was wrong.
+  Rewritten kernel-mirroring (plain-schedule encrypt, aesimc'd decrypt);
+  the aes_fips197 unit test feeds plain keys now. aes_exec's zero-key
+  golden is unchanged (aese(v,0) is identical in both conventions).
+* **Frontier: 155,673,736 → 155,746,479.** fipspost_post_aes_ecb
+  returns 0 (x19=0 at the 0x82a38d0 return stop) — the whole-KAT memcmp
+  loop completed. BUG #51 OPEN: 88k insns later a corecrypto WORKSPACE
+  ALLOCATION aborts ("alloc ws" → "internal error, file radar to
+  (corecrypto | all)", fn 0x82b0708 → abort helper 0x82da904, panic at
+  insn 155,746,369) — the allocator behind cc_alloc (kalloc?) fails
+  during the POST's later tests (likely ECC/bignum KATs). Next: RE the
+  alloc path (0x82b0708's caller chain and the cc_malloc/kalloc
+  plumbing), same recipe.
+* `cargo test --workspace`: **463 passed / 0 failed** (+2
+  fips_aes_ecb_kat, +1 ignored step tool).

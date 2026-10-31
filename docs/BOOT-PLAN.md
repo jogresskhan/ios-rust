@@ -880,3 +880,66 @@ pinned to; `boot-real` now honors its [fixtures-dir] arg):**
   repro through the engine, bisect.
 * Tests: **455 passed / 0 failed** (+2 SHA-512 KAT, +1 AES decrypt KAT,
   +1 EXT micro, +1 ignored SHA-512 step tool).
+
+## M5 — peripherals the real boot path touches  [~] (session S (2026-10-31): REAL-DATA BUG #50 — the AESE/AESD AddRoundKey ORDER — was the fipspost AES-ECB KAT root; frontier 155,673,736 → 155,746,479; fipspost_post_aes_ecb returns 0 — the whole-KAT memcmp loop completed; BUG #51 OPEN = a corecrypto workspace-alloc abort 88k insns later)
+
+**Session-S evidence (release build, IOS_RUST_DRAM_MB=1024, 463
+workspace tests 0 failed):**
+
+* **The OOM class is closed at the engine level too:** `vm_core::Ram` is
+  now LAZILY COMMITTED (empty Vec + geometric ensure(); uncommitted
+  reads are 0 exactly like the old zero-filled Vec; the region-end
+  read-0/write-drop quirks preserved and pinned by tests;
+  `Device::write_ram_bulk` keeps `Bus::write_raw`/DMA lazy-aware so a
+  fresh Ram no longer silently swallows bulk loads). Peak RSS for a
+  10M-insn boot on IOS_RUST_DRAM_MB=1024: **112 MB**. One staging-site
+  fix in boot_real (the `pause.data[..4]` slice) — plus the process
+  lesson: `cargo test` does NOT rebuild `target/release/ios-rust`, so
+  the first "zero drift" check had silently run the STALE eager binary;
+  the frontier was re-verified on the fresh build.
+* **New diagnostic:** `IOS_RUST_STOP_DUMP_ADDRS="0xva[:0xlen],…"` —
+  running-memory dumps at explicit VAs at a stop-PC stop. The STATIC
+  image's __DATA_CONST descriptor slots hold Apple pre-signed pointers
+  whose bits 47:0 are NOT VAs; only the RUNNING slots (re-signed by the
+  kernel's own PACIA during slide) expose the real functions:
+  encrypt mode 0x77c1cd0 → init 0x82a8aa0 (plain keyexp dispatch) / ecb
+  0x82cae30; decrypt mode 0x77c2a70 → init 0x82a8b10 (keyexp+AESIMC,
+  0x82a89f0: rk1..rk9 InvMixColumns'd) / ecb 0x82b2320.
+* **#50 root:** AESE/AESD XORed the round key AFTER the SubBytes/
+  ShiftRows table. ARM does it BEFORE: `AESE(Vd,Vn) =
+  SubBytes(ShiftRows(Vd ^ Vn))` (QEMU aese_kernel: "The Arm AddRoundKey
+  comes first, while the API AddRoundKey comes last"). The kernel's vng
+  ECB loop feeds the PLAIN schedule and only the XOR-first table makes
+  that the true cipher; the decrypt pairs the same XOR-first AESD with
+  the AESIMC'd middle-key schedule. Verified numerically both directions
+  AND through the kernel's own code (tests/fips_aes_ecb_kat.rs —
+  keyexp 0x82a87d0 + ECB 0x82cae30 verbatim at real VAs, one 24 MiB
+  window, the kernel's own ADRPs resolving unchanged).
+* **How test 4 was identified:** fipspost_post (0x829fb3c) encodes the
+  failing test index in the return value — `sub w0, wN, #0x3e8/#0x7d0/
+  #0xbb8/#0xfa0` = err − 1000·test#; test 4 = bl 0x82a37a4 whose rodata
+  string is `fipspost_post_aes_ecb` (two one_shot 0x82a3908 calls —
+  encrypt then decrypt — each memcmp'd, −75 = memcmp fail).
+* **The old aes_vaes_kat "ARM-feed" was a CIRCULAR golden:** its
+  pre-InvMixColumns'd middle keys exactly compensated the XOR-last bug
+  (FIPS-197 C.1 passed while every real kernel block was wrong).
+  Rewritten kernel-mirroring; aes_fips197 unit test feeds plain keys.
+* **Frontier move (measured):** fipspost_post_aes_ecb returns 0
+  (x19=0 at the 0x82a38d0 return stop) — the POST's KAT memcmp loop
+  completes; the boot advances to insn **155,746,479** where a
+  corecrypto WORKSPACE ALLOCATION aborts: "alloc ws" → "internal error,
+  file radar to (corecrypto | all)" (fn 0x82b0708 → abort helper
+  0x82da904 → panic @ insn 155,746,369, lr 0x82b0bd8).
+  **BUG #51 OPEN:** the allocator behind cc_alloc (kalloc?) fails
+  during the POST's later tests (likely ECC/bignum KATs — 0x82b0708 is
+  deep in the bignum region). Next block: RE the workspace-alloc path
+  (who provides cc_alloc in xnu, what it calls, why it returns
+  NULL/throws), same recipe as #46-#50.
+* **Next block (M5/session T):** disassemble 0x82b0708's alloc call
+  chain (the `bl 0x82c2250`-region allocator plumbing), find the
+  underlying kernel allocation (kalloc/kmem_alloc?) and why it fails in
+  our model; fix; re-run. The FIPS POST is now ONE wall from completion
+  — behind it, kext/IOKit bring-up and the M5 device census re-measure,
+  then M6 (DSC → dyld → launchd → SpringBoard → GUI) opens.
+* Tests: **463 passed / 0 failed** (+2 fips_aes_ecb_kat: keyexp golden
+  + ECB KAT; +1 ignored step-dump tool).

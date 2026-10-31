@@ -943,3 +943,54 @@ workspace tests 0 failed):**
   then M6 (DSC → dyld → launchd → SpringBoard → GUI) opens.
 * Tests: **463 passed / 0 failed** (+2 fips_aes_ecb_kat: keyexp golden
   + ECB KAT; +1 ignored step-dump tool).
+
+## M5 — peripherals the real boot path touches  [~] (session T (2026-10-31): REAL-DATA BUG #51 — the SBCS borrow-out carry flag wrapped at b==u64::MAX — was the FIPS-POST reciprocal-invariant abort; frontier 155,746,479 → 181,012,637; BUG #52 OPEN = the RSA self-check fails with 6 alternating limbs off by −1)
+
+**Session-T evidence (release build, IOS_RUST_DRAM_MB=1024, 474
+workspace tests 0 failed):**
+
+* **#51 root (found the campaign way — kernel-bytes repro + python
+  oracle):** the abort at insn 155,746,479 ('alloc ws' → 'internal
+  error, file radar to (corecrypto | all)') was corecrypto's Newton-
+  reciprocal fn 0x82b0708: its post-loop division check (C = 2^2048 −
+  q·input, three unrolled C_low−=input / D−=borrow rounds, abort unless
+  some round borrows) saw ZERO borrows. The repro (tests/fips_sqrt_kat.rs
+  + tests/sqrt_kat_data.rs — 12.8 KB of verbatim kernel bytes over 14
+  code ranges incl. the PPL memset/memcpy; the captured call
+  x0=arena, x1=0x10 words, the 128B buffer @0xffffffe802fab410) proved
+  the engine's 9-iteration loop AND the 34-word MUL3 product match the
+  python model bit-for-bit — and stage dumps pinned the first divergence
+  INSIDE sub#1 (C −= product): every OTHER word of the 0xFF…FF limb run
+  came out 1 instead of 0. interp add_with_flags computed the sub carry
+  as `a >= b + !carry_in` — when b==u64::MAX and the carry-in is clear,
+  the u64 sum wraps to 0 and the compare yields C=1 for a limb that DID
+  borrow (0 − MAX − 1 = 0 with borrow-out). Fix: overflow-safe
+  `a > b || (a == b && borrow_in == 0)` (+11 fips_sqrt_kat tests:
+  memset/clear/shr-0/shr-1/mul/sub/count goldens, the end-to-end repro,
+  and the direct sbcs_max_borrow_edge pin).
+* **Frontier move (measured):** 156M budget stop CLEAN (no aborts/
+  panics) → 200M-budget run reaches insn **181,012,637** where the
+  kernel's OWN panic fires: "FIPS Kernel POST Failed (%d)!" (fmt
+  0x73c4ca3, wrapper 0x82e8670 ← fipspost_post's RSA test).
+* **BUG #52 (scoped, next block):** the POST's test 6 (ccrsa — the
+  0x82a4ee4 fn: sign_pkcs1v15 → import → verify → cycle; key blob
+  0x4a5 B @0x7044828, KAT data 0x101 B @0x703c34c) fails at the SIGN
+  step with error −27 (log 'FAILED: ccrsa_sign_pkcs1v15', w8=0x35 line).
+  Decomposed: the sign body 0x82b34cc → modexp 0x82d8d0c → the CRT
+  private op 0x82d8f60 (returns 0) → the public-op self-check
+  0x82b7a3c (fills x23, returns 0) → constant-time compare 0x82d48cc
+  returns 1 = MISMATCH. Stop-dump of the two buffers at 0x82d8eb8
+  (insn 180,993,288): the verify value x23 @0xffffffe802faaad0 vs the
+  input copy x21 @0xffffffe802faabd0 differ in EXACTLY six words —
+  8, 10, 12, 14, 16, 18 (offsets 0x40..0x90, stride 0x10) — each ONE
+  LESS than expected (…FE vs …FF in the low byte). Signature of a
+  lost carry/borrow in a 2-word-unrolled helper inside the Montgomery
+  modmul chain (the same class as #51, different site). Next: capture
+  the 0x82d8f60 call args (sig-out x0, key-struct x1, x19, x22), run
+  the kernel's own CRT code on the engine with a python-RSA oracle,
+  bisect the first divergent Montgomery round.
+* Honest note: an earlier ccrsa_sign call at insn 156,025,900 (a
+  non-POST kernel caller) passes its first check but never reaches the
+  self-check block — its flow diverges inside 0x82d00cc/0x82d8d0c;
+  same suspected root, to be confirmed by the repro.
+* Tests: **474 passed / 0 failed**.

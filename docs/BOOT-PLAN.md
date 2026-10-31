@@ -994,3 +994,72 @@ workspace tests 0 failed):**
   self-check block — its flow diverges inside 0x82d00cc/0x82d8d0c;
   same suspected root, to be confirmed by the repro.
 * Tests: **474 passed / 0 failed**.
+
+## M5 — peripherals the real boot path touches  [~] (session U (2026-11-01): REAL-DATA BUG #52 — the ADCS carry-out flag wrapped at b==u64::MAX with carry-in set — was the RSA self-check failure; frontier 181,012,637 → 186,277,728; rsa_sig PASSES; BUG #53 OPEN = fipspost_post_ecdsa: the sign's s is wrong while k, r, d, e are all proven correct)
+
+**Session-U evidence (release build, IOS_RUST_DRAM_MB=1024, 481
+workspace tests 0 failed):**
+
+* **#52 root (the campaign way — red edge test first):** the NEXT-BLOCK
+  hypothesis (ADD-side wrap of the #51 class) was confirmed by inspection
+  and pinned BEFORE the boot re-run: `adcs_max_carry_edge` — ADCS with
+  b == u64::MAX and carry-in SET computes the right value (a + MAX + 1 =
+  a mod 2^64) but the old `res < a` carry-out reported C=0 (a < a false)
+  — the next ADCS of the chain then read carry-in 0 and computed one
+  LESS. The RSA dump's 6 EVEN limbs −1 (indices 8,10,12,14,16,18) are
+  exactly the post-lost-carry limbs of the 2-word-unrolled Montgomery
+  ADCS over the modulus' 0xFF…FF run. Fix (proved: res == a with cin=1
+  forces b == MAX which always carries; res > a with cin=1 forces
+  no-wrap): cin set ⟺ `res <= a`; cin clear ⟺ `res < a`.
+* **Frontier move (measured):** 181,012,637 (the "FIPS Kernel POST
+  Failed" panic) → **186,277,728** — the panic STILL fires but at a
+  LATER test: the POST's test order (decoded from the FAILED-fmt strings
+  at each call site) is hmac, integrity, indicator, aes_ecb, aes_cbc,
+  rsa_sig ✓PASSES NOW, **ecdsa ✗FAILS**, ecdh, aes_ccm, aes_cmac,
+  pbkdf, kdf_ctr, aes_gcm, aes_xts, tdes_cbc, drbg_ctr, drbg_hmac.
+  The post-panic ExceptionRecursion stop (elr=0x0 far=sp) is the
+  kernel's own panic escalation into the deliberate 0xE7FFDEFF GDB-trap
+  markers — expected, not a new wall.
+* **BUG #53 scoped (deep, multi-probe):** fipspost_post_ecdsa (test fn
+  0x82a4b74, called at boot insn 181,538,755) fails at the VERIFY step:
+  ccec_verify rejects the signature → 0x82db720 synthesizes
+  CCERR_PARAMETER (−18). Ground-truth analysis (scripts/re/ecdsa_check.py
+  + stage_check.py, P-256 math in python):
+  - the keygen is CORRECT: the dumped pubkey Q is on-curve and the
+    private scalar (LE @ctx+0x70) satisfies d·G == Q exactly;
+  - k FOUND and r PROVEN CORRECT: the sign's k·G point (x,y) sits at
+    0x…ab550/0x…ab5c0; k = 0x3830b344fc565fe6dac4077981e2ea5269f3c1a9
+    7 3d61aa20fc663cc74a6c5f (BE @0x…ab5c0), k·G.x == r exactly, and
+    y is on the curve with x = r;
+  - s is WRONG: engine s = 0x7b1b1e35aa96… ≠ python truth k⁻¹(e+r·d)
+    mod n = 0x8c6e86455722…; no true intermediate (t, r·d, k⁻¹) ever
+    appears in any workspace dump — the mod-n chain diverges from its
+    first products;
+  - the ENGINE PRIMITIVES ARE CLEAN: new fuzz suite (tests/
+    fips_fuzz_arith.rs, 4000 biased rounds each — MAX/MAX−1/0/1/
+    0xFFFFFFFF00000000 limbs) verifies MUL, UMULH, 6-limb ADCS chains,
+    and the EXACT division inner loop captured at 0x82dd284..0x82dd2ac
+    (10 words, replayed byte-faithful in tests/mont_loop_repro.rs)
+    against python oracles — all pass. UDIV/SDIV are exact by
+    construction. The bug is therefore in the division/reciprocal
+    CONTROL FLOW (the #51 machinery — the Newton reciprocal 0x82b0708
+    is called during the sign's s-window, from the sign-specific site
+    0x82de64c), not in the arithmetic primitives.
+* **Diagnostic added:** IOS_RUST_STOP_PC_MIN_INSN=N — the stop-pc-range
+  only fires once `executed` ≥ N (target the Nth window of a recurring
+  call site: the sign's reciprocal call after the keygen's).
+* **Repro infrastructure staged (WIP, #[ignore]d):** tests/
+  fips_sign_kat.rs + sign_kat_data.rs (gen: scripts/re/gen_sign_kat.py)
+  — 108.5 KB of verbatim kernel bytes (the sign-core tail 0x82b5e10 +
+  the full helper graph incl. reciprocal/division/mults/libkern),
+  153 KB of runtime-captured state (GOT page with PAC'd slots, rebased
+  rodata, per-CPU pages, heap workspaces, the whole sign stack), the
+  entry registers at insn 184,560,198, and TPIDR_EL1 seeding. The
+  auto-range loop (scripts/re/auto_ranges.sh, 18 iterations) converged
+  on a complete code map; the replay currently spins in
+  thread_dispatch (0x7b8c9d4) — the mutex_unlock path needs scheduler/
+  allocator state fidelity beyond the snapshot. Next block: either
+  stage the missing kernel state or pivot to driving the pure-crypto
+  entry (cczp mod-inv / mod-mul over the ORDER) directly.
+* Tests: **481 passed / 0 failed** (+2 ADCS edge pins, +3 fuzz suites,
+  +1 loop replay; the sign repro is the ignored diagnostic).

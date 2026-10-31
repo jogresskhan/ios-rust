@@ -388,6 +388,11 @@ pub struct Interpreter {
     /// IOS_RUST_STOP_PC_RANGE="0xlo,0xhi"). The trace ring then holds the
     /// entry path instead of a self-spin filling it.
     pub stop_pc_range: Option<(u64, u64)>,
+    /// M5-U diagnostic (env IOS_RUST_STOP_PC_MIN_INSN=N, default 0): the
+    /// stop_pc_range only fires once `executed` reaches N — lets a probe
+    /// target the Nth window of a recurring call site (e.g. the ECDSA
+    /// sign's reciprocal call after the keygen's).
+    pub stop_pc_min_insn: u64,
     /// Diagnostic watchpoints (env IOS_RUST_WATCH="0xaddr,…" — default
     /// empty, zero behavior drift): on pc match, log pc/lr/x0..x3 to
     /// stderr. Kernel-RE breakpoint aid, not emulation semantics.
@@ -559,6 +564,10 @@ impl Interpreter {
                 let hi = u64::from_str_radix(it.next()?.trim_start_matches("0x"), 16).ok()?;
                 Some((lo, hi))
             }),
+            stop_pc_min_insn: std::env::var("IOS_RUST_STOP_PC_MIN_INSN")
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(0),
             watch_addrs: std::env::var("IOS_RUST_WATCH")
                 .unwrap_or_default()
                 .split(',')
@@ -1072,7 +1081,27 @@ impl Interpreter {
             // C = (a+b+c) >= 2^32 (the u64 sum never wraps, so `res < a`
             // could never fire — real-data bug #10 follow-up, found on the
             // 18C66 boot path).
-            let cf = if is64 { res < a } else { res > 0xFFFF_FFFF };
+            //
+            // REAL-DATA BUG #52 (M5/session U): the 64-bit `res < a` form
+            // loses the carry when b == u64::MAX and the carry-in is SET:
+            // a + MAX + 1 = a (mod 2^64) WITH carry-out, but `a < a` is
+            // false. The next ADCS of the chain then reads carry-in 0 and
+            // computes one LESS — the RSA self-check failure at boot insn
+            // 181,012,637 (verify value vs input copy differ in exactly six
+            // EVEN limbs, each −1, indices 8,10,12,14,16,18: the 2-word-
+            // unrolled Montgomery modmul ADCS over the modulus' 0xFF…FF
+            // limb run). Overflow-safe form (proved: res == a with cin=1
+            // forces b == MAX, which always carries; res > a with cin=1
+            // forces no-wrap): cin set ⟺ res <= a; cin clear ⟺ res < a.
+            let cf = if is64 {
+                if carry_in {
+                    res <= a
+                } else {
+                    res < a
+                }
+            } else {
+                res > 0xFFFF_FFFF
+            };
             let vf = ((a ^ res) & (b ^ res)) >> (if is64 { 63 } else { 31 }) & 1 == 1;
             (res, cf, vf)
         };
@@ -1112,7 +1141,7 @@ impl Interpreter {
         let word = self.fetch(pc)?;
         self.trace_tick(pc, word);
         if let Some((lo, hi)) = self.stop_pc_range {
-            if pc >= lo && pc < hi {
+            if pc >= lo && pc < hi && self.executed >= self.stop_pc_min_insn {
                 self.pc = pc;
                 return Err(StopReason::Budget);
             }

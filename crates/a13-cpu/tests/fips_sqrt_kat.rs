@@ -553,6 +553,90 @@ fn sbcs_max_borrow_edge() {
     assert_eq!(cpu.nzcv & 0x2, 0, "C must be CLEAR (borrow-out)");
 }
 
+// ------------------------------------------------------------------
+// Micro-test 9: THE BUG-#52 edge, pinned directly — ADCS where the
+// addend is u64::MAX and the carry-in is SET:
+// 5 + 0xFFFF…FFFF + 1 = 5 (mod 2^64) WITH carry-out (C must STAY 1).
+// The old `res < a` form reports C=0 (5 < 5 is false), so the next
+// ADCS in the chain reads carry-in 0 and computes one LESS — the RSA
+// self-check's 6 alternating limbs off by −1 (indices 8,10,12,14,16,18)
+// are exactly this: 2-word-unrolled Montgomery ADCS over 0xFF…FF limbs.
+// Encoding: adcs x0, x1, x2 = 0xBA020020.
+// ------------------------------------------------------------------
+#[test]
+fn adcs_max_carry_edge() {
+    let mut ram = vec![0u8; 0x80000];
+    // movz x1, #5        = 0xD28000A1   (a = 5)
+    // movn x2, #0        = 0x92800002   (b = 0xFFFF…FFFF)
+    // movz x3, #0        = 0xD2800003   (a = 0 for the zero-result variant)
+    // adcs x0, x1, x2    = 0xBA020020   (5 + MAX + 1 = 5, C must stay 1)
+    // adcs x4, x1, x2    = 0xBA020024   (5 again ONLY if C survived)
+    // adcs x5, x3, x2    = 0xBA020065   (0 + MAX + 1 = 0, C must stay 1)
+    // adcs x6, x3, x2    = 0xBA020066   (0 again ONLY if C survived)
+    // hlt                = 0xD4400000
+    let code: [u32; 8] = [
+        0xD28000A1, 0x92800002, 0xD2800003, 0xBA020020, 0xBA020024, 0xBA020065, 0xBA020066,
+        0xD4400000,
+    ];
+    for (i, w) in code.iter().enumerate() {
+        ram[0x10000 + i * 4..0x10004 + i * 4].copy_from_slice(&w.to_le_bytes());
+    }
+    let mut cpu = Interpreter::new(Box::new(Ram(ram)));
+    cpu.nzcv = 0x2; // C SET (carry-in) before the first adcs
+    cpu.set_reset_vector(0x10000);
+    let res = cpu.run(a13_cpu::InterpBudget { max_insn: 100, max_ns: 1_000_000_000 });
+    assert_eq!(res.stop, StopReason::Halted);
+    assert_eq!(cpu.x[0], 5, "5 + MAX + 1 must be 5, got {:#x}", cpu.x[0]);
+    assert_eq!(
+        cpu.x[4], 5,
+        "second adcs must read the carried C: 5 again, got {:#x} (off by −1 = the lost carry)",
+        cpu.x[4]
+    );
+    assert_eq!(cpu.x[5], 0, "0 + MAX + 1 must be 0, got {:#x}", cpu.x[5]);
+    assert_eq!(
+        cpu.x[6], 0,
+        "second zero-variant adcs must read the carried C: 0 again, got {:#x}",
+        cpu.x[6]
+    );
+    // and the flags after the last: Z set (result 0), C STILL set
+    assert_eq!(cpu.nzcv & 0x4, 0x4, "Z must be set");
+    assert_eq!(cpu.nzcv & 0x2, 0x2, "C must be SET (carry-out through MAX+1)");
+}
+
+// ------------------------------------------------------------------
+// Micro-test 10: THE BUG-#53 edge — `ADCS Xd, XZR, XZR` (the Montgomery
+// carry-capture idiom, kernel site 0x82dd298 in the P-256-order modmul):
+// 0 + 0 + C must be 1 when C is set. The boot trace caught the engine
+// answering 0 (Z=1 after the insn) inside the ECDSA sign's mod-n
+// modmul — every accumulating limb's carry-out was dropped and s came
+// out wrong (fipspost_post_ecdsa → CCERR_PARAMETER, boot insn
+// 186,260,774). Encoding: adcs x11, xzr, xzr = 0xBA1F03EB.
+// ------------------------------------------------------------------
+#[test]
+fn adcs_xzr_carry_capture() {
+    let mut ram = vec![0u8; 0x80000];
+    // movz x1, #5          = 0xD28000A1   (a = 5)
+    // movn x2, #0          = 0x92800002   (b = 0xFFFF…FFFF)
+    // adds x1, x1, x2      = 0xAB020021   (5 + MAX = 4, C SET)
+    // adcs x11, xzr, xzr   = 0xBA1F03EB   (0 + 0 + C = 1 expected)
+    // adcs x12, xzr, xzr   = 0xBA1F03EC   (0 + 0 + C' where C' from the
+    //                                       first adcs: 0+0+1 = 1 → C'=0
+    //                                       → x12 = 0)
+    // hlt                  = 0xD4400000
+    let code: [u32; 6] = [0xD28000A1, 0x92800002, 0xAB020021, 0xBA1F03EB, 0xBA1F03EC, 0xD4400000];
+    for (i, w) in code.iter().enumerate() {
+        ram[0x10000 + i * 4..0x10004 + i * 4].copy_from_slice(&w.to_le_bytes());
+    }
+    let mut cpu = Interpreter::new(Box::new(Ram(ram)));
+    cpu.nzcv = 0; // C clear before the adds
+    cpu.set_reset_vector(0x10000);
+    let res = cpu.run(a13_cpu::InterpBudget { max_insn: 100, max_ns: 1_000_000_000 });
+    assert_eq!(res.stop, StopReason::Halted);
+    assert_eq!(cpu.x[1], 4, "5 + MAX = 4, got {:#x}", cpu.x[1]);
+    assert_eq!(cpu.x[11], 1, "adcs x11, xzr, xzr with C=1 must be 1, got {:#x}", cpu.x[11]);
+    assert_eq!(cpu.x[12], 0, "0 + 0 + 0 = 0 (C cleared by the first adcs), got {:#x}", cpu.x[12]);
+}
+
 /// Minimal flat RAM for the flag micro-test (same shape as the sha512 KAT).
 struct Ram(Vec<u8>);
 impl MemAccess for Ram {

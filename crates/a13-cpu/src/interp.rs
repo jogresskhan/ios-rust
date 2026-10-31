@@ -1052,7 +1052,18 @@ impl Interpreter {
         let (a, b) = (a & mask, b & mask);
         let (res, cf, vf) = if sub {
             let res = a.wrapping_sub(b).wrapping_sub(!carry_in as u64);
-            let cf = a >= b + (!carry_in as u64);
+            // REAL-DATA BUG #51 (M5/session T): the old form
+            // `a >= b + (!carry_in as u64)` WRAPS when b == u64::MAX and the
+            // carry-in is clear (borrow-in) — the u64 sum collapses to 0 and
+            // the compare reported C=1 for a limb that DID borrow
+            // (0 − 0xFFFF…FFFF − 1 = 0 WITH borrow-out). Every other word
+            // of a corecrypto SBCS chain over a run of 0xFF…FF limbs then
+            // lost its borrow, the reciprocal invariant check failed, and
+            // the FIPS POST aborted: "internal error, file radar to
+            // (corecrypto | all)" at boot insn 155,746,479. Overflow-safe
+            // form: no-borrow-out ⟺ a > b || (a == b && borrow-in == 0).
+            let borrow_in = !carry_in as u64;
+            let cf = a > b || (a == b && borrow_in == 0);
             let vf = ((a ^ b) & (a ^ res)) >> (if is64 { 63 } else { 31 }) & 1 == 1;
             (res, cf, vf)
         } else {

@@ -1116,3 +1116,20 @@ workspace tests 0 failed):**
   entry (cczp mod-inv / mod-mul over the ORDER) directly.
 * Tests: **481 passed / 0 failed** (+2 ADCS edge pins, +3 fuzz suites,
   +1 loop replay; the sign repro is the ignored diagnostic).
+### Session U — twin workstream record (merged from origin/main df7c84a/38b78cf; parallel session, same #52 fix as a two-step overflowing_add)
+
+**Its unique findings (kept for the record):** the fipspost error
+composition is **err = rc − 1000·phase** over 17 phases (phase 7 =
+fipspost_post_ecdsa 0x82a4b74; wrapper −18 → phase −75 → POST −7075; the
+panic's printed %d is STALE x1 — the true rc read at the 0x82a05e8
+composition stop: x8=−7000, x22=−75). The RSA key dump decoded (n=p·q
+@+0x18, p@+0x438, q@+0x558, dp@+0x660, dq@+0x6e0, qinv@+0x760,
+**e=3**) with the python CRT oracle (S³ mod n == m ✓). KATs added:
+tests/fips_rsa_kat.rs (the kernel's own ccn_add 0x82cbcd0 reproduced
+the measured diff pre-fix) + tests/fips_ecdsa_kat.rs (field cores
+mul 0x82b6020 = a·b·R⁻¹ mod p ✓, sqr 0x82b6260 = a²·R⁻¹ mod p ✓).
+Its #53 theory ("the generated point is NOT on the curve") was
+DISPROVEN by session V: the keygen, k·G and r were all correct; the
+real root was the INS-general 32-bit truncation in the mod-n Barrett
+shifter (closed above).
+

@@ -1330,3 +1330,50 @@ build; fetch_fixtures.py's 13.7 URL serves the *test-suite* fixtures — the
   plumbing), same recipe.
 * `cargo test --workspace`: **463 passed / 0 failed** (+2
   fips_aes_ecb_kat, +1 ignored step tool).
+
+## Session U (2026-10-31) — bug #52 CLOSED (ADCS carry wrap, the ADD side)
+
+**REAL-DATA BUG #52:** `add_with_flags`' ADD path computed the 64-bit carry-out
+as `res < a` — which wraps exactly when `b == u64::MAX` and the carry-in is
+set (`a + 0xFFFF…FFFF + 1 = a + 2^64 ≡ a`, so `res == a` read C=0 for a true
+carry of 1). The FIPS-POST RSA self-check's PKCS#1 type-01 padded input
+carries a 24-limb run of `0xFF…FF` (limbs 7..30); every ADCS of corecrypto's
+unrolled chains over that run with carry-in 1 dropped its carry, the following
+limb landed −1, and the carry self-restored — the measured 6-limb stride-2 −1
+diff at the sign/verify compare (boot insn 180,993,288, sign ret −27).
+
+* **Repro (tests/fips_rsa_kat.rs):** the kernel's own `ccn_add`
+  (0x82cbcd0 — Duff's-device unrolled ADCS chain, return read via
+  `adc w0, w0, w0`) over the captured padded-input limbs (all-ones run
+  7..19) with a deterministic s operand — pre-fix it fails with EXACTLY
+  the measured signature: limbs 8,10,12,14,16,18 each −1 and the carry
+  return 0 instead of 1. `ccn_add1` (0x82cbd88) and `ccn_mul1`
+  (0x82b05d8) pinned immune (their ADCS carry latches use b=xzr /
+  value-only semantics). The ADCS edge itself pinned by
+  `adcs_max_carry_edge` (keystone-assembled).
+* **RSA key dump fully decoded** (session-T/rsa_key_0x600.bin, 0x800 B):
+  cczp headers {n, bitlen, hd} + units — n = p·q @+0x18, p @+0x438,
+  q @+0x558, dp @+0x660, dq @+0x6e0, qinv @+0x760, **e = 3**
+  (corecrypto fipspost test key). Python CRT oracle self-check:
+  S³ mod n == m ✓ (scripts/re/rsa52_key.py + rsa52_oracle.json).
+* **Fix:** overflow-safe two-step carry (`a.overflowing_add(b)` then
+  `.overflowing_add(cin)`; 32-bit path unchanged — it cannot wrap).
+* **Frontier: 181,012,637 → 186,277,728.** The POST now runs its LATER
+  tests. **BUG #53 OPEN:** fipspost_post_ecdsa (phase 7; POST return
+  −7075 = −75 − 7000; the panic's %d arg is STALE x1 garbage — the real
+  rc comes from the stop at 0x82a05e8: x8=−7000, x22=−75):
+  ccec_generate_key_fips (0x82db720) → generate 0x82b0608 OK →
+  validate 0x82c3cb0 → 0x82c5244 sets the fail flag — the generated
+  point is NOT on the P-256 curve.
+* **P-256 field cores VERIFIED CORRECT** (tests/fips_ecdsa_kat.rs,
+  Montgomery oracle): mul 0x82b6020 = a·b·R⁻¹ mod p, sqr 0x82b6260 =
+  a²·R⁻¹ mod p. Probes: 1·1 = R⁻¹, (b·R)·1 = b, 2·3 = 6·R⁻¹; the key
+  ctx (0x77c2338) stores b in MONTGOMERY form @+0x60 while Gx/Gy are
+  plain — so a domain conversion sits in the generate path (the
+  mul-by-constant thunk 0x82bd7d4 with the constant @0x7045a8, likely
+  R² mod p). Remaining #53 suspects: the reduce/convert fn 0x82b6f60
+  (3 fold rounds V ← V_hi + C0 + V_lo·(2³²−2¹⁶⁰) + branchless
+  conditional-subtract of [1, 0xFFFFFFFF00000000, MAX, 0xFFFFFFFF] —
+  exact semantics still open), the point-mult dispatcher 0x82bd568,
+  and the affine-conversion modular inverse.
+* 481 tests 0 failed (+5 fips_rsa_kat, +2 fips_ecdsa_kat).

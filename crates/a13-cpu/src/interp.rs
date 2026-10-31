@@ -1093,6 +1093,8 @@ impl Interpreter {
             // limb run). Overflow-safe form (proved: res == a with cin=1
             // forces b == MAX, which always carries; res > a with cin=1
             // forces no-wrap): cin set ⟺ res <= a; cin clear ⟺ res < a.
+            // [merge note: the twin session-U commit on origin/main fixed
+            //  the same wrap as a two-step overflowing_add — equivalent.]
             let cf = if is64 {
                 if carry_in {
                     res <= a

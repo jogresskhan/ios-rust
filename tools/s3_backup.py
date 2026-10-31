@@ -62,6 +62,7 @@ REPO_DIR = next(
         os.environ.get("IOS_RUST_REPO"),
         "/home/z/work/ios-rust",
         "/home/z/my-project/ios-rust/repo",
+        "/home/z/my-project/ios-rust-work/repo",
     ] if p and Path(p).joinpath(".git").exists()),
     "/home/z/work/ios-rust",
 )

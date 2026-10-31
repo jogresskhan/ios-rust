@@ -3,7 +3,7 @@
  "target_soc": "Apple T8030 (A13 Bionic)",
  "machine": "apple-t8030",
  "cpu": "apple-a13 (Lightning x2 + Thunder x4, ARMv8.4-A, AArch64-only)",
- "generated": "2026-10-31 session R",
+ "generated": "2026-10-31 session R part 3",
  "rubric": {
   "100": "proven by CI/test artifact",
   "90": "implemented + verified",
@@ -448,8 +448,8 @@
   }
  ],
  "tests": {
-  "total": 451,
-  "passing": 451
+  "total": 455,
+  "passing": 455
  },
  "sources": [
   "ChefKiss Inferno @cc4302a (hw/ device models, AGPL-3.0/GPL-2.0)",
@@ -459,5 +459,5 @@
   "restored_external 18A5351d decompilation (RE-FINDINGS.md, checkpoint 0x0104/0x065B/0x067E contract)",
   "ARM DDI 0487 (A64 encodings)"
  ],
- "tests_passed": 451
+ "tests_passed": 455
 }

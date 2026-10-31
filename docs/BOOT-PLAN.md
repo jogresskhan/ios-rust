@@ -843,3 +843,40 @@ pinned to; `boot-real` now honors its [fixtures-dir] arg):**
 * Tests: **451 passed / 0 failed** (+3: AES engine KAT, SHA-1 KAT repro
   ×2 groups; +1 ignored step-dump tool). Docs: PARITY session R,
   parity.json 451.
+
+## M5 — peripherals the real boot path touches  [~] (session R part 3 (2026-10-31): BUG #48 CLOSED IN-SESSION — REAL-DATA BUG #49, the SIMD EXT operand order + half-width concat, was the HMAC-SHA-512 root; frontier 155,053,017 → 155,673,736; all FIPS-POST HMAC vectors now PASS; BUG #50 OPEN = POST test 4 (−4075, ≈ aes_ecb) with the AES round instructions verified both directions against FIPS-197 C.1)
+
+**Part-3 evidence (same session, after #46/#47):**
+
+* The failing vector was HMAC-SHA-512 (64-byte digest). Repro
+  `tests/fips_sha512_kat.rs` runs the kernel's OWN NEON-generic SHA-512
+  compress (0xfffffff0082e67f0..0x82e7c84 — located via the sha512 di
+  struct @0x77c2ed0 whose init pointer tail-jumps there; K table
+  @0x7052640, adrp-patched to a local page; NO sha512h instructions in
+  the whole image — this is the generic-NEON implementation with
+  ror/eor/add rounds and an ext/ushr/shl SIMD schedule). Diverged at
+  block 1: the schedule's `ext v18.16b, v4.16b, v5.16b, #8` produced
+  (W8, 0) instead of (W9, W10).
+* **#49 root:** VExt built `(Rm.low8 : Rn.low8)` — operands swapped AND
+  only the low 8 bytes of each (every .16b EXT with index ≥ 8 zeroed its
+  high half). Fix: `result.B[i] = (Vn:Vm).B[i + imm4]` — Vn's full 16
+  bytes first, Vm's second, byte-indexed window. (A second slip — the
+  byte offset multiplied by 8 again in the rewrite — was caught
+  immediately by the new `fips_ext_micro` test; both are now pinned.)
+* AES-128 DECRYPT through real AESD/AESIMC/EOR words added to
+  `tests/aes_vaes_kat.rs` — FIPS-197 C.1 inverse round-trips. Notable
+  measured asymmetry: the decrypt feed schedule is the PLAIN rk_r
+  (AddRoundKey precedes InvMixColumns in the FIPS InvCipher), unlike
+  encrypt's aesimc(rk_r).
+* **Frontier:** the POST's KAT memcmp loop now completes with ZERO
+  failures (the stop at the fail branch never fires), and the boot
+  advances to insn **155,673,736** where fipspost_post returns **−4075**
+  = test 4 KAT failure (per the corecrypto test order ≈ aes_ecb; tests
+  1-3 = hmac/integrity/indicator pass). BUG #50 OPEN: the AES round
+  instructions are verified both directions — the miss is in the ECB
+  mode glue, the kernel's key-schedule expansion, or the KAT plumbing.
+  Next block: same recipe — locate fipspost_post_aes_ecb (or the 18C66
+  equivalent of test 4), extract the KAT key/plaintext/ciphertext,
+  repro through the engine, bisect.
+* Tests: **455 passed / 0 failed** (+2 SHA-512 KAT, +1 AES decrypt KAT,
+  +1 EXT micro, +1 ignored SHA-512 step tool).

@@ -1249,3 +1249,25 @@ build; fetch_fixtures.py's 13.7 URL serves the *test-suite* fixtures — the
   0x80 B), per-insn step-dump test (ignored) kept as a tool.
 * `cargo test --workspace`: **451 passed / 0 failed** (+1 AES KAT, +2
   SHA-1 KAT repro, +1 step-dump ignored tool).
+
+### Session R part 3 (2026-10-31, same session) — #48 closed as REAL-DATA BUG #49; POST now passes every HMAC vector
+
+* **#49 (fixed):** SIMD EXT built `(Rm.low8 : Rn.low8)` — operands
+  swapped and only 8 bytes of each operand; every `.16b` EXT with index
+  ≥ 8 zeroed its high half. The kernel's SHA-512 schedule
+  `ext v18.16b, v4.16b, v5.16b, #8` read (W8, 0) instead of (W9, W10).
+  Fixed to `result.B[i] = (Vn:Vm).B[i+imm4]` (Vn first, full width).
+  Repro chain: fips_sha512_kat.rs (the kernel's own NEON-generic
+  SHA-512 compress, 0x82e67f0..0x82e7c84, K @0x7052640) + step dump +
+  fips_ext_micro (which also caught the byte-offset slip in the first
+  fix attempt).
+* AES-128 decrypt through real AESD/AESIMC/EOR words verified (FIPS-197
+  C.1 inverse; plain rk_r decrypt feed — asymmetry with encrypt's
+  aesimc(rk_r) documented in the test).
+* **Frontier: 155,673,736** — fipspost_post −4075 (test 4, ≈ aes_ecb);
+  the KAT memcmp loop completes with zero failures (all HMAC vectors
+  pass: SHA-1, SHA-256, SHA-512, …). BUG #50 OPEN — the AES round
+  instructions are verified; the miss is in the ECB glue / key-schedule
+  expansion / KAT plumbing. Engine smoke frontier now three walls past
+  session Q.
+* `cargo test --workspace`: **455 passed / 0 failed**.

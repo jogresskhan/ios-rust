@@ -1132,7 +1132,8 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
             if va == 0 {
                 continue;
             }
-            let mut buf = [0u8; 0x40];
+            let want: usize = if *reg == 19 { 0x80 } else { 0x40 };
+            let mut buf = vec![0u8; want];
             let mut line = format!("M5-P stop-memdump x{i} @ {va:#x}:");
             let mut got = 0usize;
             for (off, chunk) in buf.chunks_mut(8).enumerate() {

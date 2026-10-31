@@ -792,3 +792,54 @@ workspace tests 0 failed):**
 * Also in this session: the session-RAM bounding fixes (console sink cap,
   drain_serial take-not-clone, trace_tick env caching, s3_backup
   streaming+prune) — see the fix(ram) commit.
+
+## M5 — peripherals the real boot path touches  [~] (session R 2026-10-31: the never-done re-run — TWO more engine bugs closed: #46 LD1-multi-register was LD4-interleaved (THE HMAC-SHA1 KAT root — session Q's SHA fix was correct), #47 AESE/AESD ran keyless (THE RNG-init wall — the AES-XTS early PRNG emitted one constant block); frontier 155,032,147-panic → 155,053,017; next wall = BUG #48 the portable-C HMAC-SHA-512 KAT)
+
+**Session R evidence (release build, IOS_RUST_DRAM_MB=1024, fixtures =
+freshly range-fetched iOS 14.3 / 18C66 — the build the RE addresses are
+pinned to; `boot-real` now honors its [fixtures-dir] arg):**
+
+* **Fixtures pinning measured:** the 13.7 EDT ships NO /chosen/lock-regs
+  (byte-search: 0 hits for lock-regs/aperture/amcc/ctrr) — the 14.3 EDT
+  ships the subtree STUB-EMPTY exactly as the #41 note says. The prior
+  "lock-regs node not found" failure was a fixture-build mismatch, not a
+  staging bug; the error message now names the pinning.
+* **#46 (the Q re-run verdict):** with the SHA ops fixed the KAT STILL
+  failed at the identical insn 155,032,147 — computed 6c829016… vs
+  expected 886eae70…. New repro test runs the kernel's OWN SHA-1 vng
+  compress (0x82c16f0..0x82c1b64, 285 words) with the real KAT key/msg:
+  diverges at block 1 → per-insn step dump → `ld1 {v0..v3}, [x2], #64`
+  loaded v0 = W[0,16,32,48] — the interleaved LD4 layout applied to LD1.
+  LD1/ST1 (op4 2/6/7/A) copy each register from a CONTIGUOUS structure;
+  only LD2/LD3/LD4 (op4 8/4/0) interleave. Lossless across spill
+  round-trips (why the boot survived), fatal to layout consumers.
+* **#47:** after #46 the RNG init panicked −10 = CCERR_OUT_OF_ENTROPY.
+  0x82b8668 = read_random health check (nonce 32 B + entropy 64 B must
+  differ; ct_equal at 0x82d48cc returns nonzero on DIFFER). Stop-dump:
+  the PRNG emitted ONE 16-byte block repeated — the interpreter's Vaes
+  read the state from Vn and passed key=0 (the EOR Vn of AESE/AESD
+  dropped) → every AES round keyless → AES-XTS early PRNG constant.
+  Fixed per ARM DDI/QEMU; FIPS-197 C.1 through real AESE/AESMC/EOR words
+  in tests/aes_vaes_kat.rs (ARM-feed schedule: middle round keys
+  pre-InvMixColumns'd — the AESMC after AESE pulls MixColumns over the
+  key; verified against scripts/aes_check.py variant B).
+* **Frontier:** HMAC-SHA1 KAT MATCHES, RNG init passes, boot advances to
+  insn 155,053,017: fipspost_post −1075 on a LATER vector —
+  **HMAC-SHA-512** (BUG #48 OPEN). Portable C (no vng SHA-512 in the
+  image — 10 sha512-family words total). Computed 4d14f3ea… vs expected
+  5705bfd5…; vectors at rodata key@0x73c34bc (110 B), msg@0x73c352b
+  (128 B), digest@0x73c35ac; di struct @0x77c2ed0 (IV @0x7051cf8,
+  init/final ≈0x82e3774/0x82de00c PAC'd); K tables @0x7051690/0x7052640,
+  NO direct ADRP (chained-fixup GOT — the K-base pointer must be read
+  from running memory or the GOT decoded to find the compress).
+* **Next block (M5/session S):** locate the portable-C SHA-512 compress
+  (GOT walk via running-memory dumps, or a cchmac-call repro in the
+  fips_hmac_kat.rs style with the extracted key/msg and the resolved di
+  struct), bisect the first wrong instruction (same
+  decode-verified-never-value-verified class), fix, and re-run — the
+  FIPS POST is the last corecrypto gate before the boot proceeds into
+  the kext/IOKit bring-up that M5's device census then re-measures, and
+  M6 (DSC → dyld → launchd → SpringBoard → GUI) opens behind it.
+* Tests: **451 passed / 0 failed** (+3: AES engine KAT, SHA-1 KAT repro
+  ×2 groups; +1 ignored step-dump tool). Docs: PARITY session R,
+  parity.json 451.

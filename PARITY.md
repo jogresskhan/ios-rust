@@ -1193,3 +1193,59 @@ and the suite ran against the real bytes.
   Not related to the SHA fix (authinstall untouched by session Q).
 * Everything else in the real-bytes run passed up to that test; the
   plain `ci` workflow is green on main at e979193.
+
+### Session R (2026-10-31) — the re-run that was never done: TWO more engine bugs, FIPS POST frontier moves twice
+
+The session-Q closeout said "re-run the real boot" — this session did, on
+freshly fetched **18C66 (iOS 14.3) fixtures** (the boot's actual pinned
+build; fetch_fixtures.py's 13.7 URL serves the *test-suite* fixtures — the
+13.7 EDT ships no /chosen/lock-regs at all, which is what the earlier
+"lock-regs node not found" stop actually was; `boot-real` now honors its
+[fixtures-dir] CLI arg instead of silently ignoring it).
+
+* **REAL-DATA BUG #46 (fixed):** `ld1/st1` multiple-structures used the
+  LD4-interleaved layout for ALL op4 values. op4 {2,6,7,A} are LD1/ST1 —
+  each register copies one CONTIGUOUS structure. The wrong layout was
+  lossless across st1/ld1 spill round-trips (why 155M insns of kernel NEON
+  survived) but corrupted every layout consumer: the kernel's SHA-1 vng
+  `ld1 {v0..v3}, [x2], #64` fed the schedule v0=W[0,16,32,48]… and the
+  FIPS POST HMAC-SHA1 KAT computed 6c829016… instead of 886eae70….
+  Isolated by a per-insn step dump; fixed; repro
+  `tests/fips_hmac_kat.rs` runs the kernel's OWN SHA-1 vng compress bytes
+  (0x82c16f0..0x82c1b64) with the real KAT key/message — all 4 inner + 2
+  outer chaining states now match the reference.
+* **REAL-DATA BUG #47 (fixed):** AESE/AESD ran keyless — the interpreter
+  read the state from Vn (the round key!) and passed key=0, dropping the
+  `EOR Vn` that is part of the instruction (ARM DDI 0487 / QEMU
+  crypto_aese). Every kernel AES round ran keyless → the AES-XTS early
+  PRNG emitted ONE constant 16-byte block → read_random's stuck-output
+  health test (cc_constant_time_equal at 0x82d48cc) → CCERR_OUT_OF_ENTROPY
+  (−10) → "corecrypto kext RNG initialization failure". Fixed; FIPS-197
+  C.1 verified three ways (unit test with the ARM-feed schedule — middle
+  round keys pre-InvMixColumns'd — the new engine test
+  `tests/aes_vaes_kat.rs` through real AESE/AESMC/EOR words, and the
+  parity aes_exec golden on a zero key).
+* **BUG #45 (fixed):** a dead experimental mask in LdStMult
+  (`0xFu128 << r*64 << …`) overflow-panicked debug builds on every 4-reg
+  LD1 — removed.
+* **Frontier (measured):** FIPS POST HMAC-SHA1 vector 0 now MATCHES
+  (stop-memdump at the memcmp: computed == expected 886eae70…), the RNG
+  init passes, and the boot advances to insn **155,053,017** where
+  fipspost_post returns −1075 for a LATER vector: **HMAC-SHA-512**.
+* **BUG #48 (OPEN):** the 18C66 kernel has NO vng SHA-512 (10
+  sha512-family words in the whole image → portable C), which computes
+  4d14f3ea1ae4df05… vs expected 5705bfd5854b7cc3…b8c3. All RE data
+  gathered: key 110 B @0x73c34bc, msg 128 B @0x73c352b, expected digest
+  @0x73c35ac (python hmac reproduces the tag), sha512 di struct
+  @0x77c2ed0 (0x40 B: {out=64, state=64, block=128, 11, ?, IV@0x7051cf8,
+  init≈0x82e3774, final≈0x82de00c — PAC'd in running memory), K tables
+  @0x7051690/0x7052640 with NO direct ADRP (chained-fixup GOT), and the
+  memcmp fail branch at 0x82a4e2c catches the vector with
+  IOS_RUST_STOP_PC_RANGE. Next: locate the portable-C compress (GOT walk
+  or cchmac-call repro like fips_hmac_kat.rs), run it with the extracted
+  key/msg, and bisect the first wrong instruction — the same
+  decode-verified-but-never-value-verified class as #43/#46/#47.
+* Diagnostics: stop-memdump extended (sp/sp+0x20 frame dump + x19 at
+  0x80 B), per-insn step-dump test (ignored) kept as a tool.
+* `cargo test --workspace`: **451 passed / 0 failed** (+1 AES KAT, +2
+  SHA-1 KAT repro, +1 step-dump ignored tool).

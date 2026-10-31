@@ -1093,7 +1093,41 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
     // dump 0x40 bytes at each of x0/x1/x2 (the KAT memcmp computed/expected
     // pointers land there) — bounded, report-only, zero behavior drift.
     if std::env::var("IOS_RUST_STOP_DUMP_MEM").ok().as_deref() == Some("1") {
-        for (i, reg) in [0usize, 1, 2].iter().enumerate() {
+        // M5-R addendum: also dump 0x40 B at sp and sp+0x20 — the fipspost
+        // KAT computed buffer lives at sp+0x20 of the memcmp frame, which
+        // the fail-branch stop can't reach through x0 (memcmp clobbers it).
+        let mut extra = vec![cpu.sp, cpu.sp + 0x20];
+        extra.sort_unstable();
+        extra.dedup();
+        for sp_va in extra {
+            if sp_va == 0 {
+                continue;
+            }
+            let mut buf = [0u8; 0x40];
+            let mut line = format!("M5-R stop-framedump sp @ {sp_va:#x}:");
+            let mut got = 0usize;
+            for (off, chunk) in buf.chunks_mut(8).enumerate() {
+                if let Ok(pa) = cpu.debug_walk(
+                    sp_va + (off * 8) as u64,
+                    a13_cpu::mmu::XlateKind::Load,
+                ) {
+                    cpu.mem().read_bytes(pa, chunk);
+                    got += chunk.len();
+                }
+            }
+            if got == 0 {
+                line.push_str(" <unmapped>");
+            } else {
+                for (k, b) in buf.iter().take(got).enumerate() {
+                    if k % 16 == 0 {
+                        line.push_str(&format!("\n    +{:02x}:", k));
+                    }
+                    line.push_str(&format!(" {b:02x}"));
+                }
+            }
+            println!("{line}");
+        }
+        for (i, reg) in [0usize, 1, 2, 19].iter().enumerate() {
             let va = cpu.x[*reg];
             if va == 0 {
                 continue;

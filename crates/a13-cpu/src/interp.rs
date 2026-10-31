@@ -4362,13 +4362,18 @@ impl Interpreter {
             }
             Insn::Vaes { vd, vn, op } => {
                 self.group_exec[10] += 1;
-                // The crypto helpers use the BE byte convention (state
-                // byte 0 = bits 120:127, matching the FIPS vectors); the
-                // register file is LE (lane 0 = LSB) — convert both ways.
-                let s = u128::from_be_bytes(self.v.v[vn as usize].to_le_bytes());
+                // REAL-DATA BUG #47: the state operand of AESE/AESD is Vd
+                // (read-modify-write) and Vn is the ROUND KEY — the old
+                // code read the state from Vn and passed key=0, running
+                // every kernel AES round keyless. The crypto helpers use
+                // the BE byte convention (state byte 0 = bits 120:127,
+                // matching the FIPS vectors); the register file is LE
+                // (lane 0 = LSB) — convert both ways, for BOTH operands.
+                let s = u128::from_be_bytes(self.v.v[vd as usize].to_le_bytes());
+                let k = u128::from_be_bytes(self.v.v[vn as usize].to_le_bytes());
                 let r = match op {
-                    AesOp::Ese => crypto::aese(s, 0),
-                    AesOp::Esd => crypto::aesd(s, 0),
+                    AesOp::Ese => crypto::aese(s, k),
+                    AesOp::Esd => crypto::aesd(s, k),
                     AesOp::Emc => crypto::aesmc(s),
                     AesOp::Eimc => crypto::aesimc(s),
                 };

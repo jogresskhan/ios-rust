@@ -148,11 +148,13 @@ fn aes_exec() {
     let expect: [u8; 16] = [
         0x63, 0x53, 0xE0, 0x8C, 0x09, 0x60, 0xE1, 0x04, 0xCD, 0x70, 0xB7, 0x51, 0xBA, 0xCA, 0xD0, 0xE7,
     ];
-    // ldr q0, [x2]; aese v0.16b, v0.16b; str q0, [x2]; hlt
+    // ldr q0, [x2]; aese v0.16b, v1.16b (v1 = 0 → pure SubBytes+ShiftRows
+    // golden; the EOR Vn is part of AESE per ARM — REAL-DATA BUG #47);
+    // str q0, [x2]; hlt
     let code = [
         0xD284_0002, // movz x2, #0x2000
         0x3DC0_0040, // ldr q0, [x2]
-        0x4E28_4800, // aese v0.16b, v0.16b
+        0x4E28_4820, // aese v0.16b, v1.16b
         0x3D80_0040, // str q0, [x2]
         HLT,
     ];

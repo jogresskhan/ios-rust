@@ -67,10 +67,13 @@ fn gmul(a: u8, b: u8) -> u8 {
     p as u8
 }
 
-/// AESE Vd.16B, Vn.16B — SubBytes + ShiftRows round (ARM "AES single round
-/// encryption"; note: ARM's AESE *precedes* the key add, matching FIPS-197
-/// round composition when the guest adds the round key after).
-pub fn aese(state: u128, _key: u128) -> u128 {
+/// AESE Vd.16B, Vn.16B — SubBytes + ShiftRows, then EOR the round key Vn
+/// (ARM DDI 0487: `Vd = ShiftRows(SubBytes(Vd)) EOR Vn`). REAL-DATA BUG
+/// #47: the key was ignored (`_key`) and the interpreter even passed 0 —
+/// every AESE ran keyless, so the kernel's AES-XTS early PRNG emitted one
+/// constant 16-byte block, `read_random`'s stuck-output health test fired,
+/// and corecrypto panicked "RNG initialization failure (−10)".
+pub fn aese(state: u128, key: u128) -> u128 {
     let b = state.to_be_bytes();
     let mut out = [0u8; 16];
     // ShiftRows then SubBytes (ARM order: SubBytes applies to shifted state)
@@ -79,11 +82,11 @@ pub fn aese(state: u128, _key: u128) -> u128 {
             out[c * 4 + r] = AES_SBOX[b[((c + r) & 3) * 4 + r] as usize];
         }
     }
-    u128::from_be_bytes(out)
+    u128::from_be_bytes(out) ^ key
 }
 
-/// AESD Vd.16B, Vn.16B — InvShiftRows + InvSubBytes round.
-pub fn aesd(state: u128, _key: u128) -> u128 {
+/// AESD Vd.16B, Vn.16B — InvShiftRows + InvSubBytes, then EOR Vn.
+pub fn aesd(state: u128, key: u128) -> u128 {
     let b = state.to_be_bytes();
     let mut out = [0u8; 16];
     for c in 0..4 {
@@ -91,7 +94,7 @@ pub fn aesd(state: u128, _key: u128) -> u128 {
             out[c * 4 + r] = AES_INV_SBOX[b[((c + 4 - r) & 3) * 4 + r] as usize];
         }
     }
-    u128::from_be_bytes(out)
+    u128::from_be_bytes(out) ^ key
 }
 
 /// AESMC — MixColumns.
@@ -600,24 +603,26 @@ mod tests {
             rk = u128::from_be_bytes(nb);
             round_keys[r] = rk;
         }
-        // Standard round order (verified against pycryptodome + FIPS-197):
-        // s = pt ^ rk0; 9×(AESE; AESMC; ^rk); final AESE ^ rk10.
-        // (AESE = SubBytes+ShiftRows, AESMC = MixColumns — the guest adds
-        // the round key after the MixColumns, matching the ARM sequence.)
+        // Standard ARM round order (FIPS-197 C.1, verified against the
+        // reference implementation in scripts/aes_check.py): s = pt ^ rk0;
+        // 9×(AESE k_r; AESMC); final AESE k10. AESE = SubBytes+ShiftRows+
+        // EOR(Vn), so the AESMC that follows pulls MixColumns over the key
+        // too — the middle round keys must be pre-InvMixColumns'd
+        // (k_r = AESIMC(rk_r), r=1..9) and the final key stays plain.
+        // (REAL-DATA BUG #47: the EOR(Vn) used to be dropped entirely.)
         s ^= round_keys[0];
         for r in 1..10 {
-            s = aese(s, 0);
+            s = aese(s, aesimc(round_keys[r]));
             s = aesmc(s);
-            s ^= round_keys[r];
         }
-        s = aese(s, 0) ^ round_keys[10];
+        s = aese(s, round_keys[10]);
         assert_eq!(s, expect, "AES-128 FIPS-197 C.1");
         // AESIMC(AESMC(x)) round-trip on the FIPS state
         assert_eq!(aesimc(aesmc(pt)), pt);
-        // AESD inverts AESE (InvSubBytes + InvShiftRows) — the guest adds
-        // round keys around the pair, the pair itself is key-free.
+        // AESD inverts AESE only when the round key is zero: with a key,
+        // the EOR sits INSIDE the inverse S-box and cannot cancel.
         assert_eq!(aesd(aese(pt, 0), 0), pt);
-        assert_eq!(aesd(aesimc(aesmc(pt)), 0), aesd(pt, 0));
+        assert_ne!(aesd(aese(pt, key), key), pt);
     }
 
     #[test]

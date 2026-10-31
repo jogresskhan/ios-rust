@@ -2804,126 +2804,219 @@ impl Interpreter {
             }
             Insn::VSha1H { rd, rn } => {
                 self.group_exec[2] += 1;
+                // SHA1H Sd, Sn (scalar): result = ROR(Sn, 2) in lane 0; a
+                // write to an S register zero-extends, so the upper lanes
+                // clear (AArch64 scalar-write rule, matches QEMU).
                 let v = self.v.lane(rn, 0, 2) as u32;
-                self.v.set_lane(rd, 0, 2, v.rotate_left(30) as u64);
+                self.v.v[rd as usize] = (v.rotate_right(2) as u128) & 0xFFFF_FFFF;
             }
             Insn::VSha1Su1 { vd, vn } => {
                 self.group_exec[2] += 1;
+                // QEMU crypto_sha1su1 — bug #43: the old model was a
+                // 3-term XOR with rotations; the real instruction is a
+                // 2-term ROL(1), and lane 3 folds in the ALREADY-UPDATED
+                // lane 0 (sequential dependency — W[t] feeds W[t+3]).
                 let d = self.v.v[vd as usize];
                 let n = self.v.v[vn as usize];
                 let lane = |v: u128, i: u32| -> u32 { ((v >> (i * 32)) & 0xFFFF_FFFF) as u32 };
-                let mut r: u128 = 0;
-                for i in 0..4u32 {
-                    let t = lane(d, i) ^ lane(n, (i + 1) % 4) ^ lane(n, i).rotate_right(2);
-                    r |= (t as u128) << (i * 32);
-                }
-                self.v.v[vd as usize] = r;
+                let l0 = (lane(d, 0) ^ lane(n, 1)).rotate_left(1);
+                let l1 = (lane(d, 1) ^ lane(n, 2)).rotate_left(1);
+                let l2 = (lane(d, 2) ^ lane(n, 3)).rotate_left(1);
+                let l3 = (lane(d, 3) ^ l0).rotate_left(1);
+                self.v.v[vd as usize] = (l0 as u128)
+                    | ((l1 as u128) << 32)
+                    | ((l2 as u128) << 64)
+                    | ((l3 as u128) << 96);
             }
             Insn::VSha256Su0 { vd, vn } => {
                 self.group_exec[2] += 1;
+                // QEMU crypto_sha256su0: d0 += s0(d1); d1 += s0(d2);
+                // d2 += s0(d3); d3 += s0(m0) — the wraparound term is what
+                // the old model missed entirely.
                 let d = self.v.v[vd as usize];
+                let m = self.v.v[vn as usize];
                 let lane = |v: u128, i: u32| -> u32 { ((v >> (i * 32)) & 0xFFFF_FFFF) as u32 };
                 let sig0 = |x: u32| x.rotate_right(7) ^ x.rotate_right(18) ^ (x >> 3);
-                let mut r: u128 = 0;
-                for i in 0..4u32 {
-                    let t = sig0(lane(d, i)).wrapping_add(lane(d, (i + 3) % 4));
-                    r |= (t as u128) << (i * 32);
-                }
-                self.v.v[vd as usize] = r;
+                let out = [
+                    lane(d, 0).wrapping_add(sig0(lane(d, 1))),
+                    lane(d, 1).wrapping_add(sig0(lane(d, 2))),
+                    lane(d, 2).wrapping_add(sig0(lane(d, 3))),
+                    lane(d, 3).wrapping_add(sig0(lane(m, 0))),
+                ];
+                self.v.v[vd as usize] = (out[0] as u128)
+                    | ((out[1] as u128) << 32)
+                    | ((out[2] as u128) << 64)
+                    | ((out[3] as u128) << 96);
             }
             Insn::VSha1Cpm { vd, vn, vm, op } => {
                 self.group_exec[2] += 1;
+                // QEMU crypto_sha1_3reg — bug #43 (the FIPS HMAC-SHA1 KAT
+                // wall). The old model ran ONE round off Vm lane 0 with a
+                // ROR(a,2) fold and packed the result one lane up. The real
+                // instruction runs FOUR rounds (Vm lanes 0..3), E arrives as
+                // the SCALAR Vn.S[0] (Vn is not written back), the round is
+                // T = f(B,C,D) + ROTL(A,5) + E + W, and the state rotates
+                // (A,B,C,D,E) -> (T, A, ROR(B,2), C, D).
                 use crate::decode::Sha1CpmOp as SO;
-                let d = self.v.v[vd as usize];
-                let lane = |v: u128, i: u32| -> u32 { ((v >> (i * 32)) & 0xFFFF_FFFF) as u32 };
-                let (a, b, c, d4) = (lane(d, 0), lane(d, 1), lane(d, 2), lane(d, 3));
-                let e = self.v.lane(vn, 0, 2) as u32;
-                let w = self.v.lane(vm, 0, 2) as u32;
-                let f = match op {
-                    SO::Ch => (b & c) | (!b & d4),
-                    SO::Parity => b ^ c ^ d4,
-                    SO::Maj => (b & c) | (b & d4) | (c & d4),
-                };
-                // ARM round: t = e + f + w + ror(a, 2); state shifts
-                let t = e.wrapping_add(f).wrapping_add(w).wrapping_add(a.rotate_right(2));
-                let mut r: u128 = t as u128;
-                r |= (a as u128) << 32;
-                r |= (b as u128) << 64;
-                r |= (c as u128) << 96;
-                self.v.v[vd as usize] = r;
-            }
-            Insn::VSha1Su0 { vd, vn, vm } => {
-                self.group_exec[2] += 1;
-                let d = self.v.v[vd as usize];
-                let n = self.v.v[vn as usize];
                 let m = self.v.v[vm as usize];
                 let lane = |v: u128, i: u32| -> u32 { ((v >> (i * 32)) & 0xFFFF_FFFF) as u32 };
-                let mut r: u128 = 0;
-                for i in 0..4u32 {
-                    let t = lane(m, i) ^ lane(d, (i + 2) % 4) ^ lane(n, i).rotate_right(2);
-                    r |= (t as u128) << (i * 32);
-                }
-                self.v.v[vd as usize] = r;
-            }
-            Insn::VSha256H { vd, vn, vm, h2 } => {
-                self.group_exec[2] += 1;
-                // 2 rounds of SHA256 compression; H uses Vm lanes 0-1, H2
-                // lanes 2-3. Both Qd (a..d) and Qn (e..h) are written back.
-                let lane = |v: u128, i: u32| -> u32 { ((v >> (i * 32)) & 0xFFFF_FFFF) as u32 };
-                let put = |i: u32, t: u32| (t as u128) << (i * 32);
-                let sig0 = |x: u32| x.rotate_right(2) ^ x.rotate_right(13) ^ x.rotate_right(22);
-                let sig1 = |x: u32| x.rotate_right(6) ^ x.rotate_right(11) ^ x.rotate_right(25);
-                let sml0 = |x: u32| x.rotate_right(7) ^ x.rotate_right(18) ^ (x >> 3);
-                let sml1 = |x: u32| x.rotate_right(17) ^ x.rotate_right(19) ^ (x >> 10);
-                let (mut a, mut b, mut c, mut d) = (
+                let (mut a, mut b, mut c, mut d4) = (
                     lane(self.v.v[vd as usize], 0),
                     lane(self.v.v[vd as usize], 1),
                     lane(self.v.v[vd as usize], 2),
                     lane(self.v.v[vd as usize], 3),
                 );
-                let (mut e, mut f, mut g, mut h) = (
-                    lane(self.v.v[vn as usize], 0),
-                    lane(self.v.v[vn as usize], 1),
-                    lane(self.v.v[vn as usize], 2),
-                    lane(self.v.v[vn as usize], 3),
-                );
-                let base = if h2 { 2u32 } else { 0 };
-                for i in 0..2u32 {
-                    let w = lane(self.v.v[vm as usize], base + i);
-                    let t1 = h
-                        .wrapping_add(sig1(e))
-                        .wrapping_add((e & f) ^ (!e & g))
-                        .wrapping_add(w);
-                    let t2 = sig0(a).wrapping_add((a & b) ^ (a & c) ^ (b & c));
-                    h = g;
-                    g = f;
-                    f = e;
-                    e = d.wrapping_add(t1);
-                    d = c;
-                    c = b;
+                let mut e = lane(self.v.v[vn as usize], 0);
+                for i in 0..4u32 {
+                    let f = match op {
+                        SO::Ch => (b & c) | (!b & d4),
+                        SO::Parity => b ^ c ^ d4,
+                        SO::Maj => (b & c) | (b & d4) | (c & d4),
+                    };
+                    let t = f
+                        .wrapping_add(a.rotate_left(5))
+                        .wrapping_add(e)
+                        .wrapping_add(lane(m, i));
+                    e = d4;
+                    d4 = c;
+                    c = b.rotate_right(2);
                     b = a;
-                    a = t1.wrapping_add(t2);
+                    a = t;
                 }
-                self.v.v[vd as usize] =
-                    put(0, a) | put(1, b) | put(2, c) | put(3, d);
-                self.v.v[vn as usize] =
-                    put(0, e) | put(1, f) | put(2, g) | put(3, h);
+                self.v.v[vd as usize] = (a as u128)
+                    | ((b as u128) << 32)
+                    | ((c as u128) << 64)
+                    | ((d4 as u128) << 96);
+            }
+            Insn::VSha1Su0 { vd, vn, vm } => {
+                self.group_exec[2] += 1;
+                // QEMU crypto_sha1su0, in 64-bit halves:
+                //   new lo = hi(d) ^ lo(d) ^ lo(m)
+                //   new hi = lo(n) ^ hi(d) ^ hi(m)
+                // (the old model XORed a rotated Vn lane into every lane)
+                let d = self.v.v[vd as usize];
+                let n = self.v.v[vn as usize];
+                let m = self.v.v[vm as usize];
+                let lo = |v: u128| (v & 0xFFFF_FFFF_FFFF_FFFF) as u64;
+                let hi = |v: u128| (v >> 64) as u64;
+                let new_lo = hi(d) ^ lo(d) ^ lo(m);
+                let new_hi = lo(n) ^ hi(d) ^ hi(m);
+                self.v.v[vd as usize] = new_lo as u128 | ((new_hi as u128) << 64);
+            }
+            Insn::VSha256H { vd, vn, vm, h2 } => {
+                self.group_exec[2] += 1;
+                // QEMU crypto_sha256h / crypto_sha256h2 — bug #43. The old
+                // model ran TWO rounds on half of Vm and wrote BOTH Vd and
+                // Vn. Reality: each instruction runs FOUR rounds on all of
+                // Vm and writes back ONLY Vd.
+                //
+                // sha256h:  Vd = a..d chain, Vn = e..h chain (read-only
+                // input; its evolution is recomputed by sha256h2). Each
+                // round: T1 = ch(e,f,g) + h + S1(e) + W; e' = d + T1;
+                // T2 = maj(a,b,c) + S0(a); a' = T1 + T2.
+                //
+                // sha256h2: Vd = e..h chain, Vn = the ORIGINAL a..d from
+                // before the matching sha256h (the caller keeps a copy —
+                // Linux does `mov dg2v.16b, dg0v.16b` first). The new
+                // e..h are rebuilt as n.lane[3-i] + T1_i from the ORIGINAL
+                // a..d lanes read in reverse.
+                let m = self.v.v[vm as usize];
+                let lane = |v: u128, i: u32| -> u32 { ((v >> (i * 32)) & 0xFFFF_FFFF) as u32 };
+                let put = |i: u32, t: u32| (t as u128) << (i * 32);
+                let big_s0 = |x: u32| x.rotate_right(2) ^ x.rotate_right(13) ^ x.rotate_right(22);
+                let big_s1 = |x: u32| x.rotate_right(6) ^ x.rotate_right(11) ^ x.rotate_right(25);
+                let cho = |x: u32, y: u32, z: u32| (x & y) ^ (!x & z);
+                let majs = |x: u32, y: u32, z: u32| (x & y) ^ (x & z) ^ (y & z);
+                let d = if h2 {
+                    // H2: e..h chain starts in Vd, original a..d in Vn
+                    let e = [
+                        lane(self.v.v[vd as usize], 0),
+                        lane(self.v.v[vd as usize], 1),
+                        lane(self.v.v[vd as usize], 2),
+                        lane(self.v.v[vd as usize], 3),
+                    ];
+                    let orig_abcd = [
+                        lane(self.v.v[vn as usize], 0),
+                        lane(self.v.v[vn as usize], 1),
+                        lane(self.v.v[vn as usize], 2),
+                        lane(self.v.v[vn as usize], 3),
+                    ];
+                    let mut dd = e;
+                    for i in 0..4u32 {
+                        let t = cho(dd[0], dd[1], dd[2])
+                            .wrapping_add(dd[3])
+                            .wrapping_add(big_s1(dd[0]))
+                            .wrapping_add(lane(m, i));
+                        dd[3] = dd[2];
+                        dd[2] = dd[1];
+                        dd[1] = dd[0];
+                        dd[0] = orig_abcd[(3 - i) as usize].wrapping_add(t);
+                    }
+                    dd
+                } else {
+                    // H: a..d chain in Vd, e..h chain in Vn (rolls locally
+                    // to feed the T1s; the final values are recomputed by
+                    // the paired sha256h2, so only Vd is written back).
+                    let mut dd = [
+                        lane(self.v.v[vd as usize], 0),
+                        lane(self.v.v[vd as usize], 1),
+                        lane(self.v.v[vd as usize], 2),
+                        lane(self.v.v[vd as usize], 3),
+                    ];
+                    let mut nn = [
+                        lane(self.v.v[vn as usize], 0),
+                        lane(self.v.v[vn as usize], 1),
+                        lane(self.v.v[vn as usize], 2),
+                        lane(self.v.v[vn as usize], 3),
+                    ];
+                    for i in 0..4u32 {
+                        let t1 = cho(nn[0], nn[1], nn[2])
+                            .wrapping_add(nn[3])
+                            .wrapping_add(big_s1(nn[0]))
+                            .wrapping_add(lane(m, i));
+                        nn[3] = nn[2];
+                        nn[2] = nn[1];
+                        nn[1] = nn[0];
+                        nn[0] = dd[3].wrapping_add(t1);
+                        let t2 = majs(dd[0], dd[1], dd[2]).wrapping_add(big_s0(dd[0]));
+                        let a_new = t1.wrapping_add(t2);
+                        dd[3] = dd[2];
+                        dd[2] = dd[1];
+                        dd[1] = dd[0];
+                        dd[0] = a_new;
+                    }
+                    dd
+                };
+                self.v.v[vd as usize] = put(0, d[0])
+                    | put(1, d[1])
+                    | put(2, d[2])
+                    | put(3, d[3]);
             }
             Insn::VSha256Su1 { vd, vn, vm } => {
                 self.group_exec[2] += 1;
-                let d = self.v.v[vd as usize];
+                // QEMU crypto_sha256su1 — sequential lanes: lane 2 uses the
+                // NEW lane 0 and lane 3 the NEW lane 1 (W[t]/W[t+1] feed
+                // W[t+2]/W[t+3]). The old model had no sequential terms and
+                // the wrong operand lanes.
+                let d0 = self.v.v[vd as usize];
                 let n = self.v.v[vn as usize];
                 let m = self.v.v[vm as usize];
                 let lane = |v: u128, i: u32| -> u32 { ((v >> (i * 32)) & 0xFFFF_FFFF) as u32 };
                 let sml1 = |x: u32| x.rotate_right(17) ^ x.rotate_right(19) ^ (x >> 10);
-                let mut r: u128 = 0;
-                for i in 0..4u32 {
-                    let t = lane(d, i)
-                        .wrapping_add(sml1(lane(n, (i + 1) % 4)))
-                        .wrapping_add(lane(m, i));
-                    r |= (t as u128) << (i * 32);
-                }
-                self.v.v[vd as usize] = r;
+                let mut d = [
+                    lane(d0, 0),
+                    lane(d0, 1),
+                    lane(d0, 2),
+                    lane(d0, 3),
+                ];
+                d[0] = d[0].wrapping_add(sml1(lane(m, 2))).wrapping_add(lane(n, 1));
+                d[1] = d[1].wrapping_add(sml1(lane(m, 3))).wrapping_add(lane(n, 2));
+                d[2] = d[2].wrapping_add(sml1(d[0])).wrapping_add(lane(n, 3));
+                d[3] = d[3].wrapping_add(sml1(d[1])).wrapping_add(lane(m, 0));
+                self.v.v[vd as usize] = (d[0] as u128)
+                    | ((d[1] as u128) << 32)
+                    | ((d[2] as u128) << 64)
+                    | ((d[3] as u128) << 96);
             }
             Insn::FpCmp { rn, rm, zero, e: _, double } => {
                 self.group_exec[4] += 1;
@@ -5089,6 +5182,294 @@ mod tests {
         cpu.set_reset_vector(0x100);
         let res = cpu.run(InterpBudget { max_insn: 10, max_ns: 1_000_000 });
         assert!(matches!(res.stop, StopReason::UnknownInsn { .. }));
+    }
+
+    // =====================================================================
+    // Bug #43 — SHA crypto VALUE semantics (oracle-verified, session Q).
+    //
+    // Ground truth chain: QEMU crypto_helper.c (verbatim port) + ARM A64
+    // ISA pseudocode + end-to-end reproduction of hashlib on both hash
+    // families (tools/re/oracle/derive_sha1_arm.py) + the Linux
+    // sha1-ce/sha2-ce caller choreography. The tests below drive the
+    // DECODER + EXECUTOR with real instruction words.
+    // =====================================================================
+
+    // Crypto 3-reg encodings (decode.rs "Session D" map, == OpenSSL table):
+    //   base 0x5E000000 | (Rm<<16) | (Rn<<5) | Rd, opcode at bits 15:10.
+    fn sha1_cpm_word(op: u32, rd: u8, rn: u8, rm: u8) -> u32 {
+        0x5E00_0000 | op | ((rm as u32) << 16) | ((rn as u32) << 5) | rd as u32
+    }
+    const SHA1C: u32 = 0; // field 0b000000
+    const SHA1P: u32 = 1 << 12; // field 0b000100
+    const SHA1M: u32 = 1 << 13; // field 0b001000
+    const SHA1SU0: u32 = (1 << 12) | (1 << 13); // field 0b001100
+    const SHA256H: u32 = 1 << 14; // field 0b010000
+    const SHA256H2: u32 = (1 << 14) | (1 << 12); // field 0b010100
+    const SHA256SU1: u32 = (1 << 14) | (1 << 13); // field 0b011000
+    fn sha1h_word(rd: u8, rn: u8) -> u32 {
+        0x5E28_0800 | ((rn as u32) << 5) | rd as u32
+    }
+    fn sha1su1_word(vd: u8, vn: u8) -> u32 {
+        0x5E28_1800 | ((vn as u32) << 5) | vd as u32
+    }
+    fn sha256su0_word(vd: u8, vn: u8) -> u32 {
+        0x5E28_2800 | ((vn as u32) << 5) | vd as u32
+    }
+    /// add Vd.4s, Vn.4s, Vm.4s  (three-same ADD, size=10, Q=1)
+    fn vadd4s_word(vd: u8, vn: u8, vm: u8) -> u32 {
+        0x4EA0_8400 | ((vm as u32) << 16) | ((vn as u32) << 5) | vd as u32
+    }
+    /// mov Vd.16b, Vn.16b (alias of ORR with Vm == Vn)
+    fn vmov16b_word(vd: u8, vn: u8) -> u32 {
+        0x4EA0_1C00 | ((vn as u32) << 16) | ((vn as u32) << 5) | vd as u32
+    }
+    fn hlt_word() -> u32 {
+        0xD440_0000
+    }
+
+    fn set_q(v: &mut crate::simd::Vregs, reg: u8, lanes: [u32; 4]) {
+        for (i, x) in lanes.into_iter().enumerate() {
+            v.set_lane(reg, i as u8, 2, x as u64);
+        }
+    }
+
+    /// Full SHA-1 of the one-block message "abc" via 20 real 4-round
+    /// groups (sha1c×5, sha1p×5, sha1m×5, sha1p×5), the Linux-style
+    /// sha1h E ping-pong, K pre-added through vector ADD, and the
+    /// sha1su0/sha1su1 schedule. Expected: a9993e36 4706816a ba3e2571
+    /// 7850c26c 9cd0d89d — the universally known SHA-1("abc").
+    #[test]
+    fn sha1_end_to_end_via_crypto_instructions() {
+        let mut code = Vec::new();
+        let put = |code: &mut Vec<u8>, w: u32| code.extend_from_slice(&w.to_le_bytes());
+        const ABCD: u8 = 0; // v0 — state a,b,c,d
+        const EA: u8 = 4; // v4 — E scalar slot A (lane 0)
+        const EB: u8 = 5; // v5 — E scalar slot B (lane 0)
+        const T0: u8 = 6; // v6 — W + K scratch
+        const KR: u8 = 28; // v28..v31 — K0..K3
+        // message-schedule register pool: v8..v11 rotate (oldest first)
+        let mut regs = [8u8, 9, 10, 11];
+        // pre-loop: E for group 1 = sha1h(abcd lane 0)
+        put(&mut code, sha1h_word(EB, ABCD));
+        for g in 0..20u32 {
+            let (op, kreg) = match g / 5 {
+                0 => (SHA1C, KR),
+                1 => (SHA1P, KR + 1),
+                2 => (SHA1M, KR + 2),
+                _ => (SHA1P, KR + 3),
+            };
+            let (e_cur, e_wrt) = if g % 2 == 0 { (EA, EA) } else { (EB, EB) };
+            // t = W + K ; 4 rounds consume the current E scalar
+            put(&mut code, vadd4s_word(T0, regs[0], kreg));
+            put(&mut code, sha1_cpm_word(op, ABCD, e_cur, T0));
+            if g < 19 {
+                // E for group g+2 (sha1h of the state as it entered this
+                // group, i.e. of the pre-instruction lane 0 — emitted here
+                // AFTER the group so the NEXT-but-one group gets it)
+                put(&mut code, sha1h_word(e_wrt, ABCD));
+                // schedule: su0(A,B,C) ; su1(A,D) -> A becomes W[16+4g..]
+                put(&mut code, sha1_cpm_word(SHA1SU0, regs[0], regs[1], regs[2]));
+                put(&mut code, sha1su1_word(regs[0], regs[3]));
+                regs.rotate_left(1);
+            }
+        }
+        put(&mut code, hlt_word());
+
+        let ram = FakeRam::new(0x4000);
+        ram.load_code(0x1000, &code);
+        let mut cpu = Interpreter::new(Box::new(ram));
+        // state + E + W block + K lanes for SHA-1("abc")
+        set_q(
+            &mut cpu.v,
+            ABCD,
+            [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476],
+        );
+        cpu.v.set_lane(EA, 0, 2, 0xC3D2E1F0);
+        set_q(&mut cpu.v, 8, [0x61626380, 0x00000000, 0x00000000, 0x00000000]);
+        set_q(&mut cpu.v, 9, [0x00000000, 0x00000000, 0x00000000, 0x00000000]);
+        set_q(&mut cpu.v, 10, [0x00000000, 0x00000000, 0x00000000, 0x00000000]);
+        set_q(&mut cpu.v, 11, [0x00000000, 0x00000000, 0x00000000, 0x00000018]);
+        set_q(&mut cpu.v, KR, [0x5A827999; 4]);
+        set_q(&mut cpu.v, KR + 1, [0x6ED9EBA1; 4]);
+        set_q(&mut cpu.v, KR + 2, [0x8F1BBCDC; 4]);
+        set_q(&mut cpu.v, KR + 3, [0xCA62C1D6; 4]);
+        cpu.set_reset_vector(0x1000);
+        let res = cpu.run(InterpBudget { max_insn: 10_000, max_ns: 60_000_000_000 });
+        assert!(res.stop == StopReason::Halted, "stop={res:?}");
+
+        // final E = the scalar written after group 18 = EA (group 19 is odd
+        // and consumed EB); accumulate h = IV + state (+ E)
+        let e_final = cpu.v.lane(EA, 0, 2) as u32;
+        let lanes = [
+            cpu.v.lane(ABCD, 0, 2) as u32,
+            cpu.v.lane(ABCD, 1, 2) as u32,
+            cpu.v.lane(ABCD, 2, 2) as u32,
+            cpu.v.lane(ABCD, 3, 2) as u32,
+        ];
+        let iv = [0x67452301u32, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0];
+        let h: Vec<u32> = lanes
+            .iter()
+            .chain(std::iter::once(&e_final))
+            .zip(iv.iter())
+            .map(|(x, y)| x.wrapping_add(*y))
+            .collect();
+        let digest: Vec<u8> = h.iter().flat_map(|x| x.to_be_bytes()).collect();
+        assert_eq!(
+            digest,
+            [
+                0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a, 0xba, 0x3e, 0x25, 0x71, 0x78,
+                0x50, 0xc2, 0x6c, 0x9c, 0xd0, 0xd8, 0x9d
+            ],
+            "SHA-1(\"abc\") via the crypto instructions must match the known digest"
+        );
+    }
+
+    /// SHA-256 pipeline: two 4-round groups with the h/h2 pair (including
+    /// the `mov` that saves the original a..d for sha256h2 — the Linux
+    /// sha2-ce choreography) plus the su0/su1 schedule. Expected values
+    /// generated by the verified oracle for SHA-256("abc") after 8 rounds.
+    #[test]
+    fn sha256_two_groups_via_crypto_instructions() {
+        let mut code = Vec::new();
+        let put = |code: &mut Vec<u8>, w: u32| code.extend_from_slice(&w.to_le_bytes());
+        const Q0: u8 = 0; // abcd
+        const Q1: u8 = 1; // efgh
+        const QS: u8 = 2; // saved (original) abcd for sha256h2
+        const T0: u8 = 6;
+        const KR: u8 = 24; // v24, v25 — K[0..3], K[4..7]
+        let mut regs = [8u8, 9, 10, 11];
+        for g in 0..2u32 {
+            let kreg = KR + (g as u8);
+            put(&mut code, vadd4s_word(T0, regs[0], kreg));
+            put(&mut code, vmov16b_word(QS, Q0)); // save original abcd
+            put(&mut code, sha1_cpm_word(SHA256H, Q0, Q1, T0));
+            put(&mut code, sha1_cpm_word(SHA256H2, Q1, QS, T0));
+            if g < 1 {
+                put(&mut code, sha256su0_word(regs[0], regs[1]));
+                put(&mut code, sha1_cpm_word(SHA256SU1, regs[0], regs[2], regs[3]));
+                regs.rotate_left(1);
+            }
+        }
+        put(&mut code, hlt_word());
+
+        let ram = FakeRam::new(0x4000);
+        ram.load_code(0x1000, &code);
+        let mut cpu = Interpreter::new(Box::new(ram));
+        set_q(&mut cpu.v, Q0, [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a]);
+        set_q(&mut cpu.v, Q1, [0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]);
+        set_q(&mut cpu.v, 8, [0x61626380, 0x00000000, 0x00000000, 0x00000000]);
+        set_q(&mut cpu.v, 9, [0x00000000, 0x00000000, 0x00000000, 0x00000000]);
+        set_q(&mut cpu.v, 10, [0x00000000, 0x00000000, 0x00000000, 0x00000000]);
+        set_q(&mut cpu.v, 11, [0x00000000, 0x00000000, 0x00000000, 0x00000018]);
+        set_q(
+            &mut cpu.v,
+            KR,
+            [0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5],
+        );
+        set_q(
+            &mut cpu.v,
+            KR + 1,
+            [0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5],
+        );
+        cpu.set_reset_vector(0x1000);
+        let res = cpu.run(InterpBudget { max_insn: 1_000, max_ns: 5_000_000_000 });
+        assert!(res.stop == StopReason::Halted, "stop={res:?}");
+
+        // oracle-verified state after 8 rounds of SHA-256("abc")
+        assert_eq!(
+            cpu.v.v[Q0 as usize],
+            0x04409a6a_2b4209f5_e5030380_85a07b5f,
+            "abcd after two sha256h groups"
+        );
+        assert_eq!(
+            cpu.v.v[Q1 as usize],
+            0x43ada245_714260ad_9b27a401_0c657a79,
+            "efgh after the matching sha256h2 groups"
+        );
+        // the su0+su1 pair must have produced W[16..19] in the pool slot
+        // that was regs[0] when the schedule ran (v8 — one rotate happened)
+        assert_eq!(
+            cpu.v.v[8],
+            0x6000_03c6_7da8_6405_000f_0000_6162_6380u128,
+            "sha256su0+su1 schedule for W[16..19]"
+        );
+    }
+
+    /// Per-instruction value goldens (fixed inputs, oracle-derived outputs
+    /// from tools/re/oracle/derive_sha1_arm.py — the printed u128 hex there
+    /// is lane3..lane0, same as a Rust u128 literal).
+    #[test]
+    fn sha_crypto_instruction_goldens() {
+        const VD: u8 = 0;
+        const VN: u8 = 1;
+        const VM: u8 = 2;
+        let seed = [
+            0xDEAD_BEEF_DEAD_BEEF_DEAD_BEEF_DEAD_BEEFu128,
+            0x0123_4567_89AB_CDEF_0123_4567_89AB_CDEFu128,
+            0xFEDC_BA98_7654_3210_FEDC_BA98_7654_3210u128,
+        ];
+        let run1 = |word: u32, out: u8| -> u128 {
+            let mut code = word.to_le_bytes().to_vec();
+            code.extend_from_slice(&hlt_word().to_le_bytes());
+            let ram = FakeRam::new(0x2000);
+            ram.load_code(0x1000, &code);
+            let mut cpu = Interpreter::new(Box::new(ram));
+            cpu.v.v[VD as usize] = seed[0];
+            cpu.v.v[VN as usize] = seed[1];
+            cpu.v.v[VM as usize] = seed[2];
+            cpu.set_reset_vector(0x1000);
+            let r = cpu.run(InterpBudget { max_insn: 100, max_ns: 1_000_000_000 });
+            assert!(r.stop == StopReason::Halted, "word {word:#x}: {r:?}");
+            cpu.v.v[out as usize]
+        };
+
+        // sha1c / sha1p / sha1m (Vn is the SCALAR E; only Vd changes)
+        assert_eq!(
+            run1(sha1_cpm_word(SHA1C, VD, VN, VM), VD),
+            0x6d19_673a_1039_d15a_6996_0dc2_2053_525b
+        );
+        assert_eq!(
+            run1(sha1_cpm_word(SHA1P, VD, VN, VM), VD),
+            0x6d19_673a_187a_619e_4698_5cf4_c4ef_57d4
+        );
+        assert_eq!(
+            run1(sha1_cpm_word(SHA1M, VD, VN, VM), VD),
+            0x6d19_673a_123a_f56b_6a28_1643_a936_5a7a
+        );
+        // sha1h: ROR(Sn,2), upper lanes zeroed (scalar-write zero-extension);
+        // Sn = lane 0 of v1 = 0x89ABCDEF
+        assert_eq!(
+            run1(sha1h_word(VD, VN), VD),
+            0x0000_0000_0000_0000_0000_0000_e26a_f37b
+        );
+        // sha1su0 (64-bit-half XORs) / sha1su1 (2-term ROL1, sequential lane3)
+        assert_eq!(
+            run1(sha1_cpm_word(SHA1SU0, VD, VN, VM), VD),
+            0x2152_4110_2152_4110_fedc_ba98_7654_3210
+        );
+        assert_eq!(
+            run1(sha1su1_word(VD, VN), VD),
+            0xc360_93fc_bf1d_f711_ae0c_e600_bf1d_f711
+        );
+        // sha256h (4 rounds, Vd-only writeback) / sha256h2 (reversed
+        // original-abcd lanes) / sha256su0 (wraparound s0) / sha256su1
+        // (sequential s1 lanes)
+        assert_eq!(
+            run1(sha1_cpm_word(SHA256H, VD, VN, VM), VD),
+            0xe3a8_0f03_5bd0_08f9_20d7_3816_f1ab_95dd
+        );
+        assert_eq!(
+            run1(sha1_cpm_word(SHA256H2, VD, VN, VM), VD),
+            0x6931_09f8_8c11_2497_7536_5ece_ee7c_65b6
+        );
+        assert_eq!(
+            run1(sha256su0_word(VD, VM), VD), // Vn = v2 (lane0 0x76543210, as the oracle golden used)
+            0x014f_f2a2_8a80_d9fa_8a80_d9fa_8a80_d9fa
+        );
+        assert_eq!(
+            run1(sha1_cpm_word(SHA256SU1, VD, VN, VM), VD),
+            0xd3c1_12ea_25e7_beae_327a_6479_7f28_a542
+        );
     }
 }
 

@@ -1124,3 +1124,53 @@ tools/re/reports/m5p_*.py).
 * `cargo test --workspace`: **444 passed / 0 failed** (+7 gap40/gap42
   goldens; DRAM_MB=768 documented). Docs: BOOT-PLAN M5 session-P block;
   tools/re/notes/m5-session-P-blocks.md.
+
+### 2.15 — Session Q (2026-10-30): BUG #43 CLOSED — the SHA crypto VALUE semantics rebuilt against three independent oracles
+
+The session-P "next block" is done: every ARMv8 SHA crypto instruction was
+rebuilt from ground truth and verified three independent ways — **QEMU
+`target/arm/tcg/crypto_helper.c` (verbatim port)**, the **ARM A64 ISA
+pseudocode** (DDI 0602 SHA1C's 160-bit `<y,x> = ROL(…, 32)` fold; SHA256H2's
+operand swap `SHA256hash(V[n], V[d], …, FALSE)`), and **end-to-end digest
+reproduction** (tools/re/oracle/derive_sha1_arm.py v2: the instruction
+models reproduce `hashlib.sha1` and `hashlib.sha256` exactly under the real
+Linux/OpenSSL caller choreography, verified 4/4 vectors each) — plus the
+Linux `sha1-ce-core.S`/`sha2-ce-core.S` asm as the usage reference.
+
+What was actually wrong (all of it "decode-verified, never value-verified"
+since session D):
+
+* **sha1c/p/m:** ran ONE round off Vm lane 0 with a `ror(a,2)` fold and
+  packed the result one lane up. Reality: FOUR rounds consuming Vm lanes
+  0..3, E arrives as the SCALAR `Vn.S[0]` (Vn is never written back), the
+  round is `T = f(B,C,D) + ROTL(A,5) + E + W`, and the state rotates
+  `(A,B,C,D,E) → (T, A, ROR(B,2), C, D)`. The discarded 5th word is exactly
+  `sha1h(state-as-it-entered-the-group)` — which is how the kernel's
+  sha1h ping-pong maintains E across groups.
+* **sha1su1:** was a 3-term XOR with rotations; reality is 2-term ROL(1)
+  where lane 3 folds in the ALREADY-UPDATED lane 0 (W[t] feeds W[t+3]).
+* **sha1su0:** was per-lane XOR with a rotated Vn; reality works on 64-bit
+  halves (`new_lo = hi(d)^lo(d)^lo(m)`, `new_hi = lo(n)^hi(d)^hi(m)`).
+* **sha256h/h2:** ran TWO rounds on half of Vm and wrote BOTH Vd and Vn.
+  Reality: each runs FOUR rounds on all of Vm and writes ONLY Vd; h2
+  rebuilds the new e..h as `orig_abcd.lane[3-i] + T1_i` from the ORIGINAL
+  a..d — which is why the kernel does `mov dg2v.16b, dg0v.16b` before the
+  pair (confirmed by executing the Linux choreography through our engine).
+* **sha256su0:** missed the wraparound `d3 += s0(m0)` term entirely.
+* **sha256su1:** wrong operand lanes and no sequential terms (lane 2 uses
+  the NEW lane 0, lane 3 the NEW lane 1).
+* **sha1h:** left stale upper lanes; a scalar S-register write
+  zero-extends.
+
+Tests: the interpreter now computes the **real SHA-1("abc") digest
+(a9993e36…d89d) end-to-end through actual sha1c/p/m/h + su0/su1 instruction
+words** (20 four-round groups, K pre-added via vector ADD, Linux-style E
+ping-pong, rotating su0/su1 schedule), a two-group sha256h/h2 pipeline
+golden, and ten per-instruction value goldens.
+`cargo test --workspace`: **448 passed / 0 failed** (+4).
+
+Session-R next block: re-run the real boot (release build,
+IOS_RUST_DRAM_MB=1024) — with #43 closed the kernel's FIPS POST HMAC-SHA1
+KAT vector 0 should now match `886eae70…` and the frontier moves past
+155,032,147; re-census MMIO at the new frontier (PMGR/AIC/WDT/SART/ANS
+touches are expected once the scheduler actually runs).

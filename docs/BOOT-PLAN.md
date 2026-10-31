@@ -760,3 +760,35 @@ workspace tests 0 failed):**
   pass).
 
 `cargo test --workspace`: **444 passed / 0 failed** (+7 goldens).
+
+## M5 — peripherals the real boot path touches  [~] (session Q 2026-10-30: BUG #43 CLOSED — the SHA1/SHA256 crypto-instruction VALUE semantics rebuilt against QEMU + the ARM ISA pseudocode + end-to-end hashlib reproduction; the FIPS POST KAT blocker is engine-fixed, re-run pending)
+
+**Session Q evidence (dev build, 448 workspace tests 0 failed):**
+
+* **The whole SHA crypto family was decode-verified but never
+  value-verified** (the session-D landing note said so itself). Three
+  independent oracles now agree on the semantics:
+  1. QEMU `target/arm/tcg/crypto_helper.c` — verbatim port of every helper.
+  2. ARM A64 ISA pseudocode (DDI 0602): SHA1C's per-round
+     `<y, x> = ROL(y:x, 32)` 160-bit fold (E lives in the SCALAR Vn.S[0],
+     Vn is never written back); SHA256H2's operand swap
+     `SHA256hash(V[n], V[d], V[m], FALSE)` — its Vn must be the ORIGINAL
+     a..d, which is exactly why Linux's sha2-ce does
+     `mov dg2v.16b, dg0v.16b` before the h/h2 pair.
+  3. End-to-end: `tools/re/oracle/derive_sha1_arm.py` v2 reproduces
+     hashlib.sha1 and hashlib.sha256 exactly (4/4 vectors each) under the
+     Linux/OpenSSL caller choreography — sha1h ping-pong for E, K
+     pre-added into W, su0(A,B,C)+su1(A,D) rotating schedule.
+* **Engine tests:** the interpreter computes the REAL SHA-1("abc") digest
+  through actual instruction words (20 four-round groups,
+  a9993e36…d89d asserted), a two-group sha256h/h2 pipeline golden, and 10
+  per-instruction value goldens. 448 passed / 0 failed (+4).
+* **Session-R (next block):** re-run the real boot — the kernel's FIPS
+  POST HMAC-SHA1 KAT vector 0 (the 155,032,147 stop) should now compute
+  886eae70f36bd3805eeb1274b3248fccf5e15b80 and the frontier moves past
+  the POST; then re-census MMIO at the new frontier (PMGR/AIC/WDT/SART/
+  ANS touches expected once the scheduler runs) and re-run the M5 device
+  gate honestly.
+* Also in this session: the session-RAM bounding fixes (console sink cap,
+  drain_serial take-not-clone, trace_tick env caching, s3_backup
+  streaming+prune) — see the fix(ram) commit.

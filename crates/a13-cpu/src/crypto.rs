@@ -67,34 +67,42 @@ fn gmul(a: u8, b: u8) -> u8 {
     p as u8
 }
 
-/// AESE Vd.16B, Vn.16B — SubBytes + ShiftRows, then EOR the round key Vn
-/// (ARM DDI 0487: `Vd = ShiftRows(SubBytes(Vd)) EOR Vn`). REAL-DATA BUG
-/// #47: the key was ignored (`_key`) and the interpreter even passed 0 —
-/// every AESE ran keyless, so the kernel's AES-XTS early PRNG emitted one
-/// constant 16-byte block, `read_random`'s stuck-output health test fired,
-/// and corecrypto panicked "RNG initialization failure (−10)".
+/// AESE Vd.16B, Vn.16B — EOR the round key Vn FIRST, then SubBytes +
+/// ShiftRows: `Vd = SubBytes(ShiftRows(Vd EOR Vn))` (ARM DDI 0487 —
+/// QEMU aese_kernel: "The Arm AddRoundKey comes first, while the API
+/// AddRoundKey comes last"). REAL-DATA BUG #47 fixed the missing key;
+/// REAL-DATA BUG #50 (found via the fipspost AES-ECB KAT repro,
+/// tests/fips_aes_ecb_kat.rs) fixed the ORDER: the old XOR-last form made
+/// every kernel AES block wrong (the vng ECB loop feeds the PLAIN schedule
+/// and only the XOR-first table makes that the true cipher — verified
+/// numerically both directions against the extracted 18C66 KAT).
 pub fn aese(state: u128, key: u128) -> u128 {
-    let b = state.to_be_bytes();
+    let x = state ^ key;
+    let b = x.to_be_bytes();
     let mut out = [0u8; 16];
-    // ShiftRows then SubBytes (ARM order: SubBytes applies to shifted state)
+    // ShiftRows then SubBytes (they commute; bytewise table after the permute)
     for c in 0..4 {
         for r in 0..4 {
             out[c * 4 + r] = AES_SBOX[b[((c + r) & 3) * 4 + r] as usize];
         }
     }
-    u128::from_be_bytes(out) ^ key
+    u128::from_be_bytes(out)
 }
 
-/// AESD Vd.16B, Vn.16B — InvShiftRows + InvSubBytes, then EOR Vn.
+/// AESD Vd.16B, Vn.16B — EOR Vn FIRST, then InvShiftRows + InvSubBytes
+/// (same BUG #50 order fix; the kernel's decrypt path feeds the AESIMC'd
+/// middle-key schedule and only the XOR-first table makes that the true
+/// inverse cipher — numerically verified against the 18C66 KAT).
 pub fn aesd(state: u128, key: u128) -> u128 {
-    let b = state.to_be_bytes();
+    let x = state ^ key;
+    let b = x.to_be_bytes();
     let mut out = [0u8; 16];
     for c in 0..4 {
         for r in 0..4 {
             out[c * 4 + r] = AES_INV_SBOX[b[((c + 4 - r) & 3) * 4 + r] as usize];
         }
     }
-    u128::from_be_bytes(out) ^ key
+    u128::from_be_bytes(out)
 }
 
 /// AESMC — MixColumns.
@@ -603,19 +611,21 @@ mod tests {
             rk = u128::from_be_bytes(nb);
             round_keys[r] = rk;
         }
-        // Standard ARM round order (FIPS-197 C.1, verified against the
-        // reference implementation in scripts/aes_check.py): s = pt ^ rk0;
-        // 9×(AESE k_r; AESMC); final AESE k10. AESE = SubBytes+ShiftRows+
-        // EOR(Vn), so the AESMC that follows pulls MixColumns over the key
-        // too — the middle round keys must be pre-InvMixColumns'd
-        // (k_r = AESIMC(rk_r), r=1..9) and the final key stays plain.
-        // (REAL-DATA BUG #47: the EOR(Vn) used to be dropped entirely.)
-        s ^= round_keys[0];
-        for r in 1..10 {
-            s = aese(s, aesimc(round_keys[r]));
+        // Kernel-mirroring ARM round order (REAL-DATA BUG #50 fix — the
+        // 18C66 vng ECB loop, extracted and verified in
+        // tests/fips_aes_ecb_kat.rs): AESE = SubBytes(ShiftRows(s ^ k)) —
+        // the AddRoundKey comes FIRST (QEMU aese_kernel: "The Arm
+        // AddRoundKey comes first"). The loop feeds the PLAIN schedule:
+        // 9×(AESE rk_r; AESMC) for r=0..8, final AESE rk9, EOR rk10.
+        // (The old form XORed the key AFTER the table and compensated with
+        // pre-InvMixColumns'd middle keys — a circular golden that hid the
+        // bug from FIPS-197 C.1 while breaking every real kernel block.)
+        for r in 0..9 {
+            s = aese(s, round_keys[r]);
             s = aesmc(s);
         }
-        s = aese(s, round_keys[10]);
+        s = aese(s, round_keys[9]);
+        s ^= round_keys[10];
         assert_eq!(s, expect, "AES-128 FIPS-197 C.1");
         // AESIMC(AESMC(x)) round-trip on the FIPS state
         assert_eq!(aesimc(aesmc(pt)), pt);

@@ -33,20 +33,24 @@ impl MemAccess for Ram {
     }
 }
 
-// FIPS-197 C.1 AES-128, ARM-feed form: rk0 plain, middle round keys
-// pre-InvMixColumns'd (AESE's EOR lands before the following AESMC),
-// final key plain. Verified by scripts/aes_check.py (variant B).
+// FIPS-197 C.1 AES-128, PLAIN schedule (rk0..rk10) — the feed the real
+// 18C66 vng ECB loop uses (REAL-DATA BUG #50: AESE/AESD apply the round
+// key BEFORE the SubBytes/ShiftRows table; the old XOR-last model needed
+// pre-InvMixColumns'd middle keys — a circular golden that hid the bug).
+// Schedule verified by scripts/aes_check.py + the extracted 18C66 KAT
+// (tests/fips_aes_ecb_kat.rs runs the kernel's OWN keyexp to this exact
+// table).
 const RK: [u128; 11] = [
     0x000102030405060708090a0b0c0d0e0f,
-    0x8c56dff0825dd3f9805ad3fc8659d7fd,
-    0xa0db02992286d160a2dc029c2485d561,
-    0xc7c6e391e54032f1479c306d6319e50c,
-    0xa8a2f5044de2c7f50a7ef79869671294,
-    0x2ec410276326d7d26958204a003f32de,
-    0x72e3098d11c5de5f789dfe1578a2cccb,
-    0x8d82fc749c47222be4dadc3e9c7810f5,
-    0x1362a4638f2586486bff5a76f7874a83,
-    0x13aa29be9c8faff6f770f58000f7bf03,
+    0xd6aa74fdd2af72fadaa678f1d6ab76fe,
+    0xb692cf0b643dbdf1be9bc5006830b3fe,
+    0xb6ff744ed2c2c9bf6c590cbf0469bf41,
+    0x47f7f7bc95353e03f96c32bcfd058dfd,
+    0x3caaa3e8a99f9deb50f3af57adf622aa,
+    0x5e390f7df7a69296a7553dc10aa31f6b,
+    0x14f9701ae35fe28c440adf4d4ea9c026,
+    0x47438735a41c65b9e016baf4aebf7ad2,
+    0x549932d1f08557681093ed9cbe2c974e,
     0x13111d7fe3944a17f307a78b4d2b30c5,
 ];
 const PT: u128 = 0x00112233445566778899aabbccddeeff;
@@ -67,15 +71,19 @@ fn hlt_word() -> u32 {
 
 #[test]
 fn aes128_fips197_via_instructions() {
+    // Kernel-mirroring choreography (the 18C66 vng ECB 1-block loop,
+    // 0xfffffff0082cb268): v0 = pt; 9×(AESE rk_r; AESMC) for r=0..8;
+    // final AESE rk9; EOR rk10 — PLAIN schedule, no initial whitening EOR
+    // (the first AESE's key does the whitening via the XOR-first table).
     // v0 = state; v1..v11 = round keys 0..10
     let mut code = Vec::new();
     let put = |c: &mut Vec<u8>, w: u32| c.extend_from_slice(&w.to_le_bytes());
-    put(&mut code, eor16b_word(0, 0, 1)); // state ^= rk0
-    for r in 1..10u8 {
+    for r in 0..9u8 {
         put(&mut code, aese_word(0, r + 1)); // aese v0, v{r+1} (rk r)
         put(&mut code, aesmc_word(0, 0));
     }
-    put(&mut code, aese_word(0, 11)); // final aese with rk10
+    put(&mut code, aese_word(0, 10)); // final aese with rk9
+    put(&mut code, eor16b_word(0, 0, 11)); // whitening: ^ rk10
     put(&mut code, hlt_word());
 
     let mut ram = vec![0u8; 0x4000];
@@ -97,14 +105,14 @@ fn aes128_fips197_via_instructions() {
 }
 
 /// AES-128 DECRYPT through real AESD/AESIMC/EOR words (FIPS-197 C.1
-/// inverse: ciphertext 69c4e0d8… → plaintext 00112233…). The equivalent-
-/// inverse-cipher key schedule: state ^= rk10; 9×(AESD aesimc(rk_r);
-/// AESIMC); final AESD rk0 — probes the aesd/aesimc pair that the
-/// fipspost AES-ECB KAT (POST test 4, the current −4075 wall) exercises.
+/// inverse: ciphertext 69c4e0d8… → plaintext 00112233…), mirroring the
+/// 18C66 decrypt ecb 1-block loop (0xfffffff0082b2754): AESD rk10 first,
+/// then 8×(AESD aesimc(rk_r); AESIMC) for r=9..2, final AESD aesimc(rk1),
+/// EOR rk0 — the equivalent-inverse-cipher schedule the kernel's decrypt
+/// init (0xfffffff0082a89f0) builds: rk0/rk10 plain, rk1..rk9 AESIMC'd.
 #[test]
 fn aes128_decrypt_fips197_via_instructions() {
-    // forward round keys (rk0..rk10) computed in aes_fips197 unit test
-    // style; decrypt feeds aesimc(rk_r) for rounds 9..1 and rk0 last.
+    // forward PLAIN round keys (rk0..rk10) — same table as RK above
     const FRK: [u128; 11] = [
         0x000102030405060708090a0b0c0d0e0f,
         0xd6aa74fdd2af72fadaa678f1d6ab76fe,
@@ -123,12 +131,15 @@ fn aes128_decrypt_fips197_via_instructions() {
 
     let mut code = Vec::new();
     let put = |c: &mut Vec<u8>, w: u32| c.extend_from_slice(&w.to_le_bytes());
-    put(&mut code, eor16b_word(0, 0, 11)); // state ^= rk10 (v11)
-    for r in (1..10).rev() {
-        put(&mut code, aesd_word(0, r as u8 + 1)); // aesd v0, v{r+1} = aesimc(rk_r)
+    // kernel loop: aesd(rk10); [aesd(rk_r'); aesimc] for r=9..2; aesd(rk1'); eor(rk0)
+    put(&mut code, aesd_word(0, 11)); // aesd v0, rk10 (plain)
+    put(&mut code, aesimc_word(0, 0));
+    for vn in (3..=10u8).rev() {
+        put(&mut code, aesd_word(0, vn)); // aesd v0, v{vn} = aesimc(rk_{vn-1})
         put(&mut code, aesimc_word(0, 0));
     }
-    put(&mut code, aesd_word(0, 1)); // final aesd with rk0
+    put(&mut code, aesd_word(0, 2)); // final aesd with aesimc(rk1)
+    put(&mut code, eor16b_word(0, 0, 1)); // ^ rk0
     put(&mut code, hlt_word());
 
     let mut ram = vec![0u8; 0x4000];
@@ -137,16 +148,16 @@ fn aes128_decrypt_fips197_via_instructions() {
     let set = |cpu: &mut Interpreter, r: u8, v: u128| {
         cpu.v.v[r as usize] = u128::from_be_bytes(v.to_le_bytes());
     };
-    // Decrypt feed schedule (verified against the python reference):
-    // FIPS InvCipher applies AddRoundKey BEFORE InvMixColumns, so the
-    // AESD key for rounds 9..1 is the PLAIN rk_r (unlike encrypt, where
-    // AESMC pulls MixColumns over the key and needs aesimc(rk_r)).
+    // Decrypt feed schedule (kernel decrypt init 0x82a89f0): rk0 and rk10
+    // PLAIN, rk1..rk9 pre-AESIMC'd (InvMixColumns) — the equivalent-
+    // inverse-cipher table that pairs with the XOR-first AESD.
     set(&mut cpu, 0, EXPECT); // ciphertext in
-    set(&mut cpu, 1, FRK[0]); // rk0 (final aesd key)
+    set(&mut cpu, 1, FRK[0]); // rk0 (final eor)
     for (i, k) in FRK[1..10].iter().enumerate() {
-        set(&mut cpu, i as u8 + 2, *k); // v2..v10 = rk1..rk9 (plain)
+        // v2..v10 = aesimc(rk1..rk9): apply InvMixColumns to the plain key
+        set(&mut cpu, i as u8 + 2, a13_cpu::crypto::aesimc(*k));
     }
-    set(&mut cpu, 11, FRK[10]); // rk10 (initial eor)
+    set(&mut cpu, 11, FRK[10]); // rk10 (initial aesd key, plain)
     cpu.set_reset_vector(0x1000);
     let res = cpu.run(a13_cpu::InterpBudget { max_insn: 100, max_ns: 60_000_000_000 });
     assert_eq!(res.stop, StopReason::Halted, "stop={res:?}");

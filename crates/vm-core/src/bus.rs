@@ -213,13 +213,11 @@ impl Bus {
         match self.find(addr) {
             Some(i) => {
                 let r = &mut self.regions[i];
-                if let Some(ram) = r.device.ram_mut() {
-                    let off = (addr - r.base) as usize;
-                    if off < ram.len() {
-                        let end = (off + data.len()).min(ram.len());
-                        ram[off..end].copy_from_slice(&data[..end - off]);
-                    }
-                }
+                let off = addr - r.base;
+                // lazy-aware bulk write: Ram commits its backing first;
+                // eager RAM devices keep the historic truncating copy;
+                // non-RAM devices keep the historic silent skip.
+                r.device.write_ram_bulk(off, data);
             }
             None => {
                 self.unmapped_writes += 1;
@@ -253,8 +251,21 @@ impl Default for Bus {
 }
 
 /// Plain RAM region (SROM/SRAM/DRAM bank).
+///
+/// **Lazy commit (the OOM fix, 2026-10-31):** the backing `Vec` starts
+/// EMPTY and grows geometrically on first write/load — never an eager
+/// `vec![0u8; size]`. Uncommitted bytes read as 0, which is exactly what
+/// the old zero-filled Vec returned for untouched memory, so guest-visible
+/// semantics are unchanged; a 4 GiB DRAM window now costs ~0 RSS until the
+/// guest actually touches pages (the eager 4 GiB allocation aborted every
+/// `cargo test`/boot run on a 4 GiB host before a single insn retired).
+///
+/// Direct mutation through `ram_mut()` must keep `data.len() <= size`.
 pub struct Ram {
     label: &'static str,
+    /// Full region size in bytes (the address window) — NOT the allocation.
+    size: u64,
+    /// Committed prefix of the region, zero-filled. `len() <= size`.
     pub data: Vec<u8>,
 }
 
@@ -262,12 +273,32 @@ impl Ram {
     pub fn new(label: &'static str, size: u64) -> Self {
         Ram {
             label,
-            data: vec![0u8; size as usize],
+            size,
+            data: Vec::new(),
         }
+    }
+    /// Grow the committed prefix to cover `end` bytes (clamped to the
+    /// region size). Commits exactly what is needed plus geometric
+    /// headroom for sequential writes — never past the region, never a
+    /// power-of-two overshoot (a doubling past a 2 GiB-deep touch used to
+    /// request the full 4 GiB).
+    fn ensure(&mut self, end: usize) {
+        if end <= self.data.len() {
+            return;
+        }
+        let cap = self.size as usize;
+        let want = end
+            .max(self.data.len().saturating_mul(2))
+            .max(64 * 1024);
+        self.data.resize(want.min(cap), 0);
     }
     pub fn load_at(&mut self, addr: u64, img: &[u8]) {
         let off = addr as usize;
-        let end = (off + img.len()).min(self.data.len());
+        // clamp to the REGION size (the old full-size Vec made this the
+        // same thing); an entirely out-of-range load still panics like
+        // before ([off..end] with end < off is an invalid slice).
+        let end = (off + img.len()).min(self.size as usize);
+        self.ensure(end);
         self.data[off..end].copy_from_slice(&img[..end - off]);
     }
 }
@@ -279,21 +310,45 @@ impl Device for Ram {
     fn ram_mut(&mut self) -> Option<&mut Vec<u8>> {
         Some(&mut self.data)
     }
+    /// Lazy-aware bulk write: commit the prefix covering the write, clamped
+    /// to the region, then copy (same truncation semantics as the historic
+    /// full-size Vec, which clamped at len == size).
+    fn write_ram_bulk(&mut self, off: u64, data: &[u8]) {
+        let o = off as usize;
+        if o >= self.size as usize {
+            return;
+        }
+        let end = (o + data.len()).min(self.size as usize);
+        self.ensure(end);
+        self.data[o..end].copy_from_slice(&data[..end - o]);
+    }
     fn read(&mut self, off: u64, size: u8) -> u64 {
         let o = off as usize;
-        if o + 8 <= self.data.len() {
-            let raw = u64::from_le_bytes(self.data[o..o + 8].try_into().unwrap());
-            // honor the access width: sub-8 loads return exactly `size`
-            // bytes (zero-extended) — a 32-bit LDR must not observe the
-            // neighboring word.
-            let bytes = (size as u32).clamp(1, 8) as u32;
-            if bytes >= 8 {
-                raw
-            } else {
-                raw & ((1u64 << (bytes * 8)) - 1)
-            }
+        // The old full-size Vec read only when o+8 <= len(== region size)
+        // and returned 0 otherwise — including the last-7-bytes-of-region
+        // quirk. Preserve that exactly against the REGION size.
+        if o + 8 > self.size as usize {
+            return 0;
+        }
+        // honor the access width: sub-8 loads return exactly `size`
+        // bytes (zero-extended) — a 32-bit LDR must not observe the
+        // neighboring word.
+        let bytes = (size as u32).clamp(1, 8) as u32;
+        if o >= self.data.len() {
+            // fully uncommitted = untouched = zero (same as the old Vec)
+            return 0;
+        }
+        // assemble: committed prefix + implicit zeros for the uncommitted
+        // tail of the 8-byte window — identical to reading the old
+        // zero-filled Vec at this address.
+        let have = (self.data.len() - o).min(8);
+        let mut buf = [0u8; 8];
+        buf[..have].copy_from_slice(&self.data[o..o + have]);
+        let raw = u64::from_le_bytes(buf);
+        if bytes >= 8 {
+            raw
         } else {
-            0
+            raw & ((1u64 << (bytes * 8)) - 1)
         }
     }
     fn write(&mut self, off: u64, size: u8, val: u64) {
@@ -301,13 +356,112 @@ impl Device for Ram {
         // honor the access width: a 32-bit STR must not clobber the
         // neighboring word.
         let bytes = (size as usize).clamp(1, 8);
-        if o + bytes <= self.data.len() {
-            self.data[o..o + bytes]
-                .copy_from_slice(&val.to_le_bytes()[..bytes]);
+        // the old Vec dropped writes whose bytes crossed the region end
+        if o + bytes > self.size as usize {
+            return;
         }
+        self.ensure(o + bytes);
+        self.data[o..o + bytes]
+            .copy_from_slice(&val.to_le_bytes()[..bytes]);
     }
 }
 
 // Silence unused-import warning for DmaDevice until DMA-capable devices land.
 #[allow(dead_code)]
 fn _dma_bound<T: DmaDevice>(_: &T) {}
+
+#[cfg(test)]
+mod ram_lazy_tests {
+    use super::*;
+
+    /// THE OOM REGRESSION PIN: a 4 GiB DRAM window must not eagerly
+    /// allocate (the old `vec![0u8; size]` aborted 4 GiB hosts before a
+    /// single guest insn retired).
+    #[test]
+    fn ram_4g_window_costs_nothing_until_touched() {
+        let r = Ram::new("dram", 4 << 30);
+        assert!(r.data.is_empty(), "fresh Ram must not commit the window");
+        assert_eq!(r.data.capacity(), 0);
+    }
+
+    /// Untouched memory reads 0 — same value the old zero-filled Vec gave.
+    #[test]
+    fn ram_uncommitted_reads_zero() {
+        let mut r = Ram::new("dram", 1 << 20);
+        assert_eq!(r.read(0x1000, 8), 0);
+        assert_eq!(r.read(0xFF000, 4), 0);
+        // and a write commits exactly a geometric prefix
+        r.write(0x1000, 4, 0xDEAD_BEEF);
+        assert_eq!(r.read(0x1000, 4), 0xDEAD_BEEF);
+        assert!(r.data.len() >= 0x1004 && r.data.len() <= 0x20000);
+        assert!(r.data.len() <= 1 << 20);
+        // neighbors still zero, sub-word width honored
+        assert_eq!(r.read(0x1004, 4), 0);
+        assert_eq!(r.read(0x1000, 2), 0xBEEF);
+        assert_eq!(r.read(0x1002, 2), 0xDEAD);
+    }
+
+    /// A wide read straddling the committed frontier assembles committed
+    /// bytes + implicit zeros — byte-identical to the old zero-filled Vec.
+    #[test]
+    fn ram_straddled_read_matches_eager_zero_fill() {
+        let mut r = Ram::new("dram", 1 << 20);
+        r.write(0x100, 1, 0xAB);
+        // committed prefix ends at 0x101; an 8-byte read at 0x100 sees
+        // 0xAB followed by seven zeros
+        assert_eq!(r.read(0x100, 8), 0xAB);
+        r.write(0x104, 2, 0xCD_EF);
+        // window 0x100..0x108 now = AB 00 00 00 EF CD 00 00 (LE)
+        assert_eq!(r.read(0x100, 8), 0x0000_CDEF_0000_00AB);
+    }
+
+    /// Region-end quirks are preserved EXACTLY as the old full-size Vec:
+    /// the last 8 bytes of the window read 0, writes crossing the end are
+    /// dropped, and loads past the end truncate.
+    #[test]
+    fn ram_region_end_quirks_preserved() {
+        let size = 0x10000u64;
+        let mut r = Ram::new("sram", size);
+        // read whose 8-byte window crosses the end → 0 (old behavior)
+        assert_eq!(r.read(size - 4, 4), 0);
+        // write crossing the end → dropped, nothing committed
+        r.write(size - 2, 4, 0xFFFF_FFFF);
+        assert!(r.data.is_empty());
+        // load_at truncates at the region end
+        let img = [0x11u8; 8];
+        r.load_at(size - 2, &img);
+        assert_eq!(r.data.len(), size as usize);
+        assert_eq!(&r.data[(size - 2) as usize..], &[0x11, 0x11]);
+        // a read fully inside still works after commit
+        r.write(0, 8, 0x0102_0304_0506_0708);
+        assert_eq!(r.read(0, 8), 0x0102_0304_0506_0708);
+    }
+
+    /// Small regions (FakeRam-style) still work: commit never exceeds size.
+    #[test]
+    fn ram_small_region_full_commit() {
+        let mut r = Ram::new("sram", 0x100);
+        r.write(0xF0, 8, 0x1234);
+        assert_eq!(r.data.len(), 0x100);
+        assert_eq!(r.read(0xF0, 8), 0x1234);
+        // past-end read quirk holds
+        assert_eq!(r.read(0xFC, 4), 0);
+    }
+
+    /// load_at into a fresh Ram commits lazily and round-trips. Offset is
+    /// 64 MiB deep (the real kernel's LOAD_PA is 16 MiB in; a 2 GiB-deep
+    /// touch would need a 2 GiB dense prefix — the documented cost of the
+    /// flat model, which is still ≤ the old full-window commit).
+    #[test]
+    fn ram_load_at_roundtrip() {
+        let mut r = Ram::new("dram", 4 << 30);
+        let img: Vec<u8> = (0..255u8).collect();
+        r.load_at(0x400_0000, &img); // 64 MiB in — no 4 GiB allocation needed
+        assert!(r.data.len() >= 0x400_00FF);
+        assert!(r.data.len() <= 0x800_0000); // headroom is geometric, bounded
+        assert_eq!(&r.data[0x400_0000..0x400_00FF], &img[..]);
+        assert_eq!(r.read(0x400_0000, 8), u64::from_le_bytes(img[..8].try_into().unwrap()));
+        // untouched low memory still zero
+        assert_eq!(r.read(0, 8), 0);
+    }
+}

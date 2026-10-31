@@ -414,17 +414,15 @@ pub fn real_kernel_run(dir: &Path) -> Result<RealKernelReport, String> {
         .ok_or("kernel __TEXT VA < file offset")?;
     let text_va = image_base.checked_add(text.offset).ok_or("text VA overflow")?;
     let mut kernel_ram = Ram::new("xnu-kernel", img.len() as u64);
-    if let Some(data) = kernel_ram.ram_mut() {
-        data.copy_from_slice(&img);
-    }
+    // lazy Ram: load_at commits the backing (the old ram_mut()+
+    // copy_from_slice panicked on the now-empty Vec)
+    kernel_ram.load_at(0, &img);
     bus.attach(image_base, img.len() as u64, Box::new(kernel_ram));
 
     // "boot-pause" page: HLT sentinel that real RETs land on.
     let pause_va = image_base - 0x1000;
     let mut pause = Ram::new("boot-pause", 0x1000);
-    if let Some(data) = pause.ram_mut() {
-        data[..4].copy_from_slice(&0xD440_0000u32.to_le_bytes()); // HLT
-    }
+    pause.write(0, 4, 0xD440_0000); // HLT (lazy Ram: Device::write commits)
     bus.attach(pause_va, 0x1000, Box::new(pause));
 
     // reuse the file's existing BusMem (Bus.read/write → MemAccess)

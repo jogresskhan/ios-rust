@@ -1174,3 +1174,22 @@ IOS_RUST_DRAM_MB=1024) — with #43 closed the kernel's FIPS POST HMAC-SHA1
 KAT vector 0 should now match `886eae70…` and the frontier moves past
 155,032,147; re-census MMIO at the new frontier (PMGR/AIC/WDT/SART/ANS
 touches are expected once the scheduler actually runs).
+
+### Session Q addendum — first live-CI exposure of the real-bytes fixtures gate
+
+With GitHub push restored, the `fixtures` workflow ran for the first time
+since the vault-only era (run 41149530459, 2026-10-31): the fetch job
+pulled real T8030 IPSW ranges + a LIVE TSS ticket from Apple successfully,
+and the suite ran against the real bytes.
+
+* **Bug #44 (OPEN, upstream data drift):** `authinstall` real-TSS gate
+  failed at real_tss.rs:77 — the live `ApImg4Ticket` DER (10619 B,
+  @ServerVersion 2.1.0, magic "IM4M" present in the bytes) now parses with
+  **member[0] tag 0x16 (PrintableString)** where `im4m::parse` requires
+  OCTET STRING "IM4M" (0x04). Either Apple's TSS envelope changed or the
+  captured member is nested differently. Fix belongs to the next session:
+  re-derive the envelope from the captured fixture (the run artifact holds
+  `real-tss-A17Pro.im4m`, 14509 B), then adjust the DER walk + goldens.
+  Not related to the SHA fix (authinstall untouched by session Q).
+* Everything else in the real-bytes run passed up to that test; the
+  plain `ci` workflow is green on main at e979193.

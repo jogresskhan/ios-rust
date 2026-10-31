@@ -994,3 +994,46 @@ workspace tests 0 failed):**
   self-check block — its flow diverges inside 0x82d00cc/0x82d8d0c;
   same suspected root, to be confirmed by the repro.
 * Tests: **474 passed / 0 failed**.
+
+### Session U (2026-10-31) — #52 CLOSED (ADCS carry wrap), frontier 186.3M, bug #53 staged (ECDSA point)
+
+**BUG #52 root + fix:** the ADD side of `add_with_flags` read the carry-out as
+`res < a` — wraps when b == u64::MAX && cin == 1 (a + 2^64 ≡ a). The POST RSA
+padded input's 24-limb all-ones run (limbs 7..30) turned every unrolled ADCS
+into a dropped carry → the measured 6-limb stride-2 −1 diff (boot insn
+180,993,288, sign −27). Fix: two-step overflowing_add. KAT
+`tests/fips_rsa_kat.rs`: the kernel's own ccn_add 0x82cbcd0 over the captured
+padded-input limbs reproduced EXACTLY the measured diff pre-fix; RSA key dump
+decoded (p·q=n @+0x18, p@+0x438, q@+0x558, dp@+0x660, dq@+0x6e0, qinv@+0x760,
+**e=3**) with the python CRT oracle (S³ mod n == m ✓).
+
+**Frontier: 181,012,637 → 186,277,728** (400M budget, ExceptionRecursion
+guardrail stop after the panic cascade — the panic formatter itself faults at
+elr=0x7a584fc, a known separate cosmetic issue).
+
+**BUG #53 OPEN (the new wall):** `fipspost_post_ecdsa` (POST phase 7) —
+generate succeeds, the on-curve VALIDATION of the generated public point
+fails (wrapper −18 → phase −75 → POST −7075; the panic's printed %d is STALE
+x1 — the true rc read at the 0x82a05e8 composition stop: x8=−7000, x22=−75).
+Evidence chain (session-T/boot-T-53*.log):
+* kext_start 0x82e2248 → fipspost_post 0x829fb3c (17 phases, err = rc −
+  1000·phase) → phase 7 = fipspost_post_ecdsa 0x82a4b74 →
+  ccec_generate_key_fips 0x82db720 → generate 0x82b0608 (ret 0) →
+  validate 0x82c3cb0 → 0x82c5244 fail flag set → the generated point is
+  NOT on the curve.
+* Key ctx @0x77c2338 (0x200 B dumped): {4, 0x100, hd@0x77c2458} + p +
+  b·R (MONTGOMERY form!) + Gx, Gy (plain) + order-zp + method-ptr table.
+* **Field cores VERIFIED** (tests/fips_ecdsa_kat.rs, Montgomery oracle):
+  mul 0x82b6020 = a·b·R⁻¹ mod p ✓, sqr 0x82b6260 = a²·R⁻¹ mod p ✓
+  (probes: 1·1=R⁻¹, (b·R)·1=b, 2·3=6·R⁻¹).
+* **Next steps:** (1) KAT the reduce/convert fn 0x82b6f60 (fold
+  V ← V_hi + C0 + V_lo·(2³²−2¹⁶⁰) ×3 + branchless cond-sub of
+  [1, 0xFFFFFFFF00000000, MAX, 0xFFFFFFFF]) — decode its semantics from
+  the mul-by-const thunk 0x82bd7d4 (constant @0x7045a8, likely R² mod p
+  — read it via a boot stop-dump, the file mapping misses it); (2) KAT
+  the point-mult dispatcher 0x82bd568 (ws-allocating — the CRT-op-style
+  arena works); (3) dump the generated WRONG point Q + the private
+  scalar d (deterministic RNG — the run is reproducible), python-check
+  d·G, and bisect the first divergent field op against the trace; (4)
+  the affine conversion's modular inverse is also in scope.
+* Tests: **481 passed / 0 failed** (+5 fips_rsa_kat, +2 fips_ecdsa_kat).

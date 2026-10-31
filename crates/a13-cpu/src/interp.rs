@@ -1072,7 +1072,23 @@ impl Interpreter {
             // C = (a+b+c) >= 2^32 (the u64 sum never wraps, so `res < a`
             // could never fire — real-data bug #10 follow-up, found on the
             // 18C66 boot path).
-            let cf = if is64 { res < a } else { res > 0xFFFF_FFFF };
+            // REAL-DATA BUG #52 (M5/session T): the 64-bit form `res < a`
+            // WRAPS exactly when b == u64::MAX and the carry-in is set —
+            // a + 0xFFFF…FFFF + 1 = a + 2^64 ≡ a, so `res < a` read C=0 for
+            // a carry-out of 1. The FIPS-POST RSA self-check's padded input
+            // (PKCS#1 type-01) carries a 24-limb run of 0xFF…FF; every ADCS
+            // of corecrypto's unrolled chains (ccn_add 0x82cbcd0 et al.)
+            // over that run with carry-in 1 dropped its carry, the following
+            // limb landed −1, and the carry self-restored — the measured
+            // 6-limb stride-2 −1 diff at the sign/verify compare (boot insn
+            // 180,993,288, sign ret −27). Overflow-safe form: two-step add.
+            let cf = if is64 {
+                let (s1, c1) = a.overflowing_add(b);
+                let (_, c2) = s1.overflowing_add(carry_in as u64);
+                c1 || c2
+            } else {
+                res > 0xFFFF_FFFF
+            };
             let vf = ((a ^ res) & (b ^ res)) >> (if is64 { 63 } else { 31 }) & 1 == 1;
             (res, cf, vf)
         };

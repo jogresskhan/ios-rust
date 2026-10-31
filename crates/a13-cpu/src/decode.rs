@@ -2322,7 +2322,17 @@ pub fn decode(_pc: u64, w: u32) -> Option<Insn> {
                         rn: reg(w, 5),
                         index: (imm5 >> (tz + 1)) as u8,
                         size_log2: tz as u8,
-                        src64: w >> 31 == 1,
+                        // REAL-DATA BUG #53 (found via the fips_modmul_kat
+                        // Barrett repro + neon_shift_micro single-step): INS
+                        // (general) has NO bit-31 width selector — the GPR
+                        // is read at the ELEMENT size (MOV Vd.Ts[i], Rs.Ts,
+                        // same Ts). The kernel's `mov v3.d[1], x5`
+                        // (0x4E181CA3, bit31=0!) in ccn_shift's NEON loop
+                        // inserts all 64 bits; the old `w >> 31` test
+                        // truncated x5 to 32, so every Barrett shift lost
+                        // the high half of the last limb — k·w mod n came
+                        // out wrong and the FIPS POST ECDSA sign failed.
+                        src64: tz == 3,
                     });
                 }
                 // INS lane (U=1, bits 11:10 = 01)
@@ -5109,6 +5119,18 @@ mod tests {
         assert!(matches!(
             decode(0, 0x6E00_4000),
             Some(Insn::VExt { imm4: 8, q: true, .. })
+        ));
+        // BUG #53 pin: the kernel's `mov v3.d[1], x5` (0x4E181CA3, bit31=0)
+        // is a FULL 64-bit GPR insert — INS-general reads the GPR at the
+        // element size, there is no bit-31 width selector.
+        assert!(matches!(
+            decode(0, 0x4E18_1CA3),
+            Some(Insn::VInsGpr { rd: 3, rn: 5, index: 1, size_log2: 3, src64: true })
+        ));
+        // and the 32-bit form stays 32-bit (mov v0.s[2], w1 = 0x4E141C20)
+        assert!(matches!(
+            decode(0, 0x4E14_1C20),
+            Some(Insn::VInsGpr { rd: 0, rn: 1, index: 2, size_log2: 2, src64: false })
         ));
         assert!(matches!(
             decode(0, 0x4E08_0D21),

@@ -995,7 +995,60 @@ workspace tests 0 failed):**
   same suspected root, to be confirmed by the repro.
 * Tests: **474 passed / 0 failed**.
 
-## M5 — peripherals the real boot path touches  [~] (session U (2026-11-01): REAL-DATA BUG #52 — the ADCS carry-out flag wrapped at b==u64::MAX with carry-in set — was the RSA self-check failure; frontier 181,012,637 → 186,277,728; rsa_sig PASSES; BUG #53 OPEN = fipspost_post_ecdsa: the sign's s is wrong while k, r, d, e are all proven correct)
+## M5 — peripherals the real boot path touches  [~] (session V (2026-11-01): REAL-DATA BUG #53 — the INS-general decode truncated the GPR to 32 bits on `mov v3.d[1], x5`, breaking every NEON ccn_shift (the Barrett q̂/q shifter) — was the ECDSA sign failure; frontier 186,277,728 → 221,859,723; ecdsa AND ecdh, aes_ccm, aes_cmac, pbkdf, kdf_ctr, aes_gcm, aes_xts now ALL PASS; BUG #54 OPEN = fipspost_post_tdes_cbc fails (err −15000); after it: drbg_ctr, drbg_hmac)
+
+**Session-V evidence (release build, IOS_RUST_DRAM_MB=1024, 485
+workspace tests 0 failed):**
+
+* **#53 root (the campaign way — staged stops → red repro → single-step
+  micro):** new staged stops bracketed the sign-tail (0x82b5e10 entry,
+  insn 184,560,198): the pre-ladder state is all-correct (ab5c0 = k with
+  kG.x == r, ab5e0 = e, ab560/r-VLA = r, ab580 = kG.y leftover), but
+  MUL#1 (k·w) and MUL#2 (e·w) — the SAME generic modmul fn with the
+  SAME b — produced products with DIFFERENT effective multipliers ⇒
+  one/both arithmetically wrong; python disproved both. The mod-n path
+  (ORDER zp 0x77c23f8, fns[0] = 0x82dfac4) is the GENERIC
+  mul-then-Barrett-reduce (REduce 0x82df894, NEON shifter 0x82e208c),
+  while mod-p (point math, fns[0] = 0x82bd54c) is the special-cased
+  P-256 path — hence keygen/k·G/r all passed while every mod-n product
+  died. A minimal repro (tests/fips_modmul_kat.rs, driving dispatcher
+  0x82dfb40 from the captured zp/operands — no scheduler, no mutexes;
+  the full-tail replay was never needed) reproduced the boot's wrong
+  k' = 0x0cec…940d bit-for-bit (faithful) vs python 0x4af2…2b9b (red).
+  Stage-bisect inside the Barrett pinned the FIRST divergence at
+  q̂ = product>>255: limbs 0..2 right, limb3 = 0x00000001_6be2c6eb
+  instead of 0x243dc3ed_6be2c6eb — the (next_limb << 1) contribution
+  lost its HIGH 32 bits. The single-step micro (tests/
+  neon_shift_micro.rs, the exact 11-word loop 0x82e20d0..fc) caught the
+  culprit instruction-by-instruction: `mov v3.d[1], x5` (0x4E181CA3)
+  inserted only 0x00000000b5f16375 of x5 = 0x121ee1f6b5f16375. Root:
+  decode.rs keyed VInsGpr's `src64` on **bit 31** — but INS (general)
+  HAS no bit-31 width selector; the GPR is read at the ELEMENT size
+  (MOV Vd.Ts[i], Rs.Ts — same Ts; clang's `mov v0.d[1], x1` =
+  0x4E181C20 also has bit31=0). Fix: `src64: tz == 3`. UMOV/SMOV's
+  bit-31 dest64 IS genuine (0x4E083C20 `mov x0, v1.d[0]`) — untouched;
+  VDupGpr already masked by size_log2 — untouched.
+* **Frontier move (measured):** 186,277,728 (ecdsa panic) →
+  **221,859,723** — the POST now runs PAST ecdsa: rsa_sig ✓, ecdsa ✓,
+  ecdh ✓, aes_ccm ✓, aes_cmac ✓, pbkdf ✓, kdf_ctr ✓, aes_gcm ✓,
+  aes_xts ✓, then **tdes_cbc ✗** (panic "FIPS Kernel POST Failed"
+  again, fail-branch 0x82a0540 err −0x3a98 = −15000, test fn
+  0x82a5184, staged stop at the fail-exit 0x82a05e8 pinned it; BUG #54
+  OPEN). Remaining after tdes_cbc: drbg_ctr, drbg_hmac. A clean 200M
+  budget run passed with zero panics (clean: true) before the 221.9M
+  failure.
+* **Data-quality catch:** the session-U "s_true = 0x8c6e8645…"
+  ground-truth pipeline had a TYPO'D k constant (stage_check.py read
+  ab5c0's k as 0x…69f3c1a9… instead of 0x…69f38c1a…); re-derived with
+  the engine's own dumped k: kG.x == r exactly, s_true = 0x8c6e8645…,
+  s_engine = 0x7b1b1e35…, ccec_verify(s_engine) fails, verify(s_true)
+  passes — the bug was real, the constants are now tool-generated
+  (tools/re/oracle/modmul_check.py, stack_decode.py).
+* Tests: **485 passed / 0 failed** (+4: order_modmul_barrett_repro [the
+  campaign pin, was red], order_modmul_barrett_stages [stage bisect
+  diagnostic], neon_shift_loop_micro [the 11-word single-step pin],
+  vinsgpr_d_lane_inserts_full_64_bits [interp pin]; +2 decoder asserts
+  inside the existing decode test).
 
 **Session-U evidence (release build, IOS_RUST_DRAM_MB=1024, 481
 workspace tests 0 failed):**

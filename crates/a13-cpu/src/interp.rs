@@ -6116,4 +6116,27 @@ mod gap_mair_tests {
         assert_eq!(far, 0x4f0);
         assert!(cycles >= 96);
     }
+
+    /// BUG #53 pin (real kernel word): `mov v3.d[1], x5` = 0x4E181CA3 — the
+    /// ccn_shift NEON loop's last-lane feed — must insert ALL 64 bits of x5.
+    /// The old decode keyed the GPR width on bit 31 (0 here) and truncated
+    /// x5 to 32, so every Barrett shift (q̂/q) lost the high half of the
+    /// last limb → wrong mod-n products → the FIPS POST ECDSA sign failed.
+    #[test]
+    fn vinsgpr_d_lane_inserts_full_64_bits() {
+        let mut ram = FakeRam::new(0x8000);
+        // mov v3.d[1], x5 ; mov v4.d[0], x5 ; (halt)
+        ram.load_code(0x1000, &0x4E181CA3u32.to_le_bytes());
+        ram.load_code(0x1004, &0x4E081CA4u32.to_le_bytes());
+        let mut cpu = Interpreter::new(Box::new(ram));
+        cpu.x[5] = 0x121e_e1f6_b5f1_6375; // the ECDSA product's top limb L7
+        cpu.set_reset_vector(0x1000);
+        let r = cpu.run(InterpBudget { max_insn: 2, max_ns: 1_000_000_000 });
+        assert!(matches!(r.stop, StopReason::Budget));
+        let v3 = cpu.v.v[3];
+        let v4 = cpu.v.v[4];
+        assert_eq!(v3 >> 64, 0x121e_e1f6_b5f1_6375, "v3.d[1] must hold all 64 bits");
+        assert_eq!(v3 & 0xFFFF_FFFF_FFFF_FFFF, 0, "v3.d[0] untouched");
+        assert_eq!(v4 & 0xFFFF_FFFF_FFFF_FFFF, 0x121e_e1f6_b5f1_6375, "v4.d[0] full too");
+    }
 }

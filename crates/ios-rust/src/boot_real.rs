@@ -1047,10 +1047,19 @@ pub fn run(dir: &Path, max_insn: u64) -> Result<BootRealReport, String> {
             .collect();
         cpu.watch_store_vas.extend(pa_aliases);
     }
-    // M4-b guardrail: an exception entry with SP below __TEXT_EXEC means
-    // the exception stack descended into the kernel image (named stop).
-    if let Some((_, text_exec_va, _, _, _)) = segs.iter().find(|(n, _, _, _, _)| *n == "__TEXT_EXEC") {
-        cpu.text_floor_kva = Some(*text_exec_va);
+    // M4-b guardrail (BUG #55 fix): an exception entry with SP INSIDE the
+    // kernel image range means the exception stack descended into the image
+    // (named stop). The image extent = min segment VA .. max segment end
+    // (the link base .. past __LINKEDIT, incl. prelink if mapped there).
+    {
+        let base = segs.iter().map(|(_, va, _, _, _)| *va).min();
+        let end = segs
+            .iter()
+            .map(|(_, va, sz, _, _)| va + sz)
+            .max();
+        if let (Some(base), Some(end)) = (base, end) {
+            cpu.text_kva_range = Some((base, end));
+        }
     }
     // M4 debug: capture the kernel's boot-stack-pointer stores (cpu_data
     // init fingerprint) — printed in the report.

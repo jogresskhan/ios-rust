@@ -360,11 +360,20 @@ pub struct Interpreter {
     /// (detail, elr, far, cycles). The run loop converts it to
     /// StopReason::ExceptionRecursion before any further guest insn runs.
     pub recursion_stop: Option<(&'static str, u64, u64, u64)>,
-    /// M4-b: kernel __TEXT_EXEC base KVA (set by the machine from the real
-    /// segments). An exception taken with SP below this floor means the
+    /// M4-b: kernel image KVA range (set by the machine from the real
+    /// segments). An exception taken with SP INSIDE the image means the
     /// exception stack has descended into text — named stop instead of a
-    /// silent text zeroing.
-    pub text_floor_kva: Option<u64>,
+    /// silent text zeroing. REAL-DATA BUG #55 (session V): the old check
+    /// was `sp < __TEXT_EXEC base`, which mis-fires for every legitimate
+    /// kernel stack — xnu's boot AND secondary-thread stacks live at
+    /// 0xffffffe8xxxxxxxx, numerically BELOW the image (0xfffffff0xxxxxxxx)
+    /// — so the FIRST async FIQ delivered on a thread stack (post-POST
+    /// frontier, insn 327,096,716) latched "stack-descended-into-text"
+    /// and killed the boot before the vector code ran (zero watch hits,
+    /// elr captured pre-update = 0). The range check keeps the original
+    /// session-H protection (the storm's SP zeroed 24 MB of the image
+    /// itself) without firing on normal stacks.
+    pub text_kva_range: Option<(u64, u64)>,
     /// M4-b diagnostics (env IOS_RUST_WATCH_VA, default empty): log every
     /// store whose VA matches (pc+value) — RE aid for global corruption,
     /// first 64 hits per address, zero behavior drift.
@@ -545,7 +554,7 @@ impl Interpreter {
             exc_repeat_key: None,
             exc_repeat_count: 0,
             recursion_stop: None,
-            text_floor_kva: None,
+            text_kva_range: None,
             watch_store_vas: std::env::var("IOS_RUST_WATCH_VA")
                 .unwrap_or_default()
                 .split(',')
@@ -1001,10 +1010,12 @@ impl Interpreter {
             ));
         }
         // M4-b guardrail 2 — stack descended into text: an exception entry
-        // with SP below __TEXT_EXEC means the exception stack walked into
-        // the kernel image (the session-H zeroing's terminal state).
-        if let Some(floor) = self.text_floor_kva {
-            if self.sp != 0 && self.sp < floor && self.recursion_stop.is_none() {
+        // with SP INSIDE the kernel image range means the exception stack
+        // walked into the image (the session-H zeroing's terminal state).
+        // BUG #55: must be a RANGE test — the kernel's stacks
+        // (0xffffffe8…) sit numerically below the image (0xfffffff0…).
+        if let Some((floor, ceil)) = self.text_kva_range {
+            if self.sp != 0 && self.sp >= floor && self.sp < ceil && self.recursion_stop.is_none() {
                 self.recursion_stop = Some((
                     "stack-descended-into-text",
                     self.sys.elr_el1,
@@ -6161,6 +6172,40 @@ mod gap_mair_tests {
         let r = cpu.run(InterpBudget { max_insn: 1, max_ns: 1_000_000_000 });
         assert!(matches!(r.stop, StopReason::Budget));
         assert_eq!(cpu.x[4], 0xd022_243c, "w4 = w10 ^ ror32(w9,31)");
+    }
+
+    /// BUG #55 pin: the "stack-descended-into-text" guardrail must be a
+    /// RANGE test — xnu's boot AND thread stacks (0xffffffe8…) are
+    /// numerically BELOW the kernel image (0xfffffff0…), so the old
+    /// `sp < __TEXT_EXEC base` check latched on the FIRST FIQ delivered on
+    /// a thread stack (insn 327,096,716) and killed the boot before the
+    /// vector code ran. An exception on a legitimate stack must NOT latch;
+    /// an exception with SP inside the image MUST latch.
+    #[test]
+    fn exception_on_thread_stack_does_not_latch_text_guardrail() {
+        let mut ram = FakeRam::new(0x8000);
+        let mut cpu = Interpreter::new(Box::new(ram));
+        cpu.sys.vbar_el1 = 0x2000;
+        cpu.text_kva_range = Some((0xfffffff007004000, 0xfffffff009c60000));
+        // a secondary thread stack (below the image numerically) — a few
+        // back-to-back FIQs (the identical-loop latch allows up to 95, so
+        // 3 does not trip it; the OLD `sp < floor` check latched on the
+        // very first one)
+        cpu.sp = 0xffffffe802d1bd80;
+        for _ in 0..3 {
+            cpu.take_exception(0x300, 0, None, "fiq");
+        }
+        assert!(cpu.recursion_stop.is_none(), "thread-stack FIQs must not latch the text guardrail");
+        // the boot stack too
+        cpu.sp = 0xffffffe802fab940;
+        cpu.take_exception(0x200, 0x9600_0006, Some(0x4f0), "sync");
+        assert!(cpu.recursion_stop.is_none(), "boot-stack syncs must not latch the text guardrail");
+        // SP inside the image MUST latch (the session-H storm terminal state)
+        cpu.sp = 0xfffffff008160254; // inside __TEXT_EXEC
+        cpu.take_exception(0x300, 0, None, "fiq");
+        let (detail, _elr, far, _c) = cpu.recursion_stop.expect("the image-SP case must latch");
+        assert_eq!(detail, "stack-descended-into-text");
+        assert_eq!(far, 0xfffffff008160254);
     }
 
     /// BUG #53 pin (real kernel word): `mov v3.d[1], x5` = 0x4E181CA3 — the

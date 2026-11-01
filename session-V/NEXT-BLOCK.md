@@ -30,12 +30,30 @@ REGENERATE via scripts/kcdump if /tmp was recycled).
   — likely a call through a NULL fn ptr (an unregistered service —
   IOKit method table? PMGR hook? a kext's vtable slot that the
   emulator's device model never filled).
-- NEXT: (1) staged stop INSIDE 0x7b8ba64's callee chain (watchpoints on
-  the bl targets — find the deepest call before pc→0); (2) read the
-  call's target slot (x16/x17 pattern suggests a GOT/di dispatch —
-  check [0x772EE00]/[0x772EE58] contents — is the SLOT zero? then find
-  who should have registered it); (3) the M4-b "poison stores" and
-  __DATA←stack diagnostics in boot-V-3.log may name the service.
+- SCOPED (session-V staged stops + the boot-V-3 trace ring): the AST
+  fn 0x7b8ba64 runs with an AST PENDING → 0x7b8bab8 → the AST action
+  0x7a4f61c → (x10 = [percpu+0x28] != 0 → clears bit 2 → ret) OR the
+  tail call 0x7a80d6c — and BACK in the AST loop `b 0xbabc` → the
+  flags byte [x8+0x4c] still has bit 2 → loop → the take path reaches
+  `msr daifclr, #7` at 0x7b8ba90 — **THE TRACE ENDS AT THAT MSR**: the
+  engine's post-insn IRQ/FIQ check fires IMMEDIATELY (run loop:
+  timer_fiq_pending && DAIF.F clear → take_exception(0x300,"fiq")), the
+  FIQ vector 0x815f300 pushes the frame at sp=0x…d1bd80 and the store
+  FAULTS (far = the sp; L3 @0x80d82d550 = 0 — an invalid descriptor —
+  NOTE: the very same page accepted the AST fn's own prologue pushes
+  moments earlier!) → nested sync abort → recursion → the SP descends
+  → the guardrail. x16 = 0x32E5FFF00772EE58 / x17 = 0x772EE00 held
+  across (a GOT/di pair — probably unrelated leftovers).
+- NEXT: (1) dump the page tables around VA 0x…2d1b000 at the FIQ
+  moment (stop at 0x815f300, walk 0x2d1bd00-0x2d1be00) — did the
+  kernel UNMAP/remap the thread stack mid-flight, or is the engine's
+  walk stale? (2) check the engine's take_exception SP model — ARM
+  banks SP per EL/SPSel; the single-bank `self.sp` model (see
+  MsrSpsel) may corrupt the FIQ frame push; (3) check whether the FIQ
+  should even be PENDING (the timer model — timer_fiq_pending may be
+  stuck high); (4) the AST-loop `b 0xbabc` spinning on bit 2 — is the
+  bit actually CLEARED by the 0x7a4f61c path (w9 &= ~4 → str) — if the
+  engine's store is fine the loop should exit; single-step it.
 - NOTE: this is the FIRST post-POST wall — the frontier moved past the
   crypto into kernel-services land. Expect kext/IOKit fidelity work
   (the BOOT-PLAN M5 clause ② path: kext → scheduler → NVMe read).

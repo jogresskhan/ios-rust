@@ -1,17 +1,23 @@
 # M5 completion ledger — the bug list to "M5 finished" + the census-table gap analysis
 
 *Generated 2026-10-31 session U (repo df7c84a; frontier 186,277,728 real insns).
+UPDATED 2026-11-01 session V (repo f41bced; frontier 327,096,716 real insns):
+#53 and #54 CLOSED, the FIPS POST COMPLETES, bug #55 open.
 This is the working answer to "list all the bugs till M5 to finish, then from
 that table list the gaps". Sources: BOOT-PLAN.md session blocks, PARITY.md,
 parity.json, tools/re/notes/m5-device-census.md (+ session-N/M updates),
-session-T boot logs, and this session's RE evidence.*
+session-T/V boot logs, and this session's RE evidence.*
 
 ## Where the boot stands
 
-Real 18C66 kernel, pure-Rust A13 interpreter, MMU live, FIPS-POST in progress:
-tests 1-6 PASS (HMAC-SHA1, HMAC-SHA-512, AES-ECB, the reciprocal invariant,
-RSA sign/verify self-check) — **frontier 186,277,768 insns** (was 181,012,637
-before bug #52). Current wall: POST phase 7 (ECDSA) — bug #53.
+Real 18C66 kernel, pure-Rust A13 interpreter, MMU live. **The FIPS POST
+COMPLETES — all 17 tests PASS** (hmac, integrity, indicator, aes_ecb,
+aes_cbc, rsa_sig, ecdsa, ecdh, aes_ccm, aes_cmac, pbkdf, kdf_ctr, aes_gcm,
+aes_xts, tdes_cbc, drbg_ctr, drbg_hmac) — zero panics. **Frontier
+327,096,716 insns** (186.3M before #53; 221.9M before #54). The boot now runs
+~105M insns into post-POST territory (kernel device/IOKit bring-up) and dies
+on bug #55: a FIQ delivery after `msr daifclr` faults the exception frame
+push at the sp.
 
 ## A. The bug list (open items between here and "M5 finished")
 
@@ -19,10 +25,10 @@ before bug #52). Current wall: POST phase 7 (ECDSA) — bug #53.
 
 | # | bug | state | evidence / next move |
 |---:|---|---|---|
-| **#53** | **FIPS-POST ECDSA validation rejects a VALID generated keypair** (phase 7, POST rc −7075 = −75−7000; panic @ insn 186,277,618 — the panic's printed %d is stale x1 garbage, real rc read at the 0x82a05e8 stop) | **OPEN, scoped** | Chain: kext_start 0x82e2248 → fipspost_post 0x829fb3c → fipspost_post_ecdsa 0x82a4b74 → ccec_generate_key_fips 0x82db720 → generate 0x82b0608 **ret 0** → validate 0x82c3cb0 → 0x82c5244/0x82c5020 sets the fail flag. **The generated key is PROVEN CORRECT**: workspace dumps (boot-T-53ws.log) hold d @ws+0x70 and Q @ws+0x10 with **Q == d·G on-curve (python-verified)** — so the VALIDATOR diverges, not the generator. Field cores verified EXACT vs unicorn (mul 0x82b6020 = a·b·R⁻¹ mod p, sqr 0x82b6260, reduce 0x82b6f60 — bit-for-bit QEMU agreement). Remaining suspects: the exponentiation/inverse dispatcher 0x82bd568 (ws-based; the affine-conversion modular inverse), the pairwise-recompute point-mult, or an instruction form unique to that chain. Next: extend the unicorn cross-check (built + working this session) over 0x82c5020's call graph with the dumped d/Q as inputs. |
-| #54+ | The POST's remaining phases 8-17 each may hide one more engine bug (the campaign's measured rate: ~1 real-data bug per 1-6M insns of new frontier) | expected | Phases after ecdsa (per fipspost_post's call table): ecdh 0x82a4660, 0x82aa898, 0x82b3760, 0x82b81a0, 0x82c9b04, 0x82a39f4, 0x82a3ea4, 0x82a5184, 0x82a40b0, 0x82a4394 — per the session-T prediction these include TDES and DRBG tests. Same recipe per bug: stop → dump → KAT with the kernel's own bytes + python/unicorn oracle → fix. |
-| — | panic-formatter fault: after the FIPS panic, the backtrace path faults (sync abort elr=0x7a584fc, ExceptionRecursion guardrail) | cosmetic but masking | The panic machinery dies while printing; fixing it (or modeling the missing debug-data deref) would surface kernel console output — useful for everything after. |
-| — | Earlier ccrsa_sign caller @ insn 156,025,900 (non-POST) never reached its self-check block | probably fixed by #52 | Confirm on the next boot run past 186M. |
+| **#55** | **FIQ-after-daifclr: the exception frame push faults at the sp** (insn 327,096,716): the AST path (bl 0x7b8ba64 from 0x7a8d824) unmasking DAIF via `msr daifclr,#7` @0x7b8ba90 → the engine's post-insn check delivers the FIQ to 0x815f300 → the frame push faults with far = sp (0x…2d1bd80; L3 walk invalid @0x80d82d550) → nested aborts → ExceptionRecursion (stack-descended-into-text), elr ends 0x0 | **OPEN, scoped** | Odd fact: the SAME page accepted the AST fn's own prologue pushes moments earlier. Suspects: (a) the single-bank `self.sp` model (ARM banks SP per EL/SPSel — see MsrSpsel's honesty note); (b) a stuck `timer_fiq_pending` (should the FIQ even be pending?); (c) a stale/mutating page table at VA 0x…2d1b000. Next: stop at 0x815f300 and dump/walk the stack page; single-step the AST-loop bit-2 clear (0x7a4f61c → `str w9,[x8,#0x4c]`) to see why the loop re-takes. |
+| #56+ | Post-POST territory is UNCHARTED (PMGR/IOKit/scheduling bring-up, ~105M insns of it already runs clean) | expected | The campaign's measured rate: ~1 real-data bug per 1-6M insns of new frontier. Expect kext/IOKit service-registration and scheduler-fidelity walls. Same recipe per bug: stop → dump → KAT with the kernel's own bytes + python oracle → fix → re-measure. |
+| — | panic-formatter fault (the pre-#53-era note): the post-panic backtrace faults (elr=0x7a584fc markers) | cosmetic | Only fires on panics; with the POST passing, moot until the next real panic. |
+| — | Earlier ccrsa_sign caller @ insn 156,025,900 (non-POST) never reached its self-check block | probably fixed by #52 | Confirm on a budget run past 156M (the current boots all pass it silently). |
 
 ### A2. M5 acceptance clauses still open (work, not bugs)
 

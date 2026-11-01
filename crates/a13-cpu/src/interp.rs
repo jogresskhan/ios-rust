@@ -1132,7 +1132,24 @@ impl Interpreter {
                 let s = if is64 { signed >> amt } else { ((signed as i32) >> amt) as i64 };
                 (s as u64) & mask
             }
-            ShiftKind::Ror => v.rotate_right(amt % bits),
+            // REAL-DATA BUG #54 (M5/session V): the 32-bit form rotated the
+            // FULL 64-bit value — the wrapped bits landed at bit (64−amt)
+            // (≥33) and the mask then ZEROED them, so every W-register ROR
+            // shifted-operand lost its wrap half (ror #31 read as a plain
+            // >>31). The kernel's 3DES block fn 0x82e2fd0 folds its IP into
+            // `eor w4, w10, w9, ror #31` (0x4A080148) and every Feistel
+            // round into `eor w19, w19, w4, ror #4` — the whole SP-table
+            // DES produced garbage and fipspost_post_tdes_cbc failed (the
+            // engine's KAT output 0xa83c… vs python 3DES-CBC 0x68c0…abff).
+            // Fix: rotate at the OPERATION width (u32::rotate_right already
+            // takes the amount mod 32, matching the W-form semantics).
+            ShiftKind::Ror => {
+                if is64 {
+                    v.rotate_right(amt % 64)
+                } else {
+                    (v as u32).rotate_right(amt) as u64
+                }
+            }
         }
         .wrapping_shr(0) // pacify
         & mask | (if amt >= bits { 0 } else { 0 })
@@ -1648,12 +1665,22 @@ impl Interpreter {
             Insn::FmovGprVec { rt, rn, is64, to_vec } => {
                 // Bit-exact move between GPR and scalar FP register (the low
                 // Vn element). 32-bit: w/s; 64-bit: x/d.
+                // Field roles FLIP with the direction: the decoder's rt is
+                // Rd (bits 4:0) and rn is Rn (bits 9:5) — for to_gpr that
+                // means rt = the GPR and rn = the VECTOR; for to_vec it is
+                // the REVERSE (Rd = the vector, Rn = the GPR).
+                // REAL-DATA BUG #54 (M5/session V): the to_vec branch had
+                // them swapped — `fmov s17, w12` (0x1E270191, the kernel
+                // DES key-schedule repack at 0x82e2d40) read x17 and wrote
+                // v12, leaving v17's lane untouched, so every repacked
+                // subkey lost its S2 key group and fipspost_post_tdes_cbc
+                // failed.
                 if to_vec {
-                    let v = self.r(rt);
+                    let v = self.r(rn);
                     let bytes = if is64 { 8 } else { 4 };
                     let keep = !((1u128 << (bytes * 8)) - 1);
-                    self.v.v[rn as usize] =
-                        (self.v.v[rn as usize] & keep) | ((v as u128) & !keep);
+                    self.v.v[rt as usize] =
+                        (self.v.v[rt as usize] & keep) | ((v as u128) & !keep);
                 } else {
                     let bytes = if is64 { 8 } else { 4 };
                     let mask = (1u128 << (bytes * 8)) - 1;
@@ -6117,6 +6144,23 @@ mod gap_mair_tests {
         assert_eq!(detail, "identical-exception-loop");
         assert_eq!(far, 0x4f0);
         assert!(cycles >= 96);
+    }
+
+    /// BUG #54 pin (real kernel word): `eor w4, w10, w9, ror #31` =
+    /// 0x4AC97D44 — the 3DES IP fold. The 32-bit ROR shifted-operand must
+    /// rotate at 32-bit width: ror32(0x3851165a, 31) = 0x70a22cb4 (NOT
+    /// 0x00000000 — the old 64-bit rotate dropped the wrap half).
+    #[test]
+    fn w_reg_ror_shifted_operand_wraps_at_32_bits() {
+        let mut ram = FakeRam::new(0x8000);
+        ram.load_code(0x1000, &0x4AC97D44u32.to_le_bytes()); // eor w4, w10, w9, ror #31
+        let mut cpu = Interpreter::new(Box::new(ram));
+        cpu.x[10] = 0xa080_0888; // w10 from the captured boot state
+        cpu.x[9] = 0x3851_165a; // w9 from the captured boot state
+        cpu.set_reset_vector(0x1000);
+        let r = cpu.run(InterpBudget { max_insn: 1, max_ns: 1_000_000_000 });
+        assert!(matches!(r.stop, StopReason::Budget));
+        assert_eq!(cpu.x[4], 0xd022_243c, "w4 = w10 ^ ror32(w9,31)");
     }
 
     /// BUG #53 pin (real kernel word): `mov v3.d[1], x5` = 0x4E181CA3 — the

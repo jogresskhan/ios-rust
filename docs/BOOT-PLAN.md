@@ -995,7 +995,45 @@ workspace tests 0 failed):**
   same suspected root, to be confirmed by the repro.
 * Tests: **474 passed / 0 failed**.
 
-## M5 — peripherals the real boot path touches  [~] (session V (2026-11-01): REAL-DATA BUG #53 — the INS-general decode truncated the GPR to 32 bits on `mov v3.d[1], x5`, breaking every NEON ccn_shift (the Barrett q̂/q shifter) — was the ECDSA sign failure; frontier 186,277,728 → 221,859,723; ecdsa AND ecdh, aes_ccm, aes_cmac, pbkdf, kdf_ctr, aes_gcm, aes_xts now ALL PASS; BUG #54 OPEN = fipspost_post_tdes_cbc fails (err −15000); after it: drbg_ctr, drbg_hmac)
+## M5 — peripherals the real boot path touches  [~] (session V (2026-11-01): REAL-DATA BUGS #53+#54 — #53: the INS-general decode truncated the GPR to 32 bits (every NEON ccn_shift/Barrett — the ECDSA sign failure); #54: the 32-bit ROR shifted-operand rotated at 64-bit width AND FmovGprVec to_vec swapped rt/rn (the whole kernel DES — fipspost_post_tdes_cbc); frontier 186,277,728 → 221,859,723 → 327,096,716 — the FIPS POST now COMPLETES with zero panics and the boot advances ~105M insns into post-POST territory (PMGR/IOKit/scheduling) until a NULL-pointer call in the AST path (BUG #55 OPEN))
+
+**Session-V #54 evidence (release build, IOS_RUST_DRAM_MB=1024, 497
+workspace tests 0 failed):**
+
+* **#54 roots (two bugs, the campaign way — staged stop → leaf repro →
+  single-step micro):** the tdes round-1 compare failed (engine
+  0xa83c8128… vs python 3DES-CBC truth 0x68c06c8af772abff for the
+  POST's key/P/IV). The SP tables in runtime == file bit-for-bit. A
+  pure-leaf repro of the kernel 3DES block fn 0x82e2fd0 (tests/
+  fips_tdes_kat.rs — 1016 B verbatim + the 8 SP tables + the captured
+  scheduled keys) reproduced the boot's wrong output exactly
+  (faithful); single-step vs a python model pinned the IP divergence at
+  `eor w4, w10, w9, ror #31` — ROOT 1: interp shift() rotated the
+  FULL 64-bit value for 32-bit ROR operands (wrapped bits landed at
+  bit 64−amt, masked away), so the IP fold AND every Feistel round's
+  `ror #4` lost their wrap halves. Fix: (v as u32).rotate_right(amt).
+  After fix 1 the engine matched the model per-round but the chain
+  still failed; the isolated schedule fn 0x82e2b64 (per-round w5/w4
+  dumps) showed the NEON REPACK (0x82e2d10..58) losing the S2 key
+  group, and the 18-word repack micro (tests/des_repack_micro.rs)
+  caught `fmov s17, w12` writing NOTHING into v17 — ROOT 2:
+  FmovGprVec's to_vec branch had rt/rn swapped (read x17, wrote v12;
+  the to_gpr branch is correct — the field roles flip with direction).
+  Fix: read rn (the GPR), write rt (the vector). Pins: the ENGINE's
+  own schedule→repack→block chain now yields 0x68c06c8af772abff ==
+  pycryptodome, and des_repack_micro pins the repack bit-for-bit.
+* **Frontier move (measured):** 221,859,723 → **327,096,716** —
+  tdes_cbc PASSES, drbg_ctr/drbg_hmac pass (no POST panic at all —
+  the FIPS POST COMPLETES), and the boot runs ~105M further into
+  NEW territory: past the POST into the kernel's device/IOKit bring-up
+  (MMU walks 6637→7167, pac-aut 125k→174k) until a call through a
+  NULL pointer inside the AST path (bl 0x7b8ba64 from 0x7a8d824,
+  pc→0, far=sp, insn 327,096,716) — BUG #55 OPEN (likely an
+  unimplemented service a kext/IOKit path needs).
+* Tests: **497 passed / 0 failed** (+6: the tdes block KAT, the
+  end-to-end engine chain KAT, the schedule-rounds diagnostic, the
+  repack micro [was red twice — once per root], the w_reg_ror interp
+  pin).
 
 **Session-V evidence (release build, IOS_RUST_DRAM_MB=1024, 485
 workspace tests 0 failed):**

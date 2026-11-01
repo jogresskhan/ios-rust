@@ -1,17 +1,40 @@
-# Session V continuation notes (bug #55 — the post-POST NULL call)
+# Session V continuation notes (bug #56 — the sleh panic on the FIQ saved-state)
 
-State: repo at (this commit) after #53 AND #54 CLOSED. Frontier
-327,096,716 — the FIPS POST COMPLETES (zero panics; all 17 tests pass:
-hmac … rsa_sig, ecdsa, ecdh, aes_ccm, aes_cmac, pbkdf, kdf_ctr, aes_gcm,
-aes_xts, tdes_cbc, drbg_ctr, drbg_hmac). The boot then advances ~105M
-insns into NEW territory (PMGR/IOKit/scheduling bring-up) and dies on a
-call through a NULL pointer.
+State: repo at dd17020 after #53, #54 AND #55 CLOSED. Frontier
+800,000,000+ (budget stop, CLEAN) — the FIPS POST COMPLETES (all 17
+tests), the FIQ delivers cleanly, the kernel drives deep into post-POST
+bring-up with active exception traffic. NOTE: #55 was NOT a NULL call —
+the "exception frame push faults" story was the text-guardrail's own
+mis-fire (see BOOT-PLAN); the boot now runs past it.
 
 Workspace: /home/z/my-project/ios-rust-work/repo. RE tools:
 /home/z/my-project/scripts/re/ (kc.py needs /tmp/kc18c66.macho —
 REGENERATE via scripts/kcdump if /tmp was recycled).
 
-## BUG #55 (OPEN): NULL-pointer call in the AST path @327,096,716
+## BUG #56 (OPEN): the sleh unexpected-exception panic @327,096,868
+
+The FIQ (delivered at 327,096,716 on the AST path's `msr daifclr,#7`)
+runs its handler, and the kernel's exception dispatcher PANICS:
+  panic("panic(…) at pc 0x%016llx, lr 0x%016llx (saved state: %p%s)…
+         x0: …") with x1=0xffffffe802d1ba30 (the handler frame!), 
+  x2=0x40800205 (a bogus pc/lr value), x3=0xfffffff007a8d828,
+  called from lr=0xfffffff00816c458 (the exception-return path).
+- The panic's SAVED STATE looks wrong: the saved pc/lr fields contain
+  garbage (0x40800205 is not any kernel VA) — suspect the FIQ
+  take_exception's frame (ELR/SPSR/SP at 0x8160254's save area) or the
+  handler's register-save layout diverges from what sleh expects.
+- THE BOOT CURRENTLY SURVIVES the panic (unrealistically!): the panic
+  path hits the deliberate 0xE7FFDEFF GDB-trap markers (first sync
+  abort elr=0x7a584fc @327,096,978), the engine vectors it, and
+  execution continues to 800M+. Fixing #56 = make the saved state
+  correct so the panic doesn't fire at all.
+- NEXT: (1) stop at 0x8160254 (the FIQ frame push) and dump ELR/SPSR +
+  the saved frame; compare against xnu's exception_save_state layout
+  (the frame at [sp]: x0-x30, q0-q31, elr/spsr/cpsr…); (2) check
+  x2=0x40800205 — where does sleh read the saved pc from? (the frame's
+  elr slot?); (3) the engine's ERET restores from ELR/SPSR_EL1 — the
+  handler's nested exception may have CLOBBERED them (the single-bank
+  model).
 
 - Stop: ExceptionRecursion(stack-descended-into-text), elr=0x0,
   far=0xffffffe802d1bd80 (= the SP of the faulting context — a

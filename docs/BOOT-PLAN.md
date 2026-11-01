@@ -995,7 +995,7 @@ workspace tests 0 failed):**
   same suspected root, to be confirmed by the repro.
 * Tests: **474 passed / 0 failed**.
 
-## M5 — peripherals the real boot path touches  [~] (session V (2026-11-01): REAL-DATA BUGS #53+#54 — #53: the INS-general decode truncated the GPR to 32 bits (every NEON ccn_shift/Barrett — the ECDSA sign failure); #54: the 32-bit ROR shifted-operand rotated at 64-bit width AND FmovGprVec to_vec swapped rt/rn (the whole kernel DES — fipspost_post_tdes_cbc); frontier 186,277,728 → 221,859,723 → 327,096,716 — the FIPS POST now COMPLETES with zero panics and the boot advances ~105M insns into post-POST territory (PMGR/IOKit/scheduling) until a NULL-pointer call in the AST path (BUG #55 OPEN))
+## M5 — peripherals the real boot path touches  [~] (session V (2026-11-01): REAL-DATA BUGS #53+#54 — #53: the INS-general decode truncated the GPR to 32 bits (every NEON ccn_shift/Barrett — the ECDSA sign failure); #54: the 32-bit ROR shifted-operand rotated at 64-bit width AND FmovGprVec to_vec swapped rt/rn (the whole kernel DES — fipspost_post_tdes_cbc); frontier 186,277,728 → 221,859,723 → 327,096,716 → 800,000,000+ (budget, CLEAN) — the FIPS POST COMPLETES with zero panics; #55 (the text-guardrail mis-fire on thread stacks) fixed; the boot now runs deep into post-POST bring-up; BUG #56 OPEN = the sleh unexpected-exception panic at insn 327,096,868 (bogus FIQ saved-state; the boot unrealistically survives it))
 
 **Session-V #54 evidence (release build, IOS_RUST_DRAM_MB=1024, 497
 workspace tests 0 failed):**
@@ -1034,6 +1034,17 @@ workspace tests 0 failed):**
   end-to-end engine chain KAT, the schedule-rounds diagnostic, the
   repack micro [was red twice — once per root], the w_reg_ror interp
   pin).
+* **#55 root + fix (same session):** the "stack-descended-into-text"
+  guardrail compared SP < __TEXT_EXEC base — but xnu's boot AND thread
+  stacks (0xffffffe8…) are numerically BELOW the image (0xfffffff0…)
+  — the first FIQ on a thread stack latched it before the vector code
+  ran. Fix: the range test (min segment VA ≤ SP < max segment end).
+  Pinned by exception_on_thread_stack_does_not_latch_text_guardrail.
+  Frontier 327M → **800M+ budget-clean** (no panic, no recursion; the
+  FIQ handler runs, active exception traffic throughout). **#56 OPEN**:
+  the sleh panic "panic(…) at pc …, lr … (saved state: …)" at insn
+  327,096,868 with a bogus saved frame — the boot only survives it
+  because the engine's vectoring lets the panic-trap escape.
 
 **Session-V evidence (release build, IOS_RUST_DRAM_MB=1024, 485
 workspace tests 0 failed):**

@@ -36,8 +36,8 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "GPL-2.0-or-later"
-authors = ["20kiwy"]
-repository = "https://github.com/20kiwy/ios-rust"
+authors = ["jogresskhan"]
+repository = "https://github.com/jogresskhan/ios-rust"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""s3_backup.py — local-first backup of the ios-rust project to S3 (IDrive e2).
+"""s3_backup.py — backup of the ios-rust project to S3 (IDrive e2).
 
-GitHub push is blocked (account suspended) — this script is the remote-storage
-replacement. It works with any S3-compatible endpoint (IDrive e2, AWS, Wasabi,
-Backblaze B2 S3, MinIO …).
+The GitHub mirror is live again (jogresskhan/ios-rust — the old 20kiwy
+account stayed suspended); this script is the SECOND remote mirror, the
+storage-of-record for the research vault. It works with any S3-compatible
+endpoint (IDrive e2, AWS, Wasabi, Backblaze B2 S3, MinIO …).
 
 Configuration comes from the environment (see ~/.config/ios-rust/s3.env):
 
@@ -63,6 +64,7 @@ REPO_DIR = next(
         "/home/z/work/ios-rust",
         "/home/z/my-project/ios-rust/repo",
         "/home/z/my-project/ios-rust-work/repo",
+        "/home/z/ios-rust",  # 2026-11-01 session-V close-out: sandbox recycled again
     ] if p and Path(p).joinpath(".git").exists()),
     "/home/z/work/ios-rust",
 )

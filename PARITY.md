@@ -27,14 +27,20 @@ implemented · **60** done once/offline · **50** partial · **40** reader/struc
 
 | item | counterpart | % | gate to flip |
 |---|---|---|---|
-| AIC v2 (enable/pending/INFO) | hw/intc/apple_aic.c | 35 | golden-trace IPI routing + preemption |
-| DART (TCR/TTBR + 4-level walker) | dart.c / sweet_dart.c | 40 | replay captured PTE walks (dart-walker-gate) |
-| ADP v4 DisplayPipe frame contract | apple_displaypipe_v4.c | 45 | real guest trace replay (M3a probe) |
+(percentages refreshed to the session-H measured state — synced with
+`parity.json` after the ADT reg LE fix (bug #21) + arm-io ranges translation;
+full per-device rows live in the apple-soc inventory + Layer 2.9)
+
+| item | counterpart | % | gate to flip |
+|---|---|---|---|
+| AIC v2 (enable/pending/INFO) | hw/intc/apple_aic.c | 55 | golden-trace IPI routing + preemption |
+| DART (TCR/TTBR + 4-level walker) | dart.c / sweet_dart.c | 55 | replay captured PTE walks (dart-walker-gate) |
+| ADP v4 DisplayPipe frame contract | apple_displaypipe_v4.c | 50 | real guest trace replay (M3a probe) |
 | UART console | apple_uart.c | 55 | flow control + IRQ ladder |
 | WDT | apple_wdt.c | 60 | timeout sequencing |
-| MIPI-DSI (GEN_HDR + FIFO + acks) | synopsys_mipi_dsim.c + sweet_mipi.c | 30 | D-PHY link state machine (the #1 known engine gap) |
-| ANS2/NVMe queue skeleton | ans.c | 25 | Apple NVMe command format port |
-| Machine assembly (7 devices on bus) | t8030.c init flow | 50 | verify symbolic bases vs t8030.c, then wire IRQs |
+| MIPI-DSI (GEN_HDR + FIFO + acks) | synopsys_mipi_dsim.c + sweet_mipi.c | 90 | D-PHY link state machine (the #1 known engine gap) |
+| ANS2/NVMe queue skeleton | ans.c | 75 | Apple NVMe command format port |
+| Machine assembly (real-ADT attach, 59/105 modeled) | t8030.c init flow | 90 | verify symbolic bases vs t8030.c, then wire IRQs |
 
 ## Layer 2.5 — host restore stack (usbmux → restored → ASR → TSS)
 
@@ -45,7 +51,7 @@ own `restored_external` 18A5351d decompilation (RE-FINDINGS.md).
 
 | item | counterpart | % | gate to flip |
 |---|---|---|---|
-| plist_lite XML codec (read+write, envelope, base64, entities) | libplist plist_to_xml/plist_from_xml | 90 | byte-capture diff vs real usbmuxd/restored traffic |
+| plist_lite XML codec (read+write, envelope, base64, entities) | libplist plist_to_xml/plist_from_xml | 95 | byte-capture diff vs real usbmuxd/restored traffic |
 | usbmux host client (Listen/Connect tunnel, plist + legacy events, port swap) | libusbmuxd | 90 | session capture against a real usbmuxd socket |
 | restored protocol client v14 (Hello, QueryValue, StartRestore, Status/Error/Progress, checkpoint decode) | libimobiledevice restored.c | 75 | replay a captured device Status stream end-to-end |
 | ASR host (Initiate → packet-info → OOBData → Payload → chunked image push) | idevicerestore asr.c | 90 | 7.38 GB rootfs push replay with chunk checksums |
@@ -65,13 +71,14 @@ QEMU-case-anchored; PAC is a QARMA-model (Apple's key schedule is private).
 
 | item | % | note |
 |---|---|---|
-| TCG-in-Rust AArch64 exec loop (interpreter) | **85** | runs the full named-group ISA + integer/atomics; accel backends still 0 |
+| TCG-in-Rust AArch64 exec loop (interpreter) | **90** | runs the full named-group ISA + integer/atomics; session V: the kernel FIPS POST (all 17 crypto KAT suites) passes END-TO-END on real 18C66 bytes; 800M+ insn budget-clean boot; accel backends still 0 |
 | instruction decode: AES/PMULL, CRC32, LSE | 90 | goldens + check-value/FIPS-197 exec tests |
 | FP16 / DOTPROD / RDM / FCMA / JSCVT | 85 | vector+scalar, f16 RTNE, SDOT lane sums, FJCVTZS ToInt32 |
 | PAC / BTI / AMUv1 / TLBI-range / FCADD | 80–85 | PAC sign/verify round-trip; BTI/DGH hints; TLBI range operand decode |
 | SHA512 / SHA3 / SM3 / SM4 | 80–85 | FIPS/GB/T round-function vectors |
-| SEP real-firmware core + SEP-SIM | 0 | Inferno's superpower; next wave |
-| PMGR / AOP / SMC / AES engine / PCIe / USB-OTG / touch / audio | 0 | next device wave |
+| SEP simulator control-ops (SEP-SIM) | 90 | session-H completion wave; control-op set test-enforced |
+| SEP real-firmware core (sep.c 5673L) | 0 | Inferno's superpower; next wave |
+| device wave: PMGR 45 / AOP 45 / SMC 50 / AES engine 90 / APCIE 75 / Type-C-OTG 75 / touch (mt_spi) 75 / audio (MCA) 90 | — | the apple-soc completion wave landed these (Layer 2.9 + inventory); per-device gates in parity.json |
 
 ## Layer 4 — the flow
 
@@ -1377,3 +1384,97 @@ diff at the sign/verify compare (boot insn 180,993,288, sign ret −27).
   exact semantics still open), the point-mult dispatcher 0x82bd568,
   and the affine-conversion modular inverse.
 * 481 tests 0 failed (+5 fips_rsa_kat, +2 fips_ecdsa_kat).
+
+## Session V (2026-11-01) — bugs #53/#54/#55 CLOSED: the FIPS POST COMPLETES; frontier 800M+ budget-clean
+
+Three more REAL-DATA engine bugs fixed in one session (plus the session-U
+twin merge), each the campaign way — stop → dump → KAT with the kernel's own
+bytes → python oracle → fix → re-measure:
+
+* **#53 (fixed): the INS-general decode truncated the GPR source to 32
+  bits.** decode.rs keyed `VInsGpr` src64 on bit 31 — INS (general) has NO
+  bit-31 width selector; the GPR is read at the ELEMENT size
+  (`MOV Vd.Ts[i], Rs.Ts`, same Ts; clang `mov v0.d[1],x1` = 0x4E181C20 also
+  has bit31=0). This broke every NEON ccn_shift in the generic mod-n
+  Barrett chain — the ECDSA sign failure (fipspost_post_ecdsa −7075:
+  s ≠ k⁻¹(e+r·d) mod n while keygen, k·G and r were all correct — the mod-n
+  path is generic mul+Barrett, mod-p point math is special-cased P-256).
+  Chain: staged stops around the sign-tail proved the pre-ladder state
+  correct; MUL#1 k·w and MUL#2 e·w over the SAME operand b yielded different
+  effective multipliers ⇒ the products themselves were wrong;
+  tests/fips_modmul_kat.rs (the modmul dispatcher 0x82dfb40 from captured
+  zp/operands — no scheduler/mutexes; PagedRam store() auto-creates pages)
+  reproduced the boot's wrong k′ exactly; stage-bisect pinned the first
+  divergence at q̂ = product>>255 limb3 (the (next<<1) contribution lost
+  its HIGH 32 bits); tests/neon_shift_micro.rs (the exact 11-word loop
+  0x82e20d0..fc) caught `mov v3.d[1], x5` (0x4E181CA3) inserting only the
+  low half of x5. FIX: `src64 = (tz == 3)`; UMOV/SMOV bit-31 dest64 is
+  genuine — untouched; VDupGpr already size-masked — untouched. Frontier
+  186,277,728 → 221,859,723: rsa_sig, ecdsa, ecdh, aes_ccm, aes_cmac,
+  pbkdf, kdf_ctr, aes_gcm, aes_xts ALL PASS (a clean 200M-budget run had
+  zero panics).
+* **#54 (fixed): TWO engine bugs broke the whole kernel DES**
+  (fipspost_post_tdes_cbc, err −15000). (1) The 32-bit ROR shifted-operand
+  rotated the FULL 64-bit value — the wrapped bits landed at bit (64−amt)
+  and the width mask zeroed them, so `eor w4, w10, w9, ror #31` (0x4AC97D44,
+  the 3DES IP fold at 0x82e3034) read as a plain `>>31` and every Feistel
+  round's `ror #4` lost its wrap half; fix: rotate at the OPERATION width
+  (`(v as u32).rotate_right(amt)` — u32 already mods 32). (2) FmovGprVec's
+  to_vec branch had rt/rn SWAPPED — `fmov s17, w12` (0x1E270191, the
+  key-schedule repack at 0x82e2d40) read x17 and wrote v12, leaving v17's
+  lane-0 stale, so every repacked subkey lost its S2 key group (the to_gpr
+  branch was correct — the field roles flip with direction). Chain: staged
+  stops pinned the failing compare (round-1 output vs python 3DES-CBC truth
+  for the captured key/P/IV); tests/fips_tdes_kat.rs (1016 B of the block
+  fn 0x82e2fd0 verbatim + the 8 SP tables + the captured scheduled keys)
+  reproduced the boot's wrong output exactly; the isolated schedule fn
+  0x82e2b64 + tests/des_repack_micro.rs (single-step v-reg dumps) caught the
+  fmov writing nothing into v17. End-to-end pin: the ENGINE's own
+  schedule(K1,K2,K3)→repack→block chain produces 0x68c06c8af772abff ==
+  pycryptodome 3DES-CBC. Frontier 221,859,723 → 327,096,716: tdes_cbc
+  PASSES and **the whole FIPS POST COMPLETES with NO panic — all 17 tests**
+  (hmac, integrity, indicator, aes_ecb, aes_cbc, rsa_sig, ecdsa, ecdh,
+  aes_ccm, aes_cmac, pbkdf, kdf_ctr, aes_gcm, aes_xts, tdes_cbc, drbg_ctr,
+  drbg_hmac).
+* **#55 (fixed): the 'stack-descended-into-text' guardrail mis-fired on
+  thread stacks.** It compared SP against the __TEXT_EXEC base with a plain
+  `<` — but xnu's boot AND secondary-thread stacks live at
+  0xffffffe8xxxxxxxx, NUMERICALLY BELOW the kernel image
+  (0xfffffff0xxxxxxxx) — so the FIRST async FIQ delivered on a thread stack
+  (the AST path's `msr daifclr,#7` at 0x7b8ba90, insn 327,096,716) latched
+  the guardrail and killed the boot BEFORE the vector code ran (zero watch
+  hits, the trace ends at the msr, elr captured pre-update = 0 — the whole
+  'exception frame push faults' story was the latch's own report, not a
+  real fault). Fix: the RANGE test — `text_kva_range = (min segment VA ..
+  max segment end)`; SP inside the image latches (the session-H storm's
+  terminal state preserved), legitimate stacks never do. Pinned by
+  `exception_on_thread_stack_does_not_latch_text_guardrail`. Frontier
+  327,096,716 → **800,000,000+ (budget stop, CLEAN — no panic, no
+  recursion)**: the FIQ delivers, the handler runs, the kernel drives on
+  deep into post-POST bring-up (MMU walks 7167→7179, active exception
+  traffic at 800M).
+* **#56 OPEN (the sole blocker): the sleh unexpected-exception panic on the
+  FIQ saved-state** (insn 327,096,868): the FIQ handler runs, the kernel's
+  exception dispatcher panics `panic(…) at pc 0x…, lr 0x… (saved state: …)`
+  with a bogus saved frame (x1=0x…d1ba30 the handler frame, x2=0x40800205 —
+  not any kernel VA; called from lr=0x816c458 the exception-return path).
+  The boot currently SURVIVES it only because the engine's vectoring lets
+  the panic-trap escape (unrealistic recovery). Suspects: the FIQ
+  take_exception's saved ELR/SPSR or the handler frame layout (0x8160254:
+  `sub sp 0x350`; the x0-x30/q0-q31 save block at 0x816041c) diverges from
+  what sleh reads; nested-exception clobber of ELR/SPSR in the single-bank
+  model. Full handoff in session-V/NEXT-BLOCK.md.
+* **Twin merge:** absorbed the session-U workstream's unique assets
+  (fips_rsa_kat.rs + rsa_kat_data.rs — the kernel ccn_add 0x82cbcd0 KAT +
+  the RSA key-dump decode (p@+0x438/q@+0x558/dp@+0x660/dq@+0x6e0/qinv@+0x760,
+  e=3, CRT oracle); fips_ecdsa_kat.rs + ecdsa_kat_data.rs — the P-256 field
+  cores mul 0x82b6020/sqr 0x82b6260 Montgomery-verified; the 17-phase
+  err=rc−1000·phase POST error map (phase 7 = ecdsa; the panic %d is STALE
+  x1); docs/M5-BUGS-AND-GAPS.md) — both lines had fixed #52 independently
+  (equivalent carry forms; kept this line's res<=a/res<a with a merge
+  note); the session-U ground-truth typo (stage_check k constant
+  69f3c1a9 misread as 69f38c1a) corrected and re-verified.
+* `cargo test --workspace`: **498 passed / 0 failed / 4 ignored** —
+  re-verified on the close-out re-run of repo d2def1d (the ledger numbers
+  below updated to match: parity.json tests 498/498, module rows for the
+  interpreter + real-kernel boot stage refreshed, overall 74.8%).

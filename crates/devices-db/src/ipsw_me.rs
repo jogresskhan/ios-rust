@@ -10,7 +10,7 @@ use anyhow::Context;
 use serde::Deserialize;
 
 const BASE_URL: &str = "https://api.ipsw.me/v4";
-const USER_AGENT: &str = "ios-rust (github.com/20kiwy/ios-rust)";
+const USER_AGENT: &str = "ios-rust (github.com/jogresskhan/ios-rust)";
 
 /// A firmware (IPSW) build as reported by ipsw.me.
 #[derive(Debug, Clone, Deserialize)]

@@ -7,7 +7,7 @@ bring-up with active exception traffic. NOTE: #55 was NOT a NULL call —
 the "exception frame push faults" story was the text-guardrail's own
 mis-fire (see BOOT-PLAN); the boot now runs past it.
 
-Workspace: /home/z/my-project/ios-rust-work/repo. RE tools:
+Workspace: /home/z/ios-rust (sandbox recycled again — 2026-11-01 close-out). RE tools:
 /home/z/my-project/scripts/re/ (kc.py needs /tmp/kc18c66.macho —
 REGENERATE via scripts/kcdump if /tmp was recycled).
 

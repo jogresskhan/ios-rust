@@ -1,8 +1,10 @@
 # M5 completion ledger — the bug list to "M5 finished" + the census-table gap analysis
 
 *Generated 2026-10-31 session U (repo df7c84a; frontier 186,277,728 real insns).
-UPDATED 2026-11-01 session V (repo f41bced; frontier 327,096,716 real insns):
-#53 and #54 CLOSED, the FIPS POST COMPLETES, bug #55 open.
+UPDATED 2026-11-01 session V close-out (repo d2def1d; frontier 800,000,000+
+real insns, budget stop CLEAN): #53, #54 AND #55 CLOSED, the FIPS POST
+COMPLETES (all 17 tests), bug #56 (the sleh FIQ saved-state panic) is the
+sole open blocker.
 This is the working answer to "list all the bugs till M5 to finish, then from
 that table list the gaps". Sources: BOOT-PLAN.md session blocks, PARITY.md,
 parity.json, tools/re/notes/m5-device-census.md (+ session-N/M updates),
@@ -14,10 +16,14 @@ Real 18C66 kernel, pure-Rust A13 interpreter, MMU live. **The FIPS POST
 COMPLETES — all 17 tests PASS** (hmac, integrity, indicator, aes_ecb,
 aes_cbc, rsa_sig, ecdsa, ecdh, aes_ccm, aes_cmac, pbkdf, kdf_ctr, aes_gcm,
 aes_xts, tdes_cbc, drbg_ctr, drbg_hmac) — zero panics. **Frontier
-327,096,716 insns** (186.3M before #53; 221.9M before #54). The boot now runs
-~105M insns into post-POST territory (kernel device/IOKit bring-up) and dies
-on bug #55: a FIQ delivery after `msr daifclr` faults the exception frame
-push at the sp.
+800,000,000+ insns (budget stop, CLEAN — no panic, no recursion)** (327.1M
+before the #55 fix; 221.9M before #54; 186.3M before #53). The FIQ delivers
+and its handler runs (the #55 "exception frame push faults" story was the
+text-guardrail's own mis-fire — xnu thread stacks at 0xffffffe8… are
+numerically BELOW the kernel image; now a range test). The boot runs deep
+into post-POST bring-up (kernel device/IOKit/scheduling) and hits bug #56:
+the sleh unexpected-exception panic on the FIQ saved-state — which the boot
+currently SURVIVES only via panic-trap vectoring (unrealistic).
 
 ## A. The bug list (open items between here and "M5 finished")
 

@@ -206,9 +206,9 @@ capstone/keystone-only.
    (`decode sweep %`, top remaining classes with counts).
 4. Real-data findings (bugs the fixtures exposed) written into
    PARITY.md — numbered, with the fixture that exposed them.
-5. **Back up to S3 — this is now the storage of record.** The GitHub
-   account (20kiwy) is suspended; until it is restored, push every local
-   commit to IDrive e2 instead:
+5. **Back up to S3 — the second mirror.** The GitHub mirror is live again
+   (jogresskhan/ios-rust; the old 20kiwy account stayed suspended) — push
+   there AND to the IDrive e2 vault:
 
    ```bash
    source ~/.config/ios-rust/s3.env        # endpoint/region/keys (NOT in the repo)
